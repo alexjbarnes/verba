@@ -1,0 +1,7 @@
+{
+  "git": {
+    "sha1": "12e81142d6fac7182a2cea847a4b7f2170a086a4",
+    "dirty": true
+  },
+  "path_in_vcs": "sherpa-onnx/rust/sherpa-onnx-sys"
+}

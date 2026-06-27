@@ -3751,6 +3751,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "piper-plus-g2p"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "74d64cc11101a4f751747e0ba15a3a165d584b62a98ec9462a314ef39f19ca88"
+dependencies = [
+ "regex",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
 name = "pkg-config"
 version = "0.3.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4803,8 +4816,6 @@ dependencies = [
 [[package]]
 name = "sherpa-onnx-sys"
 version = "1.12.34"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ed0a75557827c187845eb004afdaab8151460152904c42746c9d28d68b89a44c"
 dependencies = [
  "bzip2",
  "tar",
@@ -6064,6 +6075,7 @@ dependencies = [
  "dirs",
  "enigo",
  "env_logger",
+ "flate2",
  "futures-util",
  "hound",
  "jni",
@@ -6072,12 +6084,14 @@ dependencies = [
  "ndarray",
  "nlprule",
  "ort",
+ "piper-plus-g2p",
  "reqwest 0.12.28",
  "rustfft",
  "serde",
  "serde_json",
  "sherpa-onnx",
  "symspell",
+ "tar",
  "tauri",
  "tauri-build",
  "tauri-plugin-global-shortcut",

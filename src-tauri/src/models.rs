@@ -215,7 +215,35 @@ impl ModelManager {
         }
     }
 
-    fn find_file_by_role(&self, files: &[ModelFile], role: &str) -> Option<std::path::PathBuf> {
+    pub fn tts_model_config(&self, id: &str) -> Option<crate::tts::TtsModelConfig> {
+        let model = self.find(id)?;
+        if !self.is_downloaded(id) {
+            return None;
+        }
+
+        let path = |role: &str| -> Option<String> {
+            self.find_file_by_role(&model.files, role)
+                .map(|p| p.to_string_lossy().into_owned())
+        };
+
+        match model.engine.as_str() {
+            "tts_piper_ort" => {
+                Some(crate::tts::TtsModelConfig::PiperOrt {
+                    model: path("model")?,
+                    config: path("config")?,
+                })
+            }
+            _ => None,
+        }
+    }
+
+    pub fn is_tts_model(&self, id: &str) -> bool {
+        self.find(id)
+            .map(|m| m.engine.starts_with("tts_"))
+            .unwrap_or(false)
+    }
+
+    pub fn find_file_by_role(&self, files: &[ModelFile], role: &str) -> Option<std::path::PathBuf> {
         files
             .iter()
             .find(|f| f.role == role)
@@ -482,6 +510,11 @@ const HF_NEMO_CTC_SMALL: &str =
     "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-ctc-en-conformer-small/resolve/main";
 const HF_NEMO_CTC_MEDIUM: &str =
     "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-ctc-en-conformer-medium/resolve/main";
+// RHASSPY source ships the `.onnx.json` sidecar (sample_rate, num_speakers,
+// phoneme_id_map) the ort/piper-plus-g2p path needs; the csukuangfj mirror does
+// not, so the GPL-free Piper entry downloads from here instead.
+const HF_PIPER_RHASSPY_LIBRITTS: &str =
+    "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/libritts_r/medium";
 const HF_NEMO_CTC_LARGE: &str =
     "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-ctc-en-conformer-large/resolve/main";
 
@@ -667,6 +700,18 @@ fn builtin_registry() -> Vec<ModelDef> {
                 ModelFile { url: format!("{HF_PARAKEET_V2_INT8}/decoder.int8.onnx"), rel_path: "parakeet/v2-int8/decoder.int8.onnx".into(), bytes: 7_257_753, role: "decoder".into() },
                 ModelFile { url: format!("{HF_PARAKEET_V2_INT8}/joiner.int8.onnx"), rel_path: "parakeet/v2-int8/joiner.int8.onnx".into(), bytes: 1_739_080, role: "joiner".into() },
                 ModelFile { url: format!("{HF_PARAKEET_V2_INT8}/tokens.txt"), rel_path: "parakeet/v2-int8/tokens.txt".into(), bytes: 9_384, role: "tokens".into() },
+            ],
+        },
+        // ── TTS Models ──
+        ModelDef {
+            id: "tts-piper-libritts".into(),
+            name: "Piper (fast)".into(),
+            desc: "Text-to-speech \u{2014} fastest (~10x real-time on CPU), many voices, ~79 MB".into(),
+            engine: "tts_piper_ort".into(),
+            size: "~79 MB".into(),
+            files: vec![
+                ModelFile { url: format!("{HF_PIPER_RHASSPY_LIBRITTS}/en_US-libritts_r-medium.onnx"), rel_path: "tts/piper-libritts/model.onnx".into(), bytes: 78_581_047, role: "model".into() },
+                ModelFile { url: format!("{HF_PIPER_RHASSPY_LIBRITTS}/en_US-libritts_r-medium.onnx.json"), rel_path: "tts/piper-libritts/model.onnx.json".into(), bytes: 20_123, role: "config".into() },
             ],
         },
     ]

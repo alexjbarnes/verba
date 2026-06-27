@@ -31,7 +31,7 @@ const pageTitle = document.getElementById('page-title');
 
 const tabLabels = {
   history: 'History', models: 'Models', audio: 'Audio',
-  snippets: 'Snippets', general: 'Settings', debug: 'Debug',
+  snippets: 'Snippets', reader: 'Reader', general: 'Settings', debug: 'Debug',
 };
 
 function openSidebar() {
@@ -67,6 +67,7 @@ document.querySelectorAll('.nav-btn').forEach(btn => {
     if (btn.dataset.tab === 'models') loadModels();
     if (btn.dataset.tab === 'general') loadVocab();
     if (btn.dataset.tab === 'snippets') loadSnippets();
+    if (btn.dataset.tab === 'reader') updateTtsPanel();
   });
 });
 
@@ -397,6 +398,11 @@ async function loadModels() {
     .map(renderModelRow)
     .join('');
 
+  document.getElementById('tts-models').innerHTML = models
+    .filter(m => m.engine.startsWith('tts_'))
+    .map(renderModelRow)
+    .join('');
+
   // Attach download button handlers
   document.querySelectorAll('.dl-btn').forEach(btn => {
     btn.addEventListener('click', async () => {
@@ -530,21 +536,44 @@ async function loadConfig() {
   document.getElementById('cfg-haptic').checked = cfg.haptic_feedback;
   // Restore audio device selection
   document.getElementById('audio-device').value = cfg.device_index;
+  document.getElementById('cfg-threads').value = String(cfg.threads);
 
   // Auto-save on change
   document.getElementById('cfg-haptic').addEventListener('change', saveConfig);
   document.getElementById('audio-device').addEventListener('change', saveConfig);
+  document.getElementById('cfg-threads').addEventListener('change', applyThreads);
 }
 
 async function saveConfig() {
   const cfg = await invoke('get_config');
   cfg.device_index = parseInt(document.getElementById('audio-device').value, 10);
   cfg.haptic_feedback = document.getElementById('cfg-haptic').checked;
+  cfg.threads = parseInt(document.getElementById('cfg-threads').value, 10);
   try {
     await invoke('save_config', { cfg });
   } catch (err) {
     console.error('Save failed:', err);
     showToast(`Save failed: ${err}`);
+  }
+}
+
+// The thread count is read when the TTS engine is created, so persist it and
+// reload the loaded model to apply immediately (and surface the new count in
+// the debug log's "TTS loading with N threads" line).
+async function applyThreads() {
+  await saveConfig();
+  const n = document.getElementById('cfg-threads').value;
+  if (!ttsLoadedModelId) {
+    showToast(`Threads set to ${n} — applies when you load a TTS model`);
+    return;
+  }
+  try {
+    showToast(`Applying ${n} threads — reloading model...`);
+    await invoke('tts_stop');
+    await invoke('tts_load', { id: ttsLoadedModelId });
+    showToast('Threads applied — generate again to compare RTF');
+  } catch (err) {
+    showToast('Reload failed: ' + err);
   }
 }
 
@@ -899,6 +928,419 @@ listen('snippet-no-match', (event) => {
   showSnippetPicker(text, snippets || []);
 });
 
+// ── Reader (TTS) tab ──
+
+const TTS_VOICE_PRESETS = {
+  'tts-kokoro-v1': [
+    { sid: 0, label: 'Alloy (EN-US F)' },
+    { sid: 1, label: 'Aoede (EN-US F)' },
+    { sid: 2, label: 'Bella (EN-US F)' },
+    { sid: 3, label: 'Heart (EN-US F)' },
+    { sid: 4, label: 'Jessica (EN-US F)' },
+    { sid: 5, label: 'Kore (EN-US F)' },
+    { sid: 6, label: 'Nicole (EN-US F)' },
+    { sid: 7, label: 'Nova (EN-US F)' },
+    { sid: 8, label: 'River (EN-US F)' },
+    { sid: 9, label: 'Sarah (EN-US F)' },
+    { sid: 10, label: 'Sky (EN-US F)' },
+    { sid: 11, label: 'Adam (EN-US M)' },
+    { sid: 12, label: 'Echo (EN-US M)' },
+    { sid: 13, label: 'Eric (EN-US M)' },
+    { sid: 14, label: 'Fenrir (EN-US M)' },
+    { sid: 15, label: 'Liam (EN-US M)' },
+    { sid: 16, label: 'Michael (EN-US M)' },
+    { sid: 17, label: 'Onyx (EN-US M)' },
+    { sid: 18, label: 'Puck (EN-US M)' },
+    { sid: 19, label: 'Santa (EN-US M)' },
+    { sid: 20, label: 'Alice (EN-GB F)' },
+    { sid: 21, label: 'Emma (EN-GB F)' },
+    { sid: 22, label: 'Isabella (EN-GB F)' },
+    { sid: 23, label: 'Lily (EN-GB F)' },
+    { sid: 24, label: 'Daniel (EN-GB M)' },
+    { sid: 25, label: 'Fable (EN-GB M)' },
+    { sid: 26, label: 'George (EN-GB M)' },
+    { sid: 27, label: 'Lewis (EN-GB M)' },
+    { sid: 28, label: 'Dora (ES F)' },
+    { sid: 29, label: 'Alex (ES M)' },
+    { sid: 30, label: 'Siwis (FR F)' },
+    { sid: 31, label: 'Alpha (HI F)' },
+    { sid: 32, label: 'Beta (HI F)' },
+    { sid: 33, label: 'Omega (HI M)' },
+    { sid: 34, label: 'Psi (HI M)' },
+    { sid: 35, label: 'Sara (IT F)' },
+    { sid: 36, label: 'Nicola (IT M)' },
+    { sid: 37, label: 'Alpha (JA F)' },
+    { sid: 38, label: 'Gongitsune (JA F)' },
+    { sid: 39, label: 'Nezumi (JA F)' },
+    { sid: 40, label: 'Tebukuro (JA F)' },
+    { sid: 41, label: 'Kumo (JA M)' },
+    { sid: 42, label: 'Dora (PT F)' },
+    { sid: 43, label: 'Alex (PT M)' },
+    { sid: 44, label: 'Santa (PT M)' },
+    { sid: 45, label: 'Xiaobei (ZH F)' },
+    { sid: 46, label: 'Xiaoni (ZH F)' },
+    { sid: 47, label: 'Xiaoxiao (ZH F)' },
+    { sid: 48, label: 'Xiaoyi (ZH F)' },
+    { sid: 49, label: 'Yunjian (ZH M)' },
+    { sid: 50, label: 'Yunxi (ZH M)' },
+    { sid: 51, label: 'Yunxia (ZH M)' },
+    { sid: 52, label: 'Yunyang (ZH M)' },
+  ],
+};
+
+let ttsLoadedModelId = null;
+let ttsLoadedEngine = null;
+
+async function updateTtsPanel() {
+  const models = await invoke('list_models');
+  const ttsModels = models.filter(m => m.engine.startsWith('tts_'));
+  const select = document.getElementById('tts-model-select');
+  const actionBtn = document.getElementById('tts-model-action');
+  const playBtn = document.getElementById('tts-play');
+  const info = await invoke('tts_info');
+
+  select.innerHTML = ttsModels.map(m => {
+    const suffix = m.status === 'not_downloaded' ? ` (${m.size})` : '';
+    const loaded = info.loaded && ttsLoadedModelId === m.id;
+    const tag = loaded ? ' [loaded]' : '';
+    return `<option value="${m.id}" data-status="${m.status}" data-engine="${m.engine}">${m.name}${suffix}${tag}</option>`;
+  }).join('');
+
+  if (ttsModels.length === 0) {
+    select.innerHTML = '<option value="">No TTS models available</option>';
+    actionBtn.disabled = true;
+    playBtn.disabled = true;
+    return;
+  }
+
+  if (info.loaded && ttsLoadedModelId) {
+    select.value = ttsLoadedModelId;
+  }
+
+  updateTtsActionBtn();
+  updateTtsVoices(info);
+}
+
+function updateTtsActionBtn() {
+  const select = document.getElementById('tts-model-select');
+  const actionBtn = document.getElementById('tts-model-action');
+  const playBtn = document.getElementById('tts-play');
+  const opt = select.selectedOptions[0];
+  if (!opt || !opt.value) {
+    actionBtn.disabled = true;
+    return;
+  }
+  const status = opt.dataset.status;
+  const isCurrentLoaded = ttsLoadedModelId === opt.value;
+
+  if (isCurrentLoaded) {
+    actionBtn.textContent = 'Loaded';
+    actionBtn.disabled = true;
+    playBtn.disabled = false;
+  } else if (status === 'downloaded' || status === 'active') {
+    actionBtn.textContent = 'Load';
+    actionBtn.disabled = false;
+    playBtn.disabled = true;
+  } else if (status === 'downloading') {
+    actionBtn.textContent = 'Downloading...';
+    actionBtn.disabled = true;
+    playBtn.disabled = true;
+  } else {
+    actionBtn.textContent = 'Download';
+    actionBtn.disabled = false;
+    playBtn.disabled = true;
+  }
+}
+
+async function updateTtsVoices(info) {
+  const voiceRow = document.getElementById('tts-voice-row');
+  const voiceSelect = document.getElementById('tts-voice-select');
+  if (!info.loaded || info.num_speakers <= 1) {
+    voiceRow.classList.add('hidden');
+    return;
+  }
+
+  voiceRow.classList.remove('hidden');
+  const prevVal = voiceSelect.value;
+  const count = info.num_speakers;
+  const presets = TTS_VOICE_PRESETS[ttsLoadedModelId] || [];
+
+  // Cap the numbered list: some models (e.g. Piper LibriTTS) expose ~900
+  // speakers, which would build a huge sluggish dropdown.
+  const MAX_VOICES = 60;
+  const shown = Math.min(count, MAX_VOICES);
+  let html = presets
+    .filter(v => v.sid < count)
+    .map(v => `<option value="${v.sid}">${v.label}</option>`)
+    .join('');
+  for (let i = presets.length; i < shown; i++) {
+    html += `<option value="${i}">Speaker ${i}</option>`;
+  }
+  voiceSelect.innerHTML = html;
+
+  const custom = await invoke('tts_list_custom_voices');
+  if (custom.length > 0) {
+    voiceSelect.innerHTML += '<option disabled>-- Custom --</option>';
+    for (const name of custom) {
+      voiceSelect.innerHTML += `<option value="custom:${name}">${name}</option>`;
+    }
+  }
+
+  if (prevVal) voiceSelect.value = prevVal;
+}
+
+document.getElementById('tts-model-select').addEventListener('change', updateTtsActionBtn);
+
+document.getElementById('tts-model-action').addEventListener('click', async () => {
+  const select = document.getElementById('tts-model-select');
+  const actionBtn = document.getElementById('tts-model-action');
+  const id = select.value;
+  if (!id) return;
+
+  const opt = select.selectedOptions[0];
+  const status = opt.dataset.status;
+
+  if (status === 'downloaded' || status === 'active') {
+    actionBtn.textContent = 'Loading...';
+    actionBtn.disabled = true;
+    try {
+      await invoke('tts_load', { id });
+      ttsLoadedModelId = id;
+      ttsLoadedEngine = opt.dataset.engine;
+      await updateTtsPanel();
+    } catch (err) {
+      showToast('TTS load failed: ' + err);
+      actionBtn.textContent = 'Load';
+      actionBtn.disabled = false;
+    }
+  } else {
+    actionBtn.textContent = 'Downloading...';
+    actionBtn.disabled = true;
+    document.getElementById('tts-dl-progress').classList.remove('hidden');
+    try {
+      await invoke('download_model', { id });
+      document.getElementById('tts-dl-progress').classList.add('hidden');
+      await updateTtsPanel();
+    } catch (err) {
+      showToast('Download failed: ' + err);
+      document.getElementById('tts-dl-progress').classList.add('hidden');
+      actionBtn.textContent = 'Download';
+      actionBtn.disabled = false;
+    }
+  }
+});
+
+// ── TTS Player Bar ──
+
+let ttsState = { position_ms: 0, buffered_ms: 0, duration_ms: 0, paused: false, finished: false };
+let ttsSeeking = false;
+let ttsSpeed = 1.0;
+let ttsLastParams = null;
+
+const playerBar = document.getElementById('tts-player');
+const positionFill = document.getElementById('tts-position-fill');
+const bufferFill = document.getElementById('tts-buffer-fill');
+const seekThumb = document.getElementById('tts-seek-thumb');
+const timeCurrent = document.getElementById('tts-time-current');
+const timeTotal = document.getElementById('tts-time-total');
+const playPauseBtn = document.getElementById('tts-play-pause');
+const progressTrack = document.getElementById('tts-progress-track');
+const speedBtn = document.getElementById('tts-speed-btn');
+const PLAYER_PAD = '7rem';
+
+function fmtTime(ms) {
+  const s = Math.floor(ms / 1000);
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+}
+
+function showPlayerBar() {
+  playerBar.classList.remove('translate-y-full');
+  document.querySelectorAll('.tab-panel').forEach(p => { p.style.paddingBottom = PLAYER_PAD; });
+}
+
+function hidePlayerBar() {
+  playerBar.classList.add('translate-y-full');
+  document.querySelectorAll('.tab-panel').forEach(p => { p.style.paddingBottom = ''; });
+}
+
+function resetTtsUI() {
+  document.getElementById('tts-play').disabled = false;
+  document.getElementById('tts-play-label').textContent = 'Play';
+}
+
+function updatePlayerBar(st) {
+  ttsState = st;
+  const dur = st.duration_ms || st.buffered_ms || 1;
+  const posPct = Math.min(100, (st.position_ms / dur) * 100);
+  const bufPct = dur > 0 ? Math.min(100, (st.buffered_ms / dur) * 100) : 0;
+  positionFill.style.width = `${posPct}%`;
+  bufferFill.style.width = `${bufPct}%`;
+  seekThumb.style.left = `${posPct}%`;
+  seekThumb.style.opacity = dur > 0 ? '1' : '0';
+  timeCurrent.textContent = fmtTime(st.position_ms);
+  timeTotal.textContent = fmtTime(dur);
+  const icon = playPauseBtn.querySelector('.material-symbols-outlined');
+  if (st.finished) {
+    icon.textContent = 'replay';
+  } else {
+    icon.textContent = st.paused ? 'play_arrow' : 'pause';
+  }
+  const label = document.getElementById('tts-play-label');
+  if (label && !st.finished) {
+    label.textContent = st.rebuffering ? 'Buffering...' : 'Playing...';
+  }
+}
+
+listen('tts-position', (event) => {
+  if (!ttsSeeking) updatePlayerBar(event.payload);
+  showPlayerBar();
+});
+
+listen('tts-finished', () => {
+  resetTtsUI();
+});
+
+playPauseBtn.addEventListener('click', () => {
+  if (ttsState.finished) {
+    invoke('tts_seek', { positionMs: 0 });
+    invoke('tts_resume');
+    ttsState.finished = false;
+  } else if (ttsState.paused) {
+    invoke('tts_resume');
+  } else {
+    invoke('tts_pause');
+  }
+});
+
+document.getElementById('tts-skip-back').addEventListener('click', () => {
+  invoke('tts_seek', { positionMs: Math.max(0, ttsState.position_ms - 10000) });
+});
+
+document.getElementById('tts-skip-fwd').addEventListener('click', () => {
+  invoke('tts_seek', { positionMs: Math.min(ttsState.buffered_ms, ttsState.position_ms + 10000) });
+});
+
+document.getElementById('tts-dismiss').addEventListener('click', () => {
+  invoke('tts_stop');
+  hidePlayerBar();
+  resetTtsUI();
+});
+
+function seekFromPointer(e) {
+  const rect = progressTrack.getBoundingClientRect();
+  const x = (e.touches ? e.touches[0].clientX : e.clientX) - rect.left;
+  const pct = Math.max(0, Math.min(1, x / rect.width));
+  const seekable = ttsState.buffered_ms;
+  const pos = Math.floor(Math.min(pct * (ttsState.duration_ms || seekable), seekable));
+  invoke('tts_seek', { positionMs: pos });
+  const dur = ttsState.duration_ms || seekable || 1;
+  const displayPct = (pos / dur) * 100;
+  positionFill.style.width = `${displayPct}%`;
+  seekThumb.style.left = `${displayPct}%`;
+  timeCurrent.textContent = fmtTime(pos);
+}
+
+progressTrack.addEventListener('mousedown', (e) => { ttsSeeking = true; seekFromPointer(e); });
+progressTrack.addEventListener('touchstart', (e) => { ttsSeeking = true; seekFromPointer(e); }, { passive: true });
+document.addEventListener('mousemove', (e) => { if (ttsSeeking) seekFromPointer(e); });
+document.addEventListener('touchmove', (e) => { if (ttsSeeking) seekFromPointer(e); }, { passive: true });
+document.addEventListener('mouseup', () => { ttsSeeking = false; });
+document.addEventListener('touchend', () => { ttsSeeking = false; });
+
+// ── Speed sheet ──
+
+const speedSheet = document.getElementById('speed-sheet');
+const speedSlider = document.getElementById('tts-speed-slider');
+const speedSliderLabel = document.getElementById('speed-slider-label');
+const speedPresets = document.querySelectorAll('#speed-presets .speed-chip');
+
+function openSpeedSheet() {
+  speedSheet.classList.remove('hidden');
+  speedSlider.value = ttsSpeed;
+  speedSliderLabel.textContent = ttsSpeed.toFixed(ttsSpeed % 1 === 0 ? 1 : 2) + 'x';
+  updateSpeedChips();
+}
+
+function closeSpeedSheet() {
+  speedSheet.classList.add('hidden');
+}
+
+function setTtsSpeed(val) {
+  ttsSpeed = Math.round(val * 100) / 100;
+  const label = ttsSpeed % 1 === 0 ? ttsSpeed.toFixed(1) : String(ttsSpeed);
+  speedBtn.textContent = label + 'x';
+  speedSlider.value = ttsSpeed;
+  speedSliderLabel.textContent = label + 'x';
+  updateSpeedChips();
+}
+
+function updateSpeedChips() {
+  speedPresets.forEach(chip => {
+    const v = parseFloat(chip.dataset.speed);
+    if (Math.abs(v - ttsSpeed) < 0.01) {
+      chip.className = 'speed-chip flex-1 py-2.5 rounded-xl text-xs font-semibold transition-colors cursor-pointer bg-primary text-on-primary';
+    } else {
+      chip.className = 'speed-chip flex-1 py-2.5 rounded-xl text-xs font-semibold transition-colors cursor-pointer bg-surface-container-highest text-on-surface-variant';
+    }
+  });
+}
+
+speedBtn.addEventListener('click', openSpeedSheet);
+document.getElementById('speed-sheet-overlay').addEventListener('click', closeSpeedSheet);
+
+speedPresets.forEach(chip => {
+  chip.addEventListener('click', () => {
+    setTtsSpeed(parseFloat(chip.dataset.speed));
+    closeSpeedSheet();
+  });
+});
+
+speedSlider.addEventListener('input', () => {
+  const val = parseFloat(speedSlider.value);
+  setTtsSpeed(val);
+});
+
+// ── TTS Play in Reader tab ──
+
+document.getElementById('tts-play').addEventListener('click', async () => {
+  const text = document.getElementById('tts-text').value.trim();
+  if (!text) { showToast('Enter some text first'); return; }
+  if (!ttsLoadedModelId) { showToast('Load a TTS model first'); return; }
+
+  const playBtn = document.getElementById('tts-play');
+  const label = document.getElementById('tts-play-label');
+
+  // Disable before any await so a second tap during async setup (e.g. custom
+  // voice load) can't start a second playback. Two players overlap audio and
+  // make it jump forward then back.
+  if (playBtn.disabled) return;
+  playBtn.disabled = true;
+  label.textContent = 'Generating...';
+
+  const voiceVal = document.getElementById('tts-voice-select').value || '0';
+  const isCustom = voiceVal.startsWith('custom:');
+  if (isCustom) {
+    try { await invoke('tts_load', { id: ttsLoadedModelId, customVoice: voiceVal.slice(7) }); }
+    catch (err) { showToast('Failed to load custom voice: ' + err); resetTtsUI(); return; }
+  }
+
+  const speed = ttsSpeed;
+  const sid = isCustom ? 0 : parseInt(voiceVal);
+  ttsLastParams = { text, sid, customVoice: isCustom ? voiceVal.slice(7) : null };
+
+  showPlayerBar();
+  updatePlayerBar({ position_ms: 0, buffered_ms: 0, duration_ms: 0, paused: false, finished: false });
+
+  try {
+    await invoke('tts_speak', { text, speed, sid });
+    label.textContent = 'Playing...';
+  } catch (err) {
+    showToast('TTS error: ' + err);
+    resetTtsUI();
+    hidePlayerBar();
+  }
+});
+
 // ── Debug tab ──
 
 const logOutput = document.getElementById('log-output');
@@ -915,17 +1357,33 @@ listen('log-message', (event) => {
   logOutput.scrollTop = logOutput.scrollHeight;
 });
 
+// Backend-caught crashes (TTS/transcription) are emitted here so they surface
+// in the debug log instead of taking the app down silently.
+listen('dictation-error', (event) => {
+  const msg = typeof event.payload === 'string' ? event.payload : JSON.stringify(event.payload);
+  const el = document.createElement('div');
+  el.textContent = '[error] ' + msg;
+  el.className = 'text-red-400';
+  logOutput.appendChild(el);
+  logOutput.scrollTop = logOutput.scrollHeight;
+  showToast('Error: ' + msg);
+});
+
 document.getElementById('clear-logs').addEventListener('click', () => {
   logOutput.innerHTML = '';
 });
 
 document.getElementById('copy-logs').addEventListener('click', () => {
   const text = logOutput.innerText;
-  invoke('copy_to_clipboard', { text }).then(() => {
-    const btn = document.getElementById('copy-logs');
-    btn.textContent = 'Copied!';
-    setTimeout(() => { btn.textContent = 'Copy'; }, 1500);
-  });
+  const btn = document.getElementById('copy-logs');
+  invoke('copy_to_clipboard', { text })
+    .then(() => {
+      btn.textContent = 'Copied!';
+      setTimeout(() => { btn.textContent = 'Copy'; }, 1500);
+    })
+    .catch((err) => {
+      showToast('Copy failed: ' + err);
+    });
 });
 
 // ── Init ──

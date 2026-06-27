@@ -8,12 +8,15 @@ mod media;
 mod models;
 #[cfg(desktop)]
 mod paste;
+mod piper;
+mod player;
 pub mod postprocess;
 #[cfg(desktop)]
 mod sound;
 mod recorder;
 mod snippets;
 mod transcribe;
+mod tts;
 pub mod vad;
 #[cfg(target_os = "android")]
 mod android_ime;
@@ -75,8 +78,17 @@ fn copy_to_clipboard(text: String) -> Result<(), String> {
 
 #[cfg(mobile)]
 #[tauri::command]
-fn copy_to_clipboard(_text: String) -> Result<(), String> {
-    Err("clipboard not available on this platform".into())
+fn copy_to_clipboard(text: String) -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        android_copy_to_clipboard(&text);
+        Ok(())
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = text;
+        Err("clipboard not available on this platform".into())
+    }
 }
 
 #[cfg(target_os = "android")]
@@ -119,29 +131,116 @@ fn android_show_toast(msg: &str) {
     use jni::objects::JValue;
     let vm = match GLOBAL_JVM.get() {
         Some(v) => v,
-        None => { log::warn!("android_show_toast: JVM not initialized"); return; }
+        None => return,
     };
     let class_ref = match VERBA_APP_CLASS.get() {
         Some(c) => c,
-        None => { log::warn!("android_show_toast: VerbaApp class not cached"); return; }
+        None => return,
     };
     let mut env = match vm.attach_current_thread_permanently() {
         Ok(e) => e,
-        Err(e) => { log::warn!("android_show_toast: attach: {e}"); return; }
+        Err(_) => return,
     };
-    let Ok(msg_str) = env.new_string(msg) else {
-        log::warn!("android_show_toast: new_string failed");
-        return;
-    };
-    // Safe: VERBA_APP_CLASS holds a GlobalRef that keeps the class alive.
+    let Ok(msg_str) = env.new_string(msg) else { return };
     let class = unsafe { jni::objects::JClass::from_raw(class_ref.as_raw()) };
-    if let Err(e) = env.call_static_method(
-        class,
-        "showToast",
-        "(Ljava/lang/String;)V",
+    let _ = env.call_static_method(
+        class, "showToast", "(Ljava/lang/String;)V",
         &[JValue::Object(&*msg_str)],
-    ) {
-        log::warn!("android_show_toast: {e}");
+    );
+}
+
+#[cfg(target_os = "android")]
+fn android_copy_to_clipboard(text: &str) {
+    use jni::objects::JValue;
+    let vm = match GLOBAL_JVM.get() {
+        Some(v) => v,
+        None => return,
+    };
+    let class_ref = match VERBA_APP_CLASS.get() {
+        Some(c) => c,
+        None => return,
+    };
+    let mut env = match vm.attach_current_thread_permanently() {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    let Ok(text_str) = env.new_string(text) else { return };
+    let class = unsafe { jni::objects::JClass::from_raw(class_ref.as_raw()) };
+    let _ = env.call_static_method(
+        class, "copyToClipboard", "(Ljava/lang/String;)V",
+        &[JValue::Object(&*text_str)],
+    );
+}
+
+#[cfg(target_os = "android")]
+fn android_call_static(method: &str, sig: &str, args: &[jni::objects::JValue]) {
+    let vm = match GLOBAL_JVM.get() {
+        Some(v) => v,
+        None => return,
+    };
+    let class_ref = match VERBA_APP_CLASS.get() {
+        Some(c) => c,
+        None => return,
+    };
+    let mut env = match vm.attach_current_thread_permanently() {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    let class = unsafe { jni::objects::JClass::from_raw(class_ref.as_raw()) };
+    let _ = env.call_static_method(class, method, sig, args);
+}
+
+#[cfg(target_os = "android")]
+pub fn android_update_media_session(position_ms: i64, duration_ms: i64, paused: bool) {
+    use jni::objects::JValue;
+    android_call_static(
+        "updateMediaSession",
+        "(JJZ)V",
+        &[JValue::Long(position_ms), JValue::Long(duration_ms), JValue::Bool(paused as u8)],
+    );
+}
+
+#[cfg(target_os = "android")]
+pub fn android_start_media_session() {
+    android_call_static("startMediaSession", "()V", &[]);
+}
+
+#[cfg(target_os = "android")]
+pub fn android_stop_media_session() {
+    android_call_static("stopMediaSession", "()V", &[]);
+}
+
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_com_alexb151_verba_VerbaApp_nativeTtsPause(
+    _env: jni::JNIEnv, _class: jni::objects::JClass,
+) {
+    tts::pause();
+}
+
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_com_alexb151_verba_VerbaApp_nativeTtsResume(
+    _env: jni::JNIEnv, _class: jni::objects::JClass,
+) {
+    tts::resume();
+}
+
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_com_alexb151_verba_VerbaApp_nativeTtsStop(
+    _env: jni::JNIEnv, _class: jni::objects::JClass,
+) {
+    tts::stop();
+}
+
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_com_alexb151_verba_VerbaApp_nativeTtsSeek(
+    _env: jni::JNIEnv, _class: jni::objects::JClass, position_ms: jni::sys::jlong,
+) {
+    if position_ms >= 0 {
+        tts::seek_ms(position_ms as u64);
     }
 }
 
@@ -280,6 +379,90 @@ fn add_snippet_trigger(id: String, trigger: String) -> Result<(), String> {
         return Err("trigger cannot be empty".into());
     }
     snippets::SnippetManager::global().add_trigger(&id, trigger)
+}
+
+#[tauri::command]
+fn tts_is_loaded() -> bool {
+    tts::is_loaded()
+}
+
+#[tauri::command]
+fn tts_is_speaking() -> bool {
+    tts::is_speaking()
+}
+
+#[tauri::command]
+async fn tts_load(id: String, custom_voice: Option<String>) -> Result<(), String> {
+    let mgr = models::ModelManager::global();
+    let mut config = mgr.tts_model_config(&id)
+        .ok_or("TTS model not downloaded")?;
+    if let Some(name) = custom_voice {
+        let path = tts::custom_voices_dir().join(format!("{name}.bin"));
+        if !path.exists() {
+            return Err(format!("Custom voice not found: {name}"));
+        }
+        config.override_voices(path.to_string_lossy().into_owned());
+    }
+    // Generation must outrun playback to avoid starving the player, but using
+    // all cores backfires on big.LITTLE phones: extra threads land on slow
+    // little cores AND sustained all-core load triggers thermal throttling
+    // (measured RTF degraded 1.06x -> 2.48x over ~70s on an 8-core device at 8
+    // threads). Respect the configured thread count (default 4, which targets
+    // the performance cores); log cores + per-chunk RTF so the sweet spot can
+    // be found by experiment in Settings.
+    let threads = config::AppConfig::load().threads as i32;
+    let cores = std::thread::available_parallelism().map(|n| n.get() as i32).unwrap_or(0);
+    log::info!("TTS loading with {threads} threads (cores={cores})");
+    tokio::task::spawn_blocking(move || tts::load(config, threads))
+        .await
+        .map_err(|e| format!("{e}"))?
+}
+
+#[tauri::command]
+fn tts_unload() {
+    tts::unload();
+}
+
+#[tauri::command]
+fn tts_info() -> serde_json::Value {
+    serde_json::json!({
+        "loaded": tts::is_loaded(),
+        "speaking": tts::is_speaking(),
+        "num_speakers": tts::num_speakers(),
+        "sample_rate": tts::sample_rate(),
+    })
+}
+
+#[tauri::command]
+async fn tts_speak(app: tauri::AppHandle, text: String, speed: Option<f32>, sid: Option<i32>) -> Result<(), String> {
+    let speed = speed.unwrap_or(1.0);
+    let sid = sid.unwrap_or(0);
+    tts::speak(&text, speed, sid, Some(app))
+}
+
+#[tauri::command]
+fn tts_stop() {
+    tts::stop();
+}
+
+#[tauri::command]
+fn tts_pause() {
+    tts::pause();
+}
+
+#[tauri::command]
+fn tts_resume() {
+    tts::resume();
+}
+
+#[tauri::command]
+fn tts_seek(position_ms: u64) {
+    tts::seek_ms(position_ms);
+}
+
+#[tauri::command]
+fn tts_list_custom_voices() -> Vec<String> {
+    tts::list_custom_voices()
 }
 
 /// Start recording from the UI (no hotkey, no delivery).
@@ -712,6 +895,17 @@ pub fn run() {
             ui_start_recording,
             ui_stop_and_transcribe,
             ui_stop_and_transcribe_raw,
+            tts_is_loaded,
+            tts_is_speaking,
+            tts_info,
+            tts_load,
+            tts_unload,
+            tts_speak,
+            tts_stop,
+            tts_pause,
+            tts_resume,
+            tts_seek,
+            tts_list_custom_voices,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

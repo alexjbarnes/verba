@@ -6,6 +6,17 @@ body {
   padding-right: env(safe-area-inset-right);
 }
 
+/* Allow selecting/copying text content. The Android WebView disables
+   long-press selection by default, so enable it explicitly on text areas. */
+#log-output,
+#history-list,
+#tts-text,
+.selectable {
+  -webkit-user-select: text;
+  user-select: text;
+  -webkit-touch-callout: default;
+}
+
 /* Custom scrollbar */
 ::-webkit-scrollbar { width: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
