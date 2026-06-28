@@ -399,6 +399,10 @@ pub struct SegmentSpan {
     pub text: String,
     pub speech_ms: u64,
     pub pause_ms: u64,
+    /// Per-word speech duration (ms), aligned with `text.split_whitespace()`.
+    /// Exact (from the model's `w_ceil`) when available, else a char-length
+    /// estimate. Lets the reading view highlight per word without guessing.
+    pub word_ms: Vec<u64>,
 }
 
 fn split_for_pauses(text: &str) -> Vec<(String, usize)> {
@@ -454,6 +458,114 @@ fn split_for_pauses(text: &str) -> Vec<(String, usize)> {
     out
 }
 
+/// Number of phoneme ids the encoder emits for one token. Mirrors PiperEncoder:
+/// PUA-map the token, then sum id_map entry lengths over its chars (unknown
+/// chars contribute 0, as Skip mode drops them). Used to walk the id layout.
+fn token_id_count(token: &str, id_map: &PhonemeIdMap) -> usize {
+    let mapped = match piper_plus_g2p::token_map::token_to_pua(token) {
+        Some(c) => c.to_string(),
+        None => token.to_string(),
+    };
+    mapped
+        .chars()
+        .map(|ch| id_map.get(&ch.to_string()).map_or(0, |v| v.len()))
+        .sum()
+}
+
+/// Attribute the model's per-id frame counts (`wceil`) to each whitespace word.
+/// Re-phonemizes word by word and checks the concatenation matches the segment's
+/// actual token stream, then walks the encoder id layout
+/// (`BOS, PAD, [token ids, PAD]*, EOS`) summing frames per word. Returns `None`
+/// on any inconsistency so the caller falls back to a char estimate — a mismatch
+/// never yields wrong timing.
+fn map_words_to_frames(
+    words: &[&str],
+    tokens: &[String],
+    wceil: &[f32],
+    ph: &EnglishPhonemizer,
+    id_map: &PhonemeIdMap,
+) -> Option<Vec<f64>> {
+    if words.is_empty() {
+        return None;
+    }
+    // Rebuild the token stream grouped by word; confirm it equals the stream
+    // actually synthesized so the mapping lines up with the audio.
+    let mut full: Vec<String> = Vec::new();
+    let mut tok_word: Vec<usize> = Vec::new();
+    for (wi, w) in words.iter().enumerate() {
+        let norm = normalize_numbers(&normalize_text(w));
+        let wt = phonemize(ph, &norm).ok()?;
+        if wt.is_empty() {
+            continue;
+        }
+        if !full.is_empty() {
+            full.push(" ".to_string());
+            tok_word.push(wi);
+        }
+        for t in wt {
+            full.push(t);
+            tok_word.push(wi);
+        }
+    }
+    if full != tokens {
+        return None;
+    }
+    // Walk the id layout, summing wceil per word. BOS + leading PAD -> word 0;
+    // each token contributes its content ids + a trailing PAD; EOS -> last word.
+    let mut frames = vec![0f64; words.len()];
+    let mut idx = 0usize;
+    for _ in 0..2 {
+        frames[0] += *wceil.get(idx)? as f64;
+        idx += 1;
+    }
+    for (k, token) in full.iter().enumerate() {
+        let w = tok_word[k];
+        for _ in 0..(token_id_count(token, id_map) + 1) {
+            frames[w] += *wceil.get(idx)? as f64;
+            idx += 1;
+        }
+    }
+    frames[words.len() - 1] += *wceil.get(idx)? as f64;
+    idx += 1;
+    if idx != wceil.len() {
+        return None;
+    }
+    Some(frames)
+}
+
+/// Per-word speech durations (ms) for a segment, aligned with
+/// `segment.split_whitespace()`. Exact via `wceil` when it maps cleanly, else a
+/// char-length split of the segment's measured speech time.
+fn compute_word_ms(
+    words: &[&str],
+    tokens: &[String],
+    wceil: Option<&[f32]>,
+    speech_samples: usize,
+    sr: usize,
+    ph: &EnglishPhonemizer,
+    id_map: &PhonemeIdMap,
+) -> Vec<u64> {
+    if words.is_empty() {
+        return Vec::new();
+    }
+    let total_ms = (speech_samples as u64 * 1000) / sr.max(1) as u64;
+    if let Some(wc) = wceil {
+        if let Some(frames) = map_words_to_frames(words, tokens, wc, ph, id_map) {
+            let total: f64 = frames.iter().sum();
+            if total > 0.0 {
+                return frames
+                    .iter()
+                    .map(|&f| ((f / total) * total_ms as f64).round() as u64)
+                    .collect();
+            }
+        }
+    }
+    // Fallback: split by character length (what the frontend used to do).
+    let lens: Vec<usize> = words.iter().map(|w| w.chars().count().max(1)).collect();
+    let total_len: usize = lens.iter().sum::<usize>().max(1);
+    lens.iter().map(|&l| (total_ms * l as u64) / total_len as u64).collect()
+}
+
 static ORT_INIT: OnceLock<Result<(), String>> = OnceLock::new();
 
 /// Initialize ORT once. Mirrors `grammar_neural::ensure_ort_init` so the
@@ -478,6 +590,9 @@ pub struct PiperEngine {
     session: Session,
     phonemizer: EnglishPhonemizer,
     encoder: PiperEncoder,
+    /// Kept alongside the encoder to replicate its id layout when attributing
+    /// the model's per-id durations (`w_ceil`) to words.
+    id_map: PhonemeIdMap,
     sample_rate: i32,
     num_speakers: i64,
     noise_scale: f32,
@@ -497,7 +612,7 @@ impl PiperEngine {
         // Skip (not Strict) so a punctuation mark or stray token absent from a
         // given model's id_map is dropped with a warning instead of failing the
         // whole chunk.
-        let encoder = PiperEncoder::new(id_map, UnknownTokenMode::Skip)
+        let encoder = PiperEncoder::new(id_map.clone(), UnknownTokenMode::Skip)
             .map_err(|e| format!("piper encoder: {e}"))?;
 
         let dict: HashMap<String, String> = serde_json::from_slice(CMUDICT_BYTES)
@@ -530,6 +645,7 @@ impl PiperEngine {
             session,
             phonemizer,
             encoder,
+            id_map,
             sample_rate: cfg.audio.sample_rate as i32,
             num_speakers: cfg.num_speakers,
             noise_scale: cfg.inference.noise_scale,
@@ -550,14 +666,23 @@ impl PiperEngine {
     /// wrapped in `catch_unwind` so a native crash surfaces as an `Err` instead
     /// of unwinding through the C boundary (mirrors the tts.rs/transcribe.rs
     /// crash-isolation style).
-    fn infer(&mut self, ids: &[i64], speaker: i64, length_scale: f32) -> Result<Vec<f32>, String> {
+    /// Returns the waveform PCM and, when the model exposes it, the per-input-id
+    /// frame counts (`w_ceil` = `/Ceil_output_0`). The patched model exposes it
+    /// (see scripts/patch_piper_durations.py); the stock model doesn't, so it's
+    /// `None` and the caller falls back to a char-length estimate.
+    fn infer(
+        &mut self,
+        ids: &[i64],
+        speaker: i64,
+        length_scale: f32,
+    ) -> Result<(Vec<f32>, Option<Vec<f32>>), String> {
         let n = ids.len();
         let noise_scale = self.noise_scale;
         let noise_w = self.noise_w;
         let session = &mut self.session;
         let ids = ids.to_vec();
 
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<Vec<f32>, String> {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<(Vec<f32>, Option<Vec<f32>>), String> {
             let input = Tensor::from_array(([1_usize, n], ids))
                 .map_err(|e| format!("input tensor: {e}"))?;
             let input_lengths = Tensor::from_array(([1_usize], vec![n as i64]))
@@ -580,7 +705,13 @@ impl PiperEngine {
             let (_shape, data) = outputs["output"]
                 .try_extract_tensor::<f32>()
                 .map_err(|e| format!("extract output: {e}"))?;
-            Ok(data.to_vec())
+            let pcm = data.to_vec();
+            // Per-id durations (one value per input id), if the model exposes it.
+            let wceil = outputs
+                .get("/Ceil_output_0")
+                .and_then(|v| v.try_extract_tensor::<f32>().ok())
+                .map(|(_s, d)| d.to_vec());
+            Ok((pcm, wceil))
         }))
         .map_err(|panic| panic_to_string("Piper inference", panic))?
     }
@@ -624,11 +755,20 @@ impl PiperEngine {
                 .encode(&tokens)
                 .map_err(|e| format!("encode: {e}"))?;
             let speech_start = out.len();
+            let mut wceil: Option<Vec<f32>> = None;
             if !ids.is_empty() {
-                let pcm = self.infer(&ids, speaker, length_scale)?;
+                let (pcm, wc) = self.infer(&ids, speaker, length_scale)?;
                 out.extend_from_slice(&pcm);
+                wceil = wc;
             }
             let speech_samples = out.len() - speech_start;
+            // Per-word speech timing for the reading-view highlight: exact from
+            // the model's durations when available, else a char-length estimate.
+            let words: Vec<&str> = segment.split_whitespace().collect();
+            let word_ms = compute_word_ms(
+                &words, &tokens, wceil.as_deref(), speech_samples, sr,
+                &self.phonemizer, &self.id_map,
+            );
             let pause_samples = if pause_ms > 0 && !out.is_empty() {
                 pause_ms * sr / 1000
             } else {
@@ -641,6 +781,7 @@ impl PiperEngine {
                 text: segment,
                 speech_ms: (speech_samples as u64 * 1000) / sr as u64,
                 pause_ms: (pause_samples as u64 * 1000) / sr as u64,
+                word_ms,
             });
         }
         Ok((out, spans))

@@ -57,3 +57,11 @@ sym_shape_infer_temp.onnx
 
 # Playwright MCP
 .playwright-mcp/
+
+# Secrets / local env (R2 upload credentials etc.)
+.env
+.env.*
+
+# Local agent tooling (machine-specific, never committed)
+.claude/
+.graphene/

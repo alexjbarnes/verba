@@ -1498,18 +1498,25 @@ function refineDuration() {
 
 listen('tts-timing', (event) => {
   if (event.payload.gen !== genId) return;
-  const { start_ms, duration_ms, text } = event.payload;
+  const { start_ms, duration_ms, text, word_ms } = event.payload;
   const words = (text || '').trim().split(/\s+/).filter(Boolean);
   const n = words.length;
   if (n === 0) return;
-  let totalLen = 0;
-  const lens = words.map(w => { const l = w.length || 1; totalLen += l; return l; });
+  // Exact per-word durations from the model (w_ceil) when present and aligned;
+  // otherwise distribute the segment duration by word character length.
+  let durs;
+  if (Array.isArray(word_ms) && word_ms.length === n) {
+    durs = word_ms;
+  } else {
+    let totalLen = 0;
+    const lens = words.map(w => { const l = w.length || 1; totalLen += l; return l; });
+    durs = lens.map(l => duration_ms * (l / totalLen));
+  }
   let acc = start_ms;
   for (let k = 0; k < n; k++) {
-    const dur = duration_ms * (lens[k] / totalLen);
     // Absolute timeline position = fragment base + offset within the fragment.
-    wordTimes[timingCursor + k] = { s: timelineBaseMs + acc, e: timelineBaseMs + acc + dur };
-    acc += dur;
+    wordTimes[timingCursor + k] = { s: timelineBaseMs + acc, e: timelineBaseMs + acc + durs[k] };
+    acc += durs[k];
   }
   timingCursor += n;
 });

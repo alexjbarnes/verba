@@ -305,6 +305,7 @@ pub fn speak(text: &str, speed: f32, sid: i32, gen: u64, app: Option<tauri::AppH
                                         "text": span.text,
                                         "start_ms": cumulative_ms,
                                         "duration_ms": span.speech_ms,
+                                        "word_ms": span.word_ms,
                                     }));
                                 }
                                 cumulative_ms += span.speech_ms + span.pause_ms;

@@ -510,11 +510,12 @@ const HF_NEMO_CTC_SMALL: &str =
     "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-ctc-en-conformer-small/resolve/main";
 const HF_NEMO_CTC_MEDIUM: &str =
     "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-ctc-en-conformer-medium/resolve/main";
-// RHASSPY source ships the `.onnx.json` sidecar (sample_rate, num_speakers,
-// phoneme_id_map) the ort/piper-plus-g2p path needs; the csukuangfj mirror does
-// not, so the GPL-free Piper entry downloads from here instead.
-const HF_PIPER_RHASSPY_LIBRITTS: &str =
-    "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/libritts_r/medium";
+// Patched Piper libritts model: the rhasspy libritts_r medium with the VITS
+// duration output (`/Ceil_output_0`) exposed for exact word timing — see
+// scripts/patch_piper_durations.py. Hosted on our R2; the S3 API endpoint needs
+// signed auth, so the app downloads from the bucket's public r2.dev URL.
+const R2_PIPER_LIBRITTS: &str =
+    "https://pub-c88baaac61224fbba973b547f1d947ca.r2.dev/models/TTS";
 const HF_NEMO_CTC_LARGE: &str =
     "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-ctc-en-conformer-large/resolve/main";
 
@@ -710,8 +711,10 @@ fn builtin_registry() -> Vec<ModelDef> {
             engine: "tts_piper_ort".into(),
             size: "~79 MB".into(),
             files: vec![
-                ModelFile { url: format!("{HF_PIPER_RHASSPY_LIBRITTS}/en_US-libritts_r-medium.onnx"), rel_path: "tts/piper-libritts/model.onnx".into(), bytes: 78_581_047, role: "model".into() },
-                ModelFile { url: format!("{HF_PIPER_RHASSPY_LIBRITTS}/en_US-libritts_r-medium.onnx.json"), rel_path: "tts/piper-libritts/model.onnx.json".into(), bytes: 20_123, role: "config".into() },
+                // rel_path bumped to model_dur.onnx so existing installs fetch the
+                // duration-exposing model instead of using the cached unpatched one.
+                ModelFile { url: format!("{R2_PIPER_LIBRITTS}/en_US-libritts_r-medium-dur.onnx"), rel_path: "tts/piper-libritts/model_dur.onnx".into(), bytes: 78_580_938, role: "model".into() },
+                ModelFile { url: format!("{R2_PIPER_LIBRITTS}/en_US-libritts_r-medium.onnx.json"), rel_path: "tts/piper-libritts/model.onnx.json".into(), bytes: 20_123, role: "config".into() },
             ],
         },
     ]
