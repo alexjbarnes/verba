@@ -196,8 +196,11 @@ pub fn speak(text: &str, speed: f32, sid: i32, gen: u64, app: Option<tauri::AppH
     log::info!("TTS: {total} chunks to generate");
 
     let word_count = text.split_whitespace().count();
-    let wpm = 155.0 / speed;
-    let estimated_secs = (word_count as f64) / (wpm as f64) * 60.0;
+    // Spoken duration scales inversely with speed (length_scale = base/speed),
+    // so faster speed -> shorter. The buffer is a hard cap (capacity =
+    // estimated_samples*2), so getting this right prevents the tail being
+    // dropped on long texts at slow speeds.
+    let estimated_secs = (word_count as f64) / 155.0 * 60.0 / (speed.max(0.1) as f64);
     let estimated_samples = (estimated_secs * sample_rate as f64) as usize;
 
     let sr = (sample_rate as u64).max(1);
@@ -217,6 +220,7 @@ pub fn speak(text: &str, speed: f32, sid: i32, gen: u64, app: Option<tauri::AppH
                     "position_ms": position_ms,
                     "buffered_ms": buffered_ms,
                     "duration_ms": duration_ms,
+                    "gen_done": pos.gen_done,
                     "paused": pos.paused,
                     "finished": done,
                     "rebuffering": pos.rebuffering,

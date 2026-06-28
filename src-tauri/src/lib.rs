@@ -522,8 +522,13 @@ fn library_delete(id: String) {
 }
 
 #[tauri::command]
-fn library_set_position(id: String, position_ms: u64) {
-    library::Library::global().set_position(&id, position_ms);
+fn library_set_progress(id: String, progress: u64) {
+    library::Library::global().set_progress(&id, progress);
+}
+
+#[tauri::command]
+fn library_set_duration(id: String, duration_ms: u64, speed: f32) {
+    library::Library::global().set_duration(&id, duration_ms, speed);
 }
 
 /// Start recording from the UI (no hotkey, no delivery).
@@ -974,7 +979,8 @@ pub fn run() {
             library_add,
             library_get,
             library_delete,
-            library_set_position,
+            library_set_progress,
+            library_set_duration,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -345,16 +345,9 @@
       </div>
     </div>
 
-    <!-- Rendered text with per-word spans for highlighting -->
+    <!-- Rendered text with per-word spans for highlighting. Playback is driven
+         entirely by the player bar (shown while a reading is open). -->
     <div id="reading-text" class="flex-1 min-h-0 overflow-y-auto text-base leading-relaxed text-on-surface-variant whitespace-pre-wrap"></div>
-
-    <!-- Controls -->
-    <div class="mt-4">
-      <button id="tts-play" class="w-full flex items-center justify-center gap-2 py-3 bg-primary text-on-primary rounded-xl font-semibold text-sm hover:brightness-110 transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed" disabled>
-        <span class="material-symbols-outlined text-lg" style="font-variation-settings: 'FILL' 1">play_arrow</span>
-        <span id="tts-play-label">Play</span>
-      </button>
-    </div>
   </div>
 
   <!-- Add text modal -->
@@ -511,12 +504,7 @@
       <button id="tts-skip-fwd" class="p-2 text-on-surface-variant active:text-on-surface transition-colors cursor-pointer">
         <span class="material-symbols-outlined text-[28px]">forward_10</span>
       </button>
-      <div class="absolute right-3 flex items-center gap-2">
-        <button id="tts-speed-btn" class="text-sm font-bold text-on-surface-variant active:text-on-surface transition-colors cursor-pointer px-1">1.0x</button>
-        <button id="tts-dismiss" class="p-1 text-on-surface-variant/40 active:text-error transition-colors cursor-pointer">
-          <span class="material-symbols-outlined text-base">close</span>
-        </button>
-      </div>
+      <button id="tts-speed-btn" class="absolute right-3 text-sm font-bold text-on-surface-variant active:text-on-surface transition-colors cursor-pointer px-1">1.0x</button>
     </div>
   </div>
 

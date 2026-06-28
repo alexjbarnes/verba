@@ -58,6 +58,10 @@ document.querySelectorAll('.nav-btn').forEach(btn => {
 
     closeSidebar();
 
+    // Sidebar nav leaves any open reading. Keep the player bar only while audio
+    // is actively playing (as a mini-player); otherwise hide it.
+    if (!(ttsStarted && !ttsState.finished && !ttsState.paused)) hidePlayerBar();
+
     // Refresh data when switching to relevant tabs
     if (btn.dataset.tab === 'history') loadHistory();
     if (btn.dataset.tab === 'models') loadModels();
@@ -1048,12 +1052,12 @@ async function updateTtsPanel() {
   const block = document.getElementById('tts-model-block');
   const dlRow = document.getElementById('tts-download-row');
   const dlLabel = document.getElementById('tts-download-label');
-  const playBtn = document.getElementById('tts-play');
 
   if (!tts) {
     ttsModelId = null;
+    ttsReady = false;
     block.classList.add('hidden');
-    playBtn.disabled = true;
+    setPlayEnabled(false);
     return;
   }
 
@@ -1068,11 +1072,11 @@ async function updateTtsPanel() {
   dlLabel.textContent = `${tts.name}, ${tts.size}`;
   dlRow.classList.toggle('hidden', downloaded || downloading);
 
-  // Play is available as soon as the voice is on disk; the model itself loads
-  // lazily at generation time (see the play handler). The block only carries the
-  // download prompt now (voice selection moved to the player bar + Voices page),
-  // so it shows only while the voice isn't ready.
-  playBtn.disabled = !downloaded;
+  // The block carries the download prompt; show it only while the voice isn't
+  // ready. Playback (the player bar) is enabled once the voice is on disk; the
+  // model loads lazily on first play.
+  ttsReady = downloaded;
+  setPlayEnabled(downloaded);
   block.classList.toggle('hidden', downloaded && !downloading);
 }
 
@@ -1280,6 +1284,23 @@ let wordTimes = {};
 let genBaseWord = 0;
 let timingCursor = 0;
 let activeWord = -1;
+// Word to resume from on the next Play (set when opening a part-read item); 0
+// means start from the top. Cleared once consumed.
+let resumeWord = 0;
+// Throttle for persisting reading progress (Date.now() ms of last save).
+let lastProgressSaveMs = 0;
+// Whether playback has been started for the open article. False = the player
+// bar's play button starts (resume or from 0) instead of toggling pause.
+let ttsStarted = false;
+// Whether the voice is downloaded (gates the player-bar play button).
+let ttsReady = false;
+// Estimated full-article duration (ms) at the current speed. Holds the player
+// bar's total stable while generating; replaced by the real duration once
+// generation completes (gen_done). Recomputed on open and on each (re)start.
+let articleEstMs = 0;
+// genId whose real duration has already been saved, so a full play measures the
+// article's true length once (on gen_done) rather than repeatedly.
+let measuredGenId = -1;
 // Absolute ms offset of the current render fragment within the full text. The
 // player plays one fragment [genBaseWord..end]; this is the time before it.
 let timelineBaseMs = 0;
@@ -1309,6 +1330,43 @@ function fmtTime(ms) {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
 }
 
+// Estimated spoken duration of `text` at a given speed. Two parts: speech time
+// scales with speed (length_scale ~ 1/speed), but the silence spliced at
+// punctuation (see piper.rs) is added in PCM at fixed lengths and does NOT scale
+// with speed. Keeping them separate is what makes the estimate hold up at slow
+// speeds (the old word-count/speed estimate doubled the pauses too). Approximate
+// — used for the library time-left and the ready-state bar before generation.
+const SPEAK_WPM = 165;
+function estDurationMsForText(text, speed) {
+  if (!text || !text.trim()) return 0;
+  const words = text.trim().split(/\s+/).filter(Boolean).length;
+  const spokenMs = words / SPEAK_WPM * 60000 / (speed || 1);
+  const sentences = (text.match(/[.!?…]+/g) || []).length;
+  const clauses = (text.match(/[,;:–—]/g) || []).length;
+  const paragraphs = (text.match(/\n+/g) || []).length;
+  const pauseMs = sentences * 500 + clauses * 250 + paragraphs * 800;
+  return Math.round(spokenMs + pauseMs);
+}
+
+// Real measured duration once the article has been generated (saved on the
+// item), rescaled to the requested speed; falls back to the estimate for
+// never-played items. Exact at the speed it was measured at.
+function itemDurationMs(item, speed) {
+  if (!item) return 0;
+  if (item.duration_ms > 0 && item.duration_speed > 0) {
+    return Math.round(item.duration_ms * item.duration_speed / (speed || 1));
+  }
+  return estDurationMsForText(item.body, speed);
+}
+
+function fmtMins(ms) {
+  const mins = Math.round(ms / 60000);
+  if (mins <= 0) return '<1 min';
+  if (mins < 60) return `${mins} min`;
+  const h = Math.floor(mins / 60), m = mins % 60;
+  return m ? `${h}h ${m}m` : `${h}h`;
+}
+
 function showPlayerBar() {
   playerBar.classList.remove('translate-y-full');
   document.querySelectorAll('.tab-panel').forEach(p => { p.style.paddingBottom = PLAYER_PAD; });
@@ -1320,25 +1378,38 @@ function hidePlayerBar() {
 }
 
 function resetTtsUI() {
-  document.getElementById('tts-play').disabled = false;
-  document.getElementById('tts-play-label').textContent = 'Play';
+  // The player bar is the only transport now; returning to a not-started state
+  // means the next play press starts (resume or from 0) rather than pausing.
+  ttsStarted = false;
+}
+
+// Enable/disable the player-bar play control based on voice readiness.
+function setPlayEnabled(enabled) {
+  playPauseBtn.disabled = !enabled;
+  playPauseBtn.classList.toggle('opacity-40', !enabled);
+  playPauseBtn.classList.toggle('pointer-events-none', !enabled);
 }
 
 function updatePlayerBar(st) {
   ttsState = st;
-  // Show the full-text timeline: this fragment sits at timelineBaseMs, so add it
-  // to the player-relative position/buffer to get absolute values.
-  const fragDur = st.duration_ms || st.buffered_ms || 1;
+  // Full-text timeline: this fragment sits at timelineBaseMs, so add it to the
+  // player-relative position/buffer to get absolute values.
   const fullPos = timelineBaseMs + st.position_ms;
-  const fullDur = timelineBaseMs + fragDur;
-  const fullBuf = timelineBaseMs + st.buffered_ms;
+  const fullBuf = timelineBaseMs + (st.buffered_ms || 0);
+  // Total duration: while still generating, hold the stable estimate (with the
+  // buffered/played amount as a floor) so the number doesn't jump around as
+  // chunks arrive; once generation is done, the buffered amount IS the real
+  // duration. This keeps the library, the ready bar, and playback consistent.
+  const fullDur = st.gen_done
+    ? Math.max(fullBuf, fullPos, 1)
+    : Math.max(articleEstMs, fullBuf, fullPos, 1);
   lastFullDurMs = fullDur;
   const posPct = Math.min(100, (fullPos / fullDur) * 100);
-  const bufPct = fullDur > 0 ? Math.min(100, (fullBuf / fullDur) * 100) : 0;
+  const bufPct = Math.min(100, (fullBuf / fullDur) * 100);
   positionFill.style.width = `${posPct}%`;
   bufferFill.style.width = `${bufPct}%`;
   seekThumb.style.left = `${posPct}%`;
-  seekThumb.style.opacity = fullDur > 0 ? '1' : '0';
+  seekThumb.style.opacity = '1';
   timeCurrent.textContent = fmtTime(fullPos);
   timeTotal.textContent = fmtTime(fullDur);
   const icon = playPauseBtn.querySelector('.material-symbols-outlined');
@@ -1347,18 +1418,50 @@ function updatePlayerBar(st) {
   } else {
     icon.textContent = st.paused ? 'play_arrow' : 'pause';
   }
-  const label = document.getElementById('tts-play-label');
-  if (label && !st.finished) {
-    label.textContent = st.rebuffering ? 'Buffering...' : 'Playing...';
-  }
 }
 
 listen('tts-position', (event) => {
   if (event.payload.gen !== genId) return;
+  refineDuration(event.payload.buffered_ms);
   if (!ttsSeeking) updatePlayerBar(event.payload);
   showPlayerBar();
   highlightAt(timelineBaseMs + event.payload.position_ms);
+  if (!event.payload.paused) saveProgress(false);
+  maybeSaveMeasuredDuration(event.payload);
 });
+
+// Once a full-article play finishes generating, the buffered amount IS the true
+// duration at this speed. Save it so the library + ready bar show the real
+// length next time instead of the estimate. Only a play from the top (genBaseWord
+// 0) measures the whole article; resumes generate just the remainder.
+function maybeSaveMeasuredDuration(p) {
+  if (!p.gen_done || genBaseWord !== 0 || !readingItem) return;
+  if (measuredGenId === genId) return;
+  const dur = p.buffered_ms;
+  if (!dur || dur < 1000) return;
+  measuredGenId = genId;
+  readingItem.duration_ms = dur;
+  readingItem.duration_speed = ttsSpeed;
+  invoke('library_set_duration', { id: readingItem.id, durationMs: dur, speed: ttsSpeed }).catch(() => {});
+}
+
+// While generating, extrapolate the real per-character rate of the audio
+// produced so far to the rest of the fragment, so the displayed total converges
+// to the true duration within a few seconds instead of holding the guessed
+// word-rate estimate until generation finishes. (Generation runs ~10x faster
+// than playback, so a representative sample is available almost immediately.)
+function refineDuration(bufferedMs) {
+  if (!readingText || timingCursor <= genBaseWord) return;
+  const lastWord = timingCursor - 1;
+  if (!readingWords[lastWord] || !readingWords[genBaseWord]) return;
+  const fragStartChar = readingWords[genBaseWord].start;
+  const genChars = readingWords[lastWord].end - fragStartChar;
+  const fragChars = readingText.length - fragStartChar;
+  // Wait for a representative sample before trusting the extrapolation.
+  if (genChars < 50 || bufferedMs < 2000 || fragChars <= 0) return;
+  const fragTotalMs = bufferedMs * fragChars / genChars;
+  articleEstMs = Math.round(timelineBaseMs + fragTotalMs);
+}
 
 listen('tts-timing', (event) => {
   if (event.payload.gen !== genId) return;
@@ -1380,11 +1483,22 @@ listen('tts-timing', (event) => {
 
 listen('tts-finished', (event) => {
   if (event.payload && event.payload.gen !== genId) return;
+  // Mark the item fully read (100%) and clear the resume point.
+  if (readingItem) {
+    readingItem.progress = readingText.length;
+    resumeWord = 0;
+    invoke('library_set_progress', { id: readingItem.id, progress: readingText.length }).catch(() => {});
+  }
   resetTtsUI();
 });
 
 playPauseBtn.addEventListener('click', () => {
-  if (ttsState.finished) {
+  if (playPauseBtn.disabled) return;
+  if (!ttsStarted) {
+    // Article loaded but not yet playing: start generating + playing, resuming
+    // from the saved position or from the top.
+    startPlaybackFromResume();
+  } else if (ttsState.finished) {
     ttsState.finished = false;
     // Replay from the very start of the article.
     if (timelineBaseMs === 0) {
@@ -1397,8 +1511,21 @@ playPauseBtn.addEventListener('click', () => {
     invoke('tts_resume');
   } else {
     invoke('tts_pause');
+    saveProgress(true);
   }
 });
+
+// Begin playback for the open article: resume from the saved word once if there
+// is one, else start from the top. Used by the player-bar play button.
+function startPlaybackFromResume() {
+  if (resumeWord > 0 && readingWords[resumeWord]) {
+    const w = resumeWord;
+    resumeWord = 0;
+    startSpeak(readingText.slice(readingWords[w].start), w, timelineBaseMs);
+  } else {
+    startSpeak(readingText, 0, 0);
+  }
+}
 
 document.getElementById('tts-skip-back').addEventListener('click', () => {
   seekToFull(timelineBaseMs + ttsState.position_ms - 10000);
@@ -1408,17 +1535,13 @@ document.getElementById('tts-skip-fwd').addEventListener('click', () => {
   seekToFull(timelineBaseMs + ttsState.position_ms + 10000);
 });
 
-document.getElementById('tts-dismiss').addEventListener('click', () => {
-  invoke('tts_stop');
-  hidePlayerBar();
-  resetTtsUI();
-});
-
 function seekFromPointer(e) {
   const rect = progressTrack.getBoundingClientRect();
   const x = (e.touches ? e.touches[0].clientX : e.clientX) - rect.left;
   const pct = Math.max(0, Math.min(1, x / rect.width));
-  const fullDur = timelineBaseMs + (ttsState.duration_ms || ttsState.buffered_ms || 1);
+  // Map against the displayed total (held estimate or real), so the drag lands
+  // where the bar shows — not the raw backend duration.
+  const fullDur = lastFullDurMs || 1;
   // Defer the actual seek to release: a drag across the fragment start could
   // otherwise trigger repeated re-renders. Track the target and preview only.
   pendingSeekMs = Math.floor(pct * fullDur);
@@ -1494,25 +1617,23 @@ async function startSpeak(text, baseWord, baseMs) {
   if (!ttsModelId) { showToast('No voice available'); return; }
 
   const myGen = ++genId;
-  const playBtn = document.getElementById('tts-play');
-  const label = document.getElementById('tts-play-label');
-  playBtn.disabled = true;
-  label.textContent = 'Generating...';
+  ttsStarted = true;
 
   const voiceVal = ttsVoice || '0';
   const isCustom = voiceVal.startsWith('custom:');
 
-  // Lazy-load the voice at generation time, no manual load step. The custom
-  // branch loads the engine itself, so only plain-load when not custom.
+  // Lazy-load the voice at generation time, no manual load step. First load can
+  // take a couple seconds, so toast while it happens. The custom branch loads
+  // the engine itself, so only plain-load when not custom.
   if (!isCustom && !ttsLoadedModelId) {
-    label.textContent = 'Loading voice...';
+    showToast('Loading voice…');
     try {
       await invoke('tts_load', { id: ttsModelId });
       ttsLoadedModelId = ttsModelId;
     } catch (err) { showToast('Voice load failed: ' + err); resetTtsUI(); return; }
-    label.textContent = 'Generating...';
   }
   if (isCustom) {
+    showToast('Loading voice…');
     try {
       await invoke('tts_load', { id: ttsModelId, customVoice: voiceVal.slice(7) });
       ttsLoadedModelId = ttsModelId;
@@ -1539,16 +1660,14 @@ async function startSpeak(text, baseWord, baseMs) {
   }
 
   showPlayerBar();
-  // Reset the bar for the new fragment. Fresh play starts at zero; a mid-listen
-  // re-render keeps the full-timeline total so the bar doesn't collapse to the
-  // resume point while the new fragment's own estimate is still 0.
-  const resetDur = baseWord === 0 ? 0 : Math.max(1, lastFullDurMs - timelineBaseMs);
-  if (baseWord === 0) lastFullDurMs = 0;
-  updatePlayerBar({ position_ms: 0, buffered_ms: 0, duration_ms: resetDur, paused: false, finished: false });
+  // Recompute the full-article duration at the current speed (measured if known,
+  // else estimated); updatePlayerBar holds this as the total until generation
+  // completes, so the bar stays stable (and consistent with the library).
+  articleEstMs = itemDurationMs(readingItem, ttsSpeed) || estDurationMsForText(readingText, ttsSpeed);
+  updatePlayerBar({ position_ms: 0, buffered_ms: 0, gen_done: false, paused: false, finished: false });
 
   try {
     await invoke('tts_speak', { text, speed: ttsSpeed, sid, gen: myGen });
-    label.textContent = 'Playing...';
   } catch (err) {
     showToast('TTS error: ' + err);
     resetTtsUI();
@@ -1653,12 +1772,14 @@ function highlightAt(pos) {
   if (found >= 0) setActiveWord(found);
 }
 
-// Find the last rendered word whose absolute start is at/before `ms`.
+// Find the last rendered word whose absolute start is at/before `ms`. Skips
+// gaps (continue, not break) so it still works when resuming mid-article, where
+// words before the resume point have no timings yet.
 function wordAtTime(ms) {
   let best = null;
   for (let i = 0; i < readingWords.length; i++) {
     const t = wordTimes[i];
-    if (!t) break;            // beyond the rendered frontier
+    if (!t) continue;
     if (t.s <= ms) best = i; else break;
   }
   return best;
@@ -1679,21 +1800,70 @@ function seekToFull(targetMs) {
   }
 }
 
+// ── Reading progress (resume + library percentage) ──
+
+// Char offset of the word currently being read — the stable resume anchor and
+// the basis for the library percentage. Derived from playback position, falling
+// back to the highlighted word then the fragment start.
+function currentReadingChar() {
+  if (!readingWords.length) return 0;
+  const curMs = timelineBaseMs + (ttsState.position_ms || 0);
+  let w = wordAtTime(curMs);
+  if (w == null) w = activeWord >= 0 ? activeWord : genBaseWord;
+  if (w < 0 || !readingWords[w]) return 0;
+  return readingWords[w].start;
+}
+
+// First word at/after a character offset, for resuming at a saved position.
+function wordIndexAtChar(offset) {
+  if (offset <= 0) return 0;
+  for (let i = 0; i < readingWords.length; i++) {
+    if (readingWords[i].start >= offset) return i;
+  }
+  return Math.max(0, readingWords.length - 1);
+}
+
+// Persist reading progress (a char offset into the body) for the open item.
+// Throttled to ~4s unless `force` (pause, back, dismiss, finish).
+function saveProgress(force) {
+  if (!readingItem) return;
+  const now = Date.now();
+  if (!force && now - lastProgressSaveMs < 4000) return;
+  lastProgressSaveMs = now;
+  const offset = currentReadingChar();
+  readingItem.progress = offset;
+  invoke('library_set_progress', { id: readingItem.id, progress: offset }).catch(() => {});
+}
+
 async function loadLibrary() {
   const items = await invoke('library_list');
   const list = document.getElementById('lib-list');
   const empty = document.getElementById('lib-empty');
   empty.classList.toggle('hidden', items.length > 0);
-  list.innerHTML = items.slice().reverse().map(it => `
+  list.innerHTML = items.slice().reverse().map(it => {
+    const len = (it.body || '').length || 1;
+    const prog = Math.max(0, Math.min(len, it.progress || 0));
+    const pct = Math.round(prog / len * 100);
+    // Real measured duration if we have it, else an estimate; at the current
+    // playback speed so the list matches the reader.
+    const totalMs = itemDurationMs(it, ttsSpeed);
+    const leftMs = totalMs * (1 - prog / len);
+    // Finished -> "Finished"; in-progress -> "42% · 6 min left"; fresh -> length.
+    const meta = pct >= 100 ? 'Finished'
+      : pct > 0 ? `${pct}% · ${fmtMins(leftMs)} left`
+      : fmtMins(totalMs);
+    return `
     <div class="lib-item flex items-center justify-between gap-3 bg-surface-container-low rounded-xl px-4 py-3 cursor-pointer hover:bg-surface-container-high transition-colors" data-id="${escapeHtml(it.id)}">
-      <div class="min-w-0">
+      <div class="min-w-0 flex-1">
         <div class="text-sm font-medium text-on-surface truncate">${escapeHtml(it.title)}</div>
         <div class="text-xs text-on-surface-variant truncate mt-0.5">${escapeHtml(it.body.slice(0, 80))}</div>
+        <div class="text-[11px] ${pct >= 100 ? 'text-primary' : 'text-on-surface-variant'} tabular-nums mt-1">${meta}</div>
       </div>
       <button class="lib-del shrink-0 text-on-surface-variant/50 hover:text-error transition-colors p-1 cursor-pointer" data-id="${escapeHtml(it.id)}">
         <span class="material-symbols-outlined text-lg">delete</span>
       </button>
-    </div>`).join('');
+    </div>`;
+  }).join('');
   list.querySelectorAll('.lib-item').forEach(el => {
     el.addEventListener('click', (e) => {
       if (e.target.closest('.lib-del')) return;
@@ -1720,20 +1890,33 @@ async function openReading(id) {
   document.getElementById('reading-title').textContent = item.title;
   renderReading(readingText);
   showPanel('reading');
-  resetTtsUI();
+
+  // Resume point: a part-read item (progress between 0 and the end) reopens at
+  // that word and highlights it; a finished or fresh item starts at the top.
+  const prog = item.progress || 0;
+  resumeWord = (prog > 0 && prog < readingText.length) ? wordIndexAtChar(prog) : 0;
+  if (resumeWord > 0) setActiveWord(resumeWord);
+
+  // Show the player bar in a ready (paused, not started) state, positioned at
+  // the resume point. timelineBaseMs is an estimate of the skipped prefix so the
+  // bar reflects the saved progress before generation; pressing play continues
+  // from there (startSpeak reuses this base), keeping the bar continuous.
+  ttsStarted = false;
+  articleEstMs = itemDurationMs(item, ttsSpeed);
+  const frac = readingText.length ? Math.min(1, prog / readingText.length) : 0;
+  timelineBaseMs = articleEstMs > 0 ? frac * articleEstMs : 0;
+  showPlayerBar();
+  updatePlayerBar({ position_ms: 0, buffered_ms: 0, gen_done: false, paused: true, finished: false });
+
   await updateTtsPanel();
 }
 
 document.getElementById('reading-back').addEventListener('click', () => {
+  saveProgress(true);
   invoke('tts_stop');
   hidePlayerBar();
   showPanel('library');
   loadLibrary();
-});
-
-document.getElementById('tts-play').addEventListener('click', () => {
-  if (document.getElementById('tts-play').disabled) return;
-  startSpeak(readingText, 0, 0);
 });
 
 // ── Voice sheet (player bar) ──

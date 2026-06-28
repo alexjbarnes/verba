@@ -13,9 +13,19 @@ pub struct LibraryItem {
     pub title: String,
     pub body: String,
     pub created: String,
-    /// Playback resume point in ms; 0 until the reader records progress.
+    /// Reading progress as a character offset into `body`; 0 until the reader
+    /// records progress. Used for resume-where-you-left-off and the library
+    /// percentage. A char offset (not ms) so it's stable across speed/voice.
+    #[serde(default, alias = "position_ms")]
+    pub progress: u64,
+    /// Real measured playback duration (ms) of the whole article, captured once
+    /// generation completes. 0 = never measured (fall back to an estimate).
     #[serde(default)]
-    pub position_ms: u64,
+    pub duration_ms: u64,
+    /// Speed the duration was measured at, so it can be rescaled for other
+    /// speeds. 0 = unmeasured.
+    #[serde(default)]
+    pub duration_speed: f32,
 }
 
 pub struct Library {
@@ -65,7 +75,9 @@ impl Library {
             title,
             body,
             created: now.to_rfc3339(),
-            position_ms: 0,
+            progress: 0,
+            duration_ms: 0,
+            duration_speed: 0.0,
         };
         let mut items = self.items.lock().unwrap();
         items.push(item.clone());
@@ -95,10 +107,21 @@ impl Library {
         }
     }
 
-    pub fn set_position(&self, id: &str, position_ms: u64) {
+    pub fn set_progress(&self, id: &str, progress: u64) {
         let mut items = self.items.lock().unwrap();
         if let Some(item) = items.iter_mut().find(|i| i.id == id) {
-            item.position_ms = position_ms;
+            item.progress = progress;
+            if let Err(e) = Self::save_to_disk(&items) {
+                log::error!("Failed to save library: {e}");
+            }
+        }
+    }
+
+    pub fn set_duration(&self, id: &str, duration_ms: u64, speed: f32) {
+        let mut items = self.items.lock().unwrap();
+        if let Some(item) = items.iter_mut().find(|i| i.id == id) {
+            item.duration_ms = duration_ms;
+            item.duration_speed = speed;
             if let Err(e) = Self::save_to_disk(&items) {
                 log::error!("Failed to save library: {e}");
             }
@@ -172,10 +195,18 @@ mod tests {
     }
 
     #[test]
-    fn set_position_updates_item() {
+    fn set_progress_updates_item() {
         let lib = Library { items: Mutex::new(vec![]) };
         let a = lib.add("t".into(), "body".into());
-        lib.set_position(&a.id, 4200);
-        assert_eq!(lib.items.lock().unwrap()[0].position_ms, 4200);
+        lib.set_progress(&a.id, 42);
+        assert_eq!(lib.items.lock().unwrap()[0].progress, 42);
+    }
+
+    #[test]
+    fn deserializes_legacy_position_ms_alias() {
+        // Old library.json used `position_ms`; the alias keeps it loading.
+        let json = r#"[{"id":"1","title":"t","body":"b","created":"now","position_ms":7}]"#;
+        let items: Vec<LibraryItem> = serde_json::from_str(json).unwrap();
+        assert_eq!(items[0].progress, 7);
     }
 }
