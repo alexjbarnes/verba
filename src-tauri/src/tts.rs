@@ -70,11 +70,16 @@ enum TtsEngine {
 impl TtsEngine {
     /// Generate one already-batched chunk. Returns the whole chunk's PCM, or
     /// `None` when an empty Piper chunk should be skipped.
-    fn generate_chunk(&mut self, text: &str, speed: f32, sid: i32) -> Result<Option<Vec<f32>>, String> {
+    fn generate_chunk(
+        &mut self,
+        text: &str,
+        speed: f32,
+        sid: i32,
+    ) -> Result<Option<(Vec<f32>, Vec<crate::piper::SegmentSpan>)>, String> {
         match self {
             TtsEngine::Piper(engine) => {
-                let samples = engine.synth_chunk(text, sid, speed)?;
-                if samples.is_empty() { Ok(None) } else { Ok(Some(samples)) }
+                let (samples, spans) = engine.synth_chunk(text, sid, speed)?;
+                if samples.is_empty() { Ok(None) } else { Ok(Some((samples, spans))) }
             }
         }
     }
@@ -158,7 +163,7 @@ pub fn sample_rate() -> i32 {
     SAMPLE_RATE.load(Ordering::SeqCst)
 }
 
-pub fn speak(text: &str, speed: f32, sid: i32, app: Option<tauri::AppHandle>) -> Result<(), String> {
+pub fn speak(text: &str, speed: f32, sid: i32, gen: u64, app: Option<tauri::AppHandle>) -> Result<(), String> {
     // Serialize the whole setup: two concurrent calls must not each spin up a
     // player. The second waits here, then stops the first's player below.
     let _speak_guard = SPEAK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -208,6 +213,7 @@ pub fn speak(text: &str, speed: f32, sid: i32, app: Option<tauri::AppHandle>) ->
                 let duration_ms = if pos.gen_done { buffered_ms } else { estimated_ms.max(buffered_ms) };
                 let done = pos.gen_done && pos.cursor >= pos.buffered;
                 let _ = app.emit("tts-position", serde_json::json!({
+                    "gen": gen,
                     "position_ms": position_ms,
                     "buffered_ms": buffered_ms,
                     "duration_ms": duration_ms,
@@ -220,15 +226,19 @@ pub fn speak(text: &str, speed: f32, sid: i32, app: Option<tauri::AppHandle>) ->
                     position_ms as i64, duration_ms as i64, pos.paused,
                 );
                 if done && !ff.swap(true, std::sync::atomic::Ordering::SeqCst) {
-                    let _ = app.emit("tts-finished", ());
+                    let _ = app.emit("tts-finished", serde_json::json!({ "gen": gen }));
                     #[cfg(target_os = "android")]
                     crate::android_stop_media_session();
                 }
             }) as Box<dyn Fn(player::PlaybackPosition) + Send + 'static>
         });
 
+    // Samples (no app handle) play through the same player but must stay quiet:
+    // no media-session notification, no UI events.
     #[cfg(target_os = "android")]
-    crate::android_start_media_session();
+    if app.is_some() {
+        crate::android_start_media_session();
+    }
 
     let player = Arc::new(player::AudioPlayer::new(sample_rate, estimated_samples, on_position)?);
     *lock_player() = Some(player.clone());
@@ -260,7 +270,7 @@ pub fn speak(text: &str, speed: f32, sid: i32, app: Option<tauri::AppHandle>) ->
                     }));
 
                     match infer_result {
-                        Ok(Ok(Some(samples))) => {
+                        Ok(Ok(Some((samples, spans)))) => {
                             player.push(samples.clone());
                             let elapsed_ms = t.elapsed().as_millis();
                             let audio_ms = (samples.len() as u64 * 1000) / sample_rate.max(1) as u64;
@@ -269,17 +279,20 @@ pub fn speak(text: &str, speed: f32, sid: i32, app: Option<tauri::AppHandle>) ->
                                 "TTS [{}/{}]: {:.1}s audio in {}ms, RTF {:.2}x",
                                 i + 1, total, audio_ms as f32 / 1000.0, elapsed_ms, rtf
                             );
-                            // Emit the text-to-time mapping for this chunk so the
-                            // reading view can highlight words as playback advances.
-                            if let Some(ref app) = app {
-                                let _ = app.emit("tts-timing", serde_json::json!({
-                                    "index": i,
-                                    "text": sentence,
-                                    "start_ms": cumulative_ms,
-                                    "duration_ms": audio_ms,
-                                }));
+                            // Emit per-segment timing (speech-only duration) so the
+                            // reading view highlight tracks speech and treats the
+                            // inserted pauses as gaps, not part of a word.
+                            for span in &spans {
+                                if let Some(ref app) = app {
+                                    let _ = app.emit("tts-timing", serde_json::json!({
+                                        "gen": gen,
+                                        "text": span.text,
+                                        "start_ms": cumulative_ms,
+                                        "duration_ms": span.speech_ms,
+                                    }));
+                                }
+                                cumulative_ms += span.speech_ms + span.pause_ms;
                             }
-                            cumulative_ms += audio_ms;
                         }
                         // No audio this chunk: an empty Piper chunk -> skip.
                         Ok(Ok(None)) => continue,

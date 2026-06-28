@@ -64,6 +64,7 @@ document.querySelectorAll('.nav-btn').forEach(btn => {
     if (btn.dataset.tab === 'general') loadVocab();
     if (btn.dataset.tab === 'snippets') loadSnippets();
     if (btn.dataset.tab === 'library') loadLibrary();
+    if (btn.dataset.tab === 'voices') loadVoices();
   });
 });
 
@@ -483,12 +484,15 @@ listen('download-progress', (event) => {
   const { id, progress } = event.payload;
   const pct = Math.round(progress * 100);
 
-  // Reader's inline voice-download bar (it has no model-row container)
+  // Reader's inline voice-download bar + Voices-page empty-state bar (neither
+  // has a model-row container).
   if (id === ttsModelId) {
-    const rf = document.getElementById('tts-dl-fill');
-    const rp = document.getElementById('tts-dl-pct');
-    if (rf) rf.style.width = `${pct}%`;
-    if (rp) rp.textContent = `${pct}%`;
+    for (const [fillId, pctId] of [['tts-dl-fill', 'tts-dl-pct'], ['voices-dl-fill', 'voices-dl-pct']]) {
+      const f = document.getElementById(fillId);
+      const p = document.getElementById(pctId);
+      if (f) f.style.width = `${pct}%`;
+      if (p) p.textContent = `${pct}%`;
+    }
   }
 
   const container = document.querySelector(`[data-model-id="${id}"]`);
@@ -519,6 +523,7 @@ listen('download-progress', (event) => {
 listen('download-complete', async () => {
   await loadModels();
   await updateTtsPanel();
+  if (!document.getElementById('voices').classList.contains('hidden')) loadVoices();
 });
 
 listen('engine-ready', () => {
@@ -566,6 +571,14 @@ async function loadConfig() {
   // Restore audio device selection
   document.getElementById('audio-device').value = cfg.device_index;
   document.getElementById('cfg-threads').value = String(cfg.threads);
+
+  // Restore TTS voice favourites, last-selected voice, and per-voice speeds.
+  ttsFavourites = Array.isArray(cfg.tts_favourite_sids) ? cfg.tts_favourite_sids.slice() : [];
+  ttsVoiceSpeeds = (cfg.tts_voice_speeds && typeof cfg.tts_voice_speeds === 'object') ? cfg.tts_voice_speeds : {};
+  ttsVoice = cfg.tts_voice || '0';
+  updateVoiceBtnLabel();
+  // Apply the saved speed for the restored voice (default 1x).
+  setTtsSpeed(speedForVoice(ttsVoice));
 
   // Auto-save on change
   document.getElementById('cfg-haptic').addEventListener('change', saveConfig);
@@ -1021,6 +1034,14 @@ let ttsModelId = null;       // single Piper TTS model id, resolved from the reg
 let ttsLoadedModelId = null;
 let ttsLoadedEngine = null;
 
+// Friendly label for a speaker id. Models with a named preset (e.g. Kokoro) use
+// it; LibriTTS speakers are unnamed, so fall back to "Voice N".
+function voiceLabel(sid) {
+  const presets = TTS_VOICE_PRESETS[ttsModelId] || [];
+  const p = presets.find(v => v.sid === sid);
+  return p ? p.label : `Voice ${sid}`;
+}
+
 async function updateTtsPanel() {
   const models = await invoke('list_models');
   const tts = models.find(m => m.engine.startsWith('tts_'));
@@ -1047,55 +1068,177 @@ async function updateTtsPanel() {
   dlLabel.textContent = `${tts.name}, ${tts.size}`;
   dlRow.classList.toggle('hidden', downloaded || downloading);
 
-  const numSpeakers = info.loaded
-    ? info.num_speakers
-    : (downloaded ? await invoke('tts_model_speakers', { id: tts.id }) : 0);
-  await updateTtsVoices(numSpeakers);
-  const voiceVisible = !document.getElementById('tts-voice-row').classList.contains('hidden');
-
   // Play is available as soon as the voice is on disk; the model itself loads
-  // lazily at generation time (see the play handler).
+  // lazily at generation time (see the play handler). The block only carries the
+  // download prompt now (voice selection moved to the player bar + Voices page),
+  // so it shows only while the voice isn't ready.
   playBtn.disabled = !downloaded;
-
-  block.classList.toggle('hidden', !(!downloaded || downloading || voiceVisible));
+  block.classList.toggle('hidden', downloaded && !downloading);
 }
 
-async function updateTtsVoices(numSpeakers) {
-  const voiceRow = document.getElementById('tts-voice-row');
-  const voiceSelect = document.getElementById('tts-voice-select');
-  const custom = await invoke('tts_list_custom_voices');
+// ── Voices page: sample + favourite ──
 
-  if (numSpeakers <= 1 && custom.length === 0) {
-    voiceRow.classList.add('hidden');
+// Speaker count for the model, cached when the Voices page or voice sheet builds.
+let voicesNumSpeakers = 0;
+// sid currently auditioning (drives the row's playing icon); -1 = none.
+let samplingSid = -1;
+let sampleClearTimer = null;
+
+async function loadVoices() {
+  const models = await invoke('list_models');
+  const tts = models.find(m => m.engine.startsWith('tts_'));
+  const dl = document.getElementById('voices-download');
+  const favSection = document.getElementById('voices-fav-section');
+  const allSection = document.getElementById('voices-all-section');
+  const dlBtn = document.getElementById('voices-download-btn');
+
+  if (!tts) {
+    dl.classList.remove('hidden');
+    document.getElementById('voices-download-label').textContent = 'No voice model available';
+    dlBtn.classList.add('hidden');
+    favSection.classList.add('hidden');
+    allSection.classList.add('hidden');
     return;
   }
 
-  voiceRow.classList.remove('hidden');
-  const prevVal = voiceSelect.value;
-  const presets = TTS_VOICE_PRESETS[ttsModelId] || [];
-
-  // Cap the numbered list: some models (e.g. Piper LibriTTS) expose ~900
-  // speakers, which would build a huge sluggish dropdown.
-  const MAX_VOICES = 60;
-  const shown = Math.min(numSpeakers, MAX_VOICES);
-  let html = presets
-    .filter(v => v.sid < numSpeakers)
-    .map(v => `<option value="${v.sid}">${v.label}</option>`)
-    .join('');
-  for (let i = presets.length; i < shown; i++) {
-    html += `<option value="${i}">Speaker ${i}</option>`;
+  ttsModelId = tts.id;
+  const downloaded = tts.status === 'downloaded' || tts.status === 'active';
+  if (!downloaded) {
+    dl.classList.remove('hidden');
+    document.getElementById('voices-download-label').textContent = `${tts.name}, ${tts.size}`;
+    dlBtn.classList.remove('hidden');
+    dlBtn.disabled = tts.status === 'downloading';
+    favSection.classList.add('hidden');
+    allSection.classList.add('hidden');
+    return;
   }
-  voiceSelect.innerHTML = html;
+  dl.classList.add('hidden');
 
-  if (custom.length > 0) {
-    voiceSelect.innerHTML += '<option disabled>-- Custom --</option>';
-    for (const name of custom) {
-      voiceSelect.innerHTML += `<option value="custom:${name}">${name}</option>`;
-    }
-  }
-
-  if (prevVal) voiceSelect.value = prevVal;
+  const info = await invoke('tts_info');
+  voicesNumSpeakers = info.loaded ? info.num_speakers : await invoke('tts_model_speakers', { id: tts.id });
+  renderVoiceLists();
 }
+
+function voiceRowHtml(sid) {
+  const fav = ttsFavourites.includes(sid);
+  const playing = sid === samplingSid;
+  return `
+    <div class="voice-row flex items-center justify-between gap-2 px-4 py-2.5" data-sid="${sid}">
+      <button class="voice-sample flex items-center gap-3 min-w-0 flex-1 text-left cursor-pointer" data-sid="${sid}">
+        <span class="material-symbols-outlined text-xl ${playing ? 'text-primary' : 'text-on-surface-variant'}">${playing ? 'graphic_eq' : 'play_circle'}</span>
+        <span class="text-sm text-on-surface truncate">${escapeHtml(voiceLabel(sid))}</span>
+      </button>
+      <button class="voice-fav shrink-0 p-1 cursor-pointer ${fav ? 'text-primary' : 'text-on-surface-variant/40'}" data-sid="${sid}">
+        <span class="material-symbols-outlined text-lg" style="font-variation-settings:'FILL' ${fav ? 1 : 0}">star</span>
+      </button>
+    </div>`;
+}
+
+function rebuildFavSection() {
+  const favSection = document.getElementById('voices-fav-section');
+  const favList = document.getElementById('voices-fav-list');
+  const favs = ttsFavourites.filter(sid => sid < voicesNumSpeakers);
+  favSection.classList.toggle('hidden', favs.length === 0);
+  favList.innerHTML = favs.map(voiceRowHtml).join('');
+}
+
+function renderVoiceLists() {
+  rebuildFavSection();
+  const allSection = document.getElementById('voices-all-section');
+  const allList = document.getElementById('voices-all-list');
+  allSection.classList.toggle('hidden', voicesNumSpeakers <= 0);
+  let html = '';
+  for (let sid = 0; sid < voicesNumSpeakers; sid++) html += voiceRowHtml(sid);
+  allList.innerHTML = html;
+}
+
+async function sampleVoice(sid) {
+  if (!ttsModelId) { showToast('No voice available'); return; }
+  try {
+    if (!ttsLoadedModelId) {
+      await invoke('tts_load', { id: ttsModelId });
+      ttsLoadedModelId = ttsModelId;
+    }
+    await invoke('tts_sample', { sid, speed: ttsSpeed });
+    setSamplingSid(sid);
+  } catch (err) { showToast('Sample failed: ' + err); }
+}
+
+// The sample plays with no app handle, so no finished event comes back. Show the
+// playing icon on the row and clear it after a short delay (or when another row
+// is sampled).
+function setSamplingSid(sid) {
+  const prev = samplingSid;
+  samplingSid = sid;
+  if (prev !== sid) updateSampleIcon(prev);
+  updateSampleIcon(sid);
+  if (sampleClearTimer) clearTimeout(sampleClearTimer);
+  sampleClearTimer = setTimeout(() => { const s = samplingSid; samplingSid = -1; updateSampleIcon(s); }, 4000);
+}
+
+function updateSampleIcon(sid) {
+  if (sid < 0) return;
+  const playing = sid === samplingSid;
+  document.querySelectorAll(`.voice-sample[data-sid="${sid}"] .material-symbols-outlined`).forEach(icon => {
+    icon.textContent = playing ? 'graphic_eq' : 'play_circle';
+    icon.classList.toggle('text-primary', playing);
+    icon.classList.toggle('text-on-surface-variant', !playing);
+  });
+}
+
+async function toggleFavourite(sid) {
+  const i = ttsFavourites.indexOf(sid);
+  const adding = i < 0;
+  if (adding) ttsFavourites.push(sid);
+  else ttsFavourites.splice(i, 1);
+  ttsFavourites.sort((a, b) => a - b);
+  await persistFavourites();
+  // Update the star in place across both lists, then rebuild only the small
+  // favourites list (avoids re-rendering the full ~900-row list each tap).
+  document.querySelectorAll(`.voice-fav[data-sid="${sid}"]`).forEach(btn => {
+    btn.classList.toggle('text-primary', adding);
+    btn.classList.toggle('text-on-surface-variant/40', !adding);
+    const star = btn.querySelector('.material-symbols-outlined');
+    if (star) star.style.fontVariationSettings = `'FILL' ${adding ? 1 : 0}`;
+  });
+  rebuildFavSection();
+}
+
+async function persistFavourites() {
+  try {
+    const cfg = await invoke('get_config');
+    cfg.tts_favourite_sids = ttsFavourites;
+    await invoke('save_config', { cfg });
+  } catch (err) { showToast('Save failed: ' + err); }
+}
+
+function onVoiceListClick(e) {
+  const sampleBtn = e.target.closest('.voice-sample');
+  if (sampleBtn) { sampleVoice(parseInt(sampleBtn.dataset.sid, 10)); return; }
+  const favBtn = e.target.closest('.voice-fav');
+  if (favBtn) { toggleFavourite(parseInt(favBtn.dataset.sid, 10)); }
+}
+document.getElementById('voices-fav-list').addEventListener('click', onVoiceListClick);
+document.getElementById('voices-all-list').addEventListener('click', onVoiceListClick);
+
+document.getElementById('voices-download-btn').addEventListener('click', async () => {
+  if (!ttsModelId) return;
+  const btn = document.getElementById('voices-download-btn');
+  const progress = document.getElementById('voices-dl-progress');
+  btn.disabled = true;
+  btn.textContent = 'Downloading...';
+  progress.classList.remove('hidden');
+  try {
+    await invoke('download_model', { id: ttsModelId });
+    // download-complete refreshes the page; reset the button for next time.
+    btn.textContent = 'Download';
+  } catch (err) {
+    showToast('Download failed: ' + err);
+    progress.classList.add('hidden');
+    btn.disabled = false;
+    btn.textContent = 'Download';
+  }
+});
 
 document.getElementById('tts-download-btn').addEventListener('click', async () => {
   if (!ttsModelId) return;
@@ -1121,7 +1264,14 @@ document.getElementById('tts-download-btn').addEventListener('click', async () =
 let ttsState = { position_ms: 0, buffered_ms: 0, duration_ms: 0, paused: false, finished: false };
 let ttsSeeking = false;
 let ttsSpeed = 1.0;
-let ttsSpeakParams = { sid: 0 };
+// Canonical selected voice: a speaker-id string ("37") or "custom:<name>".
+// Both the player voice sheet and a fresh load set this; startSpeak reads it.
+let ttsVoice = '0';
+// Starred speaker ids. The player voice sheet shows these (or all when empty).
+let ttsFavourites = [];
+// Per-voice playback speed (voice string -> speed). Selecting a voice restores
+// its last speed; changing speed saves it against the current voice.
+let ttsVoiceSpeeds = {};
 // Reading view state (Listen library)
 let readingItem = null;
 let readingText = '';
@@ -1130,6 +1280,18 @@ let wordTimes = {};
 let genBaseWord = 0;
 let timingCursor = 0;
 let activeWord = -1;
+// Absolute ms offset of the current render fragment within the full text. The
+// player plays one fragment [genBaseWord..end]; this is the time before it.
+let timelineBaseMs = 0;
+// Pending full-timeline seek target during a progress-bar drag (committed on release).
+let pendingSeekMs = 0;
+// Latest full-timeline total (ms), so a mid-listen re-render can keep the bar
+// stable instead of briefly collapsing to the resume point.
+let lastFullDurMs = 0;
+// Generation id stamped on each tts_speak. Events from a superseded generation
+// (the still-running old render after a speed/voice change) are ignored so their
+// stale timings can't corrupt the new fragment's word map.
+let genId = 0;
 
 const playerBar = document.getElementById('tts-player');
 const positionFill = document.getElementById('tts-position-fill');
@@ -1164,15 +1326,21 @@ function resetTtsUI() {
 
 function updatePlayerBar(st) {
   ttsState = st;
-  const dur = st.duration_ms || st.buffered_ms || 1;
-  const posPct = Math.min(100, (st.position_ms / dur) * 100);
-  const bufPct = dur > 0 ? Math.min(100, (st.buffered_ms / dur) * 100) : 0;
+  // Show the full-text timeline: this fragment sits at timelineBaseMs, so add it
+  // to the player-relative position/buffer to get absolute values.
+  const fragDur = st.duration_ms || st.buffered_ms || 1;
+  const fullPos = timelineBaseMs + st.position_ms;
+  const fullDur = timelineBaseMs + fragDur;
+  const fullBuf = timelineBaseMs + st.buffered_ms;
+  lastFullDurMs = fullDur;
+  const posPct = Math.min(100, (fullPos / fullDur) * 100);
+  const bufPct = fullDur > 0 ? Math.min(100, (fullBuf / fullDur) * 100) : 0;
   positionFill.style.width = `${posPct}%`;
   bufferFill.style.width = `${bufPct}%`;
   seekThumb.style.left = `${posPct}%`;
-  seekThumb.style.opacity = dur > 0 ? '1' : '0';
-  timeCurrent.textContent = fmtTime(st.position_ms);
-  timeTotal.textContent = fmtTime(dur);
+  seekThumb.style.opacity = fullDur > 0 ? '1' : '0';
+  timeCurrent.textContent = fmtTime(fullPos);
+  timeTotal.textContent = fmtTime(fullDur);
   const icon = playPauseBtn.querySelector('.material-symbols-outlined');
   if (st.finished) {
     icon.textContent = 'replay';
@@ -1186,12 +1354,14 @@ function updatePlayerBar(st) {
 }
 
 listen('tts-position', (event) => {
+  if (event.payload.gen !== genId) return;
   if (!ttsSeeking) updatePlayerBar(event.payload);
   showPlayerBar();
-  highlightAt(event.payload.position_ms);
+  highlightAt(timelineBaseMs + event.payload.position_ms);
 });
 
 listen('tts-timing', (event) => {
+  if (event.payload.gen !== genId) return;
   const { start_ms, duration_ms, text } = event.payload;
   const words = (text || '').trim().split(/\s+/).filter(Boolean);
   const n = words.length;
@@ -1201,21 +1371,28 @@ listen('tts-timing', (event) => {
   let acc = start_ms;
   for (let k = 0; k < n; k++) {
     const dur = duration_ms * (lens[k] / totalLen);
-    wordTimes[timingCursor + k] = { s: acc, e: acc + dur };
+    // Absolute timeline position = fragment base + offset within the fragment.
+    wordTimes[timingCursor + k] = { s: timelineBaseMs + acc, e: timelineBaseMs + acc + dur };
     acc += dur;
   }
   timingCursor += n;
 });
 
-listen('tts-finished', () => {
+listen('tts-finished', (event) => {
+  if (event.payload && event.payload.gen !== genId) return;
   resetTtsUI();
 });
 
 playPauseBtn.addEventListener('click', () => {
   if (ttsState.finished) {
-    invoke('tts_seek', { positionMs: 0 });
-    invoke('tts_resume');
     ttsState.finished = false;
+    // Replay from the very start of the article.
+    if (timelineBaseMs === 0) {
+      invoke('tts_seek', { positionMs: 0 });
+      invoke('tts_resume');
+    } else {
+      startSpeak(readingText, 0, 0);
+    }
   } else if (ttsState.paused) {
     invoke('tts_resume');
   } else {
@@ -1224,11 +1401,11 @@ playPauseBtn.addEventListener('click', () => {
 });
 
 document.getElementById('tts-skip-back').addEventListener('click', () => {
-  invoke('tts_seek', { positionMs: Math.max(0, ttsState.position_ms - 10000) });
+  seekToFull(timelineBaseMs + ttsState.position_ms - 10000);
 });
 
 document.getElementById('tts-skip-fwd').addEventListener('click', () => {
-  invoke('tts_seek', { positionMs: Math.min(ttsState.buffered_ms, ttsState.position_ms + 10000) });
+  seekToFull(timelineBaseMs + ttsState.position_ms + 10000);
 });
 
 document.getElementById('tts-dismiss').addEventListener('click', () => {
@@ -1241,22 +1418,22 @@ function seekFromPointer(e) {
   const rect = progressTrack.getBoundingClientRect();
   const x = (e.touches ? e.touches[0].clientX : e.clientX) - rect.left;
   const pct = Math.max(0, Math.min(1, x / rect.width));
-  const seekable = ttsState.buffered_ms;
-  const pos = Math.floor(Math.min(pct * (ttsState.duration_ms || seekable), seekable));
-  invoke('tts_seek', { positionMs: pos });
-  const dur = ttsState.duration_ms || seekable || 1;
-  const displayPct = (pos / dur) * 100;
+  const fullDur = timelineBaseMs + (ttsState.duration_ms || ttsState.buffered_ms || 1);
+  // Defer the actual seek to release: a drag across the fragment start could
+  // otherwise trigger repeated re-renders. Track the target and preview only.
+  pendingSeekMs = Math.floor(pct * fullDur);
+  const displayPct = (pendingSeekMs / fullDur) * 100;
   positionFill.style.width = `${displayPct}%`;
   seekThumb.style.left = `${displayPct}%`;
-  timeCurrent.textContent = fmtTime(pos);
+  timeCurrent.textContent = fmtTime(pendingSeekMs);
 }
 
 progressTrack.addEventListener('mousedown', (e) => { ttsSeeking = true; seekFromPointer(e); });
 progressTrack.addEventListener('touchstart', (e) => { ttsSeeking = true; seekFromPointer(e); }, { passive: true });
 document.addEventListener('mousemove', (e) => { if (ttsSeeking) seekFromPointer(e); });
 document.addEventListener('touchmove', (e) => { if (ttsSeeking) seekFromPointer(e); }, { passive: true });
-document.addEventListener('mouseup', () => { ttsSeeking = false; });
-document.addEventListener('touchend', () => { ttsSeeking = false; });
+document.addEventListener('mouseup', () => { if (ttsSeeking) { ttsSeeking = false; seekToFull(pendingSeekMs); } });
+document.addEventListener('touchend', () => { if (ttsSeeking) { ttsSeeking = false; seekToFull(pendingSeekMs); } });
 
 // ── Speed sheet ──
 
@@ -1285,6 +1462,13 @@ function setTtsSpeed(val) {
   updateSpeedChips();
 }
 
+// Save the current speed against the active voice so reselecting that voice
+// restores it. Fire-and-forget; persistVoicePrefs is async.
+function rememberSpeedForVoice() {
+  ttsVoiceSpeeds[ttsVoice] = ttsSpeed;
+  persistVoicePrefs();
+}
+
 function updateSpeedChips() {
   speedPresets.forEach(chip => {
     const v = parseFloat(chip.dataset.speed);
@@ -1305,16 +1489,17 @@ document.getElementById('speed-sheet-overlay').addEventListener('click', closeSp
 
 // Synthesize `text`, mapping its words onto the reading view starting at word
 // index `baseWord` (0 for a fresh play, the resume point on speed/voice change).
-async function startSpeak(text, baseWord) {
+async function startSpeak(text, baseWord, baseMs) {
   if (!text || !text.trim()) { showToast('Nothing to read'); return; }
   if (!ttsModelId) { showToast('No voice available'); return; }
 
+  const myGen = ++genId;
   const playBtn = document.getElementById('tts-play');
   const label = document.getElementById('tts-play-label');
   playBtn.disabled = true;
   label.textContent = 'Generating...';
 
-  const voiceVal = document.getElementById('tts-voice-select').value || '0';
+  const voiceVal = ttsVoice || '0';
   const isCustom = voiceVal.startsWith('custom:');
 
   // Lazy-load the voice at generation time, no manual load step. The custom
@@ -1335,17 +1520,34 @@ async function startSpeak(text, baseWord) {
   }
 
   const sid = isCustom ? 0 : parseInt(voiceVal);
-  ttsSpeakParams = { sid };
-  // Reset the timing map for this generation; words map from baseWord onward.
+  // Position this fragment on the full-text timeline. A fresh play (baseWord 0)
+  // resets everything; a resume/seek keeps prior word timings so seeking back
+  // into already-rendered text can still locate its position.
   genBaseWord = baseWord;
   timingCursor = baseWord;
-  wordTimes = {};
+  timelineBaseMs = baseMs;
+  if (baseWord === 0) {
+    wordTimes = {};
+    activeWord = -1;
+  } else {
+    // Drop timings from the resume point onward; they get re-rendered (maybe at a
+    // new speed). Keep earlier words for backward-seek lookup. Leaving stale
+    // ahead-of-frontier timings makes the highlight jump ahead of the speech.
+    for (const k in wordTimes) {
+      if (Number(k) >= baseWord) delete wordTimes[k];
+    }
+  }
 
   showPlayerBar();
-  updatePlayerBar({ position_ms: 0, buffered_ms: 0, duration_ms: 0, paused: false, finished: false });
+  // Reset the bar for the new fragment. Fresh play starts at zero; a mid-listen
+  // re-render keeps the full-timeline total so the bar doesn't collapse to the
+  // resume point while the new fragment's own estimate is still 0.
+  const resetDur = baseWord === 0 ? 0 : Math.max(1, lastFullDurMs - timelineBaseMs);
+  if (baseWord === 0) lastFullDurMs = 0;
+  updatePlayerBar({ position_ms: 0, buffered_ms: 0, duration_ms: resetDur, paused: false, finished: false });
 
   try {
-    await invoke('tts_speak', { text, speed: ttsSpeed, sid });
+    await invoke('tts_speak', { text, speed: ttsSpeed, sid, gen: myGen });
     label.textContent = 'Playing...';
   } catch (err) {
     showToast('TTS error: ' + err);
@@ -1359,28 +1561,36 @@ async function startSpeak(text, baseWord) {
 async function resumeFromCurrentWord() {
   if (ttsState.finished || ttsState.paused) return;
   if (playerBar.classList.contains('translate-y-full')) return; // not playing
-  if (!readingText || activeWord < 0 || !readingWords[activeWord]) return;
-  const fromWord = activeWord;
-  const remaining = readingText.slice(readingWords[fromWord].start);
+  if (!readingText) return;
+  // Derive the current word from the PLAYBACK position, not the highlight, so a
+  // re-render works even when highlighting hasn't caught up. Fall back to the
+  // fragment start before any timing has arrived.
+  const curMs = timelineBaseMs + ttsState.position_ms;
+  let w = wordAtTime(curMs);
+  if (w == null) w = genBaseWord;
+  if (!readingWords[w]) return;
+  const remaining = readingText.slice(readingWords[w].start);
   if (!remaining.trim()) return;
-  await startSpeak(remaining, fromWord);
+  await startSpeak(remaining, w, wordTimes[w] ? wordTimes[w].s : curMs);
 }
 
 speedPresets.forEach(chip => {
   chip.addEventListener('click', () => {
     setTtsSpeed(parseFloat(chip.dataset.speed));
+    rememberSpeedForVoice();
     closeSpeedSheet();
     resumeFromCurrentWord();
   });
 });
 
-// `input` updates the label live during the drag; `change` (release) commits
-// and applies the new speed to playback.
+// `input` updates the label live during the drag; `change` (release) commits,
+// saves the speed for the current voice, and applies it to playback.
 speedSlider.addEventListener('input', () => {
   setTtsSpeed(parseFloat(speedSlider.value));
 });
 speedSlider.addEventListener('change', () => {
   setTtsSpeed(parseFloat(speedSlider.value));
+  rememberSpeedForVoice();
   resumeFromCurrentWord();
 });
 
@@ -1431,13 +1641,41 @@ function setActiveWord(i) {
 }
 
 function highlightAt(pos) {
-  // Walk forward from the generation's first word to the one whose time range
-  // holds `pos`. wordTimes is only filled as chunks finish generating.
+  // Highlight the last rendered word whose start time is at/before `pos`. Scan
+  // to the generation frontier (don't break early) so a gap or slight timing
+  // drift can't leave the highlight permanently stuck on one word.
+  let found = -1;
   for (let i = genBaseWord; i < readingWords.length; i++) {
     const t = wordTimes[i];
-    if (!t) break;          // generation hasn't reached this word yet
-    if (pos < t.s) break;   // position is before this word
-    if (pos < t.e) { setActiveWord(i); return; }
+    if (!t) break;          // beyond the generation frontier
+    if (t.s <= pos) found = i;
+  }
+  if (found >= 0) setActiveWord(found);
+}
+
+// Find the last rendered word whose absolute start is at/before `ms`.
+function wordAtTime(ms) {
+  let best = null;
+  for (let i = 0; i < readingWords.length; i++) {
+    const t = wordTimes[i];
+    if (!t) break;            // beyond the rendered frontier
+    if (t.s <= ms) best = i; else break;
+  }
+  return best;
+}
+
+// Seek to a full-timeline target: an in-fragment cursor move when the target is
+// within the current render, otherwise a re-render from the word at that point
+// (so backward seeks into already-heard text work).
+function seekToFull(targetMs) {
+  targetMs = Math.max(0, targetMs);
+  const fragT = targetMs - timelineBaseMs;
+  if (fragT >= 0) {
+    invoke('tts_seek', { positionMs: Math.min(fragT, ttsState.buffered_ms) });
+  } else if (readingText) {
+    const w = wordAtTime(targetMs);
+    if (w == null || !readingWords[w]) return;
+    startSpeak(readingText.slice(readingWords[w].start), w, wordTimes[w] ? wordTimes[w].s : 0);
   }
 }
 
@@ -1495,11 +1733,93 @@ document.getElementById('reading-back').addEventListener('click', () => {
 
 document.getElementById('tts-play').addEventListener('click', () => {
   if (document.getElementById('tts-play').disabled) return;
-  startSpeak(readingText, 0);
+  startSpeak(readingText, 0, 0);
 });
 
-// Changing the voice mid-listen continues from the current word in the new voice.
-document.getElementById('tts-voice-select').addEventListener('change', () => {
+// ── Voice sheet (player bar) ──
+
+const voiceSheet = document.getElementById('voice-sheet');
+
+function updateVoiceBtnLabel() {
+  const label = document.getElementById('tts-voice-btn-label');
+  if (!label) return;
+  label.textContent = ttsVoice.startsWith('custom:') ? ttsVoice.slice(7) : (ttsVoice || '0');
+}
+
+function speedForVoice(voice) {
+  const s = ttsVoiceSpeeds[voice];
+  return typeof s === 'number' ? s : 1.0;
+}
+
+function setTtsVoice(val) {
+  ttsVoice = String(val);
+  updateVoiceBtnLabel();
+  // Each voice carries its own speed; restore it (default 1x) and reflect it in
+  // the speed control.
+  setTtsSpeed(speedForVoice(ttsVoice));
+  persistVoicePrefs();
+}
+
+// Persist the voice prefs touched here (last voice + per-voice speeds) without
+// disturbing the device/haptic/threads fields owned by saveConfig().
+async function persistVoicePrefs() {
+  try {
+    const cfg = await invoke('get_config');
+    cfg.tts_voice = ttsVoice;
+    cfg.tts_voice_speeds = ttsVoiceSpeeds;
+    await invoke('save_config', { cfg });
+  } catch (_) { /* non-fatal */ }
+}
+
+function voiceSheetItemHtml(value, label) {
+  const active = value === ttsVoice;
+  return `<button class="voice-pick w-full flex items-center justify-between gap-3 px-3 py-2.5 rounded-xl text-left cursor-pointer ${active ? 'bg-primary/15' : 'hover:bg-surface-container-highest'}" data-voice="${escapeHtml(value)}">
+      <span class="text-sm ${active ? 'text-primary font-semibold' : 'text-on-surface'}">${escapeHtml(label)}</span>
+      ${active ? '<span class="material-symbols-outlined text-lg text-primary">check</span>' : ''}
+    </button>`;
+}
+
+// Build the player voice list: favourites if any, else all speakers; then any
+// custom voices. Speaker count is fetched here so the sheet works even if the
+// Voices page was never opened.
+async function buildVoiceSheet() {
+  const list = document.getElementById('voice-sheet-list');
+  const hint = document.getElementById('voice-sheet-hint');
+  let n = 0;
+  try {
+    const info = await invoke('tts_info');
+    n = info.loaded ? info.num_speakers : (ttsModelId ? await invoke('tts_model_speakers', { id: ttsModelId }) : 0);
+  } catch (_) {}
+  voicesNumSpeakers = n;
+
+  const favs = ttsFavourites.filter(sid => sid < n);
+  const usingFavs = favs.length > 0;
+  const sids = usingFavs ? favs : Array.from({ length: n }, (_, i) => i);
+  hint.textContent = usingFavs ? 'Favourites' : (n > 0 ? 'All voices' : '');
+
+  let html = sids.map(sid => voiceSheetItemHtml(String(sid), voiceLabel(sid))).join('');
+
+  const custom = await invoke('tts_list_custom_voices');
+  if (custom.length) {
+    html += `<p class="text-[11px] text-on-surface-variant px-3 pt-3 pb-1 uppercase tracking-wider">Custom</p>`;
+    html += custom.map(name => voiceSheetItemHtml('custom:' + name, name)).join('');
+  }
+  list.innerHTML = html || `<p class="text-sm text-on-surface-variant px-3 py-6 text-center">No voices available</p>`;
+}
+
+async function openVoiceSheet() {
+  await buildVoiceSheet();
+  voiceSheet.classList.remove('hidden');
+}
+function closeVoiceSheet() { voiceSheet.classList.add('hidden'); }
+
+document.getElementById('tts-voice-btn').addEventListener('click', openVoiceSheet);
+document.getElementById('voice-sheet-overlay').addEventListener('click', closeVoiceSheet);
+document.getElementById('voice-sheet-list').addEventListener('click', (e) => {
+  const btn = e.target.closest('.voice-pick');
+  if (!btn) return;
+  setTtsVoice(btn.dataset.voice);
+  closeVoiceSheet();
   resumeFromCurrentWord();
 });
 

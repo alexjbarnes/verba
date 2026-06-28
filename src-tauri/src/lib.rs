@@ -435,10 +435,26 @@ fn tts_info() -> serde_json::Value {
 }
 
 #[tauri::command]
-async fn tts_speak(app: tauri::AppHandle, text: String, speed: Option<f32>, sid: Option<i32>) -> Result<(), String> {
+async fn tts_speak(app: tauri::AppHandle, text: String, speed: Option<f32>, sid: Option<i32>, gen: Option<u64>) -> Result<(), String> {
     let speed = speed.unwrap_or(1.0);
     let sid = sid.unwrap_or(0);
-    tts::speak(&text, speed, sid, Some(app))
+    tts::speak(&text, speed, sid, gen.unwrap_or(0), Some(app))
+}
+
+/// Play a short fixed phrase in one voice so the user can audition it on the
+/// Voices page. Passes no app handle, so `tts::speak` emits no UI events and
+/// starts no media session — it just plays through the shared player (stopping
+/// any current playback, same as a normal speak).
+#[tauri::command]
+async fn tts_sample(sid: i32, speed: Option<f32>) -> Result<(), String> {
+    let speed = speed.unwrap_or(1.0);
+    tts::speak(
+        "Hello, this is how I sound when I read to you.",
+        speed,
+        sid,
+        0,
+        None,
+    )
 }
 
 #[tauri::command]
@@ -947,6 +963,7 @@ pub fn run() {
             tts_load,
             tts_unload,
             tts_speak,
+            tts_sample,
             tts_stop,
             tts_pause,
             tts_resume,

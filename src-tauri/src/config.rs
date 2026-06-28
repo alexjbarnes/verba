@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 fn default_true() -> bool { true }
@@ -13,6 +14,20 @@ pub struct AppConfig {
     pub active_model_id: String,
     #[serde(default = "default_true")]
     pub haptic_feedback: bool,
+    /// Speaker ids the user has starred on the Voices page. The player voice
+    /// picker shows only these (or all voices when empty).
+    #[serde(default)]
+    pub tts_favourite_sids: Vec<i32>,
+    /// Last-selected TTS voice: either a speaker-id string ("37") or
+    /// "custom:<name>" for a custom voice. Empty means default (speaker 0).
+    #[serde(default)]
+    pub tts_voice: String,
+    /// Playback speed remembered per voice (voice string -> speed multiplier).
+    /// Selecting a voice restores its last speed (default 1.0). MUST stay the
+    /// last field: `toml` emits map fields as `[tables]`, which must follow all
+    /// scalar fields, or serialization fails.
+    #[serde(default)]
+    pub tts_voice_speeds: HashMap<String, f32>,
 }
 
 impl Default for AppConfig {
@@ -27,6 +42,9 @@ impl Default for AppConfig {
             active_engine: "whisper".into(),
             active_model_id: String::new(),
             haptic_feedback: true,
+            tts_favourite_sids: Vec::new(),
+            tts_voice: String::new(),
+            tts_voice_speeds: HashMap::new(),
         }
     }
 }
@@ -93,6 +111,9 @@ mod tests {
             active_engine: "parakeet".into(),
             active_model_id: "parakeet-v3-int8".into(),
             haptic_feedback: false,
+            tts_favourite_sids: vec![3, 7],
+            tts_voice: "7".into(),
+            tts_voice_speeds: HashMap::from([("7".to_string(), 0.75f32)]),
         };
 
         let serialized = toml::to_string_pretty(&cfg).unwrap();
@@ -104,6 +125,9 @@ mod tests {
         assert_eq!(deserialized.active_engine, "parakeet");
         assert_eq!(deserialized.active_model_id, "parakeet-v3-int8");
         assert!(!deserialized.haptic_feedback);
+        assert_eq!(deserialized.tts_favourite_sids, vec![3, 7]);
+        assert_eq!(deserialized.tts_voice, "7");
+        assert_eq!(deserialized.tts_voice_speeds.get("7"), Some(&0.75f32));
     }
 
     #[test]

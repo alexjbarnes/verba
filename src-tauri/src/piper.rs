@@ -393,12 +393,20 @@ fn phonemize(ph: &EnglishPhonemizer, text: &str) -> Result<Vec<String>, String> 
 /// Split text into segments at sentence/clause punctuation, each paired with the
 /// silence (ms) to insert after it. Punctuation stays attached to its segment so
 /// the model still gets final intonation; the silence supplies the audible pause.
+/// Per-segment timing for the reading-view highlight: the raw segment text, its
+/// SPEECH duration (excluding the trailing pause) and the pause inserted after.
+pub struct SegmentSpan {
+    pub text: String,
+    pub speech_ms: u64,
+    pub pause_ms: u64,
+}
+
 fn split_for_pauses(text: &str) -> Vec<(String, usize)> {
     fn pause_of(c: char) -> Option<usize> {
         match c {
             '\n' => Some(PARAGRAPH_PAUSE_MS),
-            '.' | '!' | '?' => Some(SENTENCE_PAUSE_MS),
-            ',' | ';' | ':' => Some(CLAUSE_PAUSE_MS),
+            '.' | '!' | '?' | '\u{2026}' => Some(SENTENCE_PAUSE_MS),
+            ',' | ';' | ':' | '\u{2014}' | '\u{2013}' => Some(CLAUSE_PAUSE_MS),
             _ => None,
         }
     }
@@ -581,7 +589,12 @@ impl PiperEngine {
     /// given `speed` (>1 faster). Returns f32 PCM at `sample_rate`. Empty output
     /// (e.g. a chunk that phonemizes to nothing) yields an empty Vec. This is the
     /// per-chunk primitive `tts.rs` drives so each batch streams to the player.
-    pub fn synth_chunk(&mut self, text: &str, sid: i32, speed: f32) -> Result<Vec<f32>, String> {
+    pub fn synth_chunk(
+        &mut self,
+        text: &str,
+        sid: i32,
+        speed: f32,
+    ) -> Result<(Vec<f32>, Vec<SegmentSpan>), String> {
         // length_scale is inverse to speed: larger stretches audio (slower).
         let length_scale = if speed > 0.0 {
             self.length_scale / speed
@@ -595,27 +608,42 @@ impl PiperEngine {
             0
         };
 
-        let normalized = normalize_numbers(&normalize_text(text));
         let sr = self.sample_rate.max(1) as usize;
         let mut out: Vec<f32> = Vec::new();
-        // Synthesize each clause/sentence segment separately and join with real
-        // silence so the speech audibly pauses at punctuation (the model's own
-        // punctuation pause is negligible for this voice).
-        for (segment, pause_ms) in split_for_pauses(&normalized) {
-            let tokens = phonemize(&self.phonemizer, &segment)?;
+        let mut spans: Vec<SegmentSpan> = Vec::new();
+        // Split the RAW text (so segment word counts match the UI's tokens), then
+        // normalize each segment for synthesis. Each segment is synthesized
+        // separately and joined with real silence. Returning per-segment speech
+        // timing (excluding the pause) lets the reading view highlight track
+        // speech and treat the inserted pauses as gaps, not part of a word.
+        for (segment, pause_ms) in split_for_pauses(text) {
+            let normalized = normalize_numbers(&normalize_text(&segment));
+            let tokens = phonemize(&self.phonemizer, &normalized)?;
             let ids = self
                 .encoder
                 .encode(&tokens)
                 .map_err(|e| format!("encode: {e}"))?;
+            let speech_start = out.len();
             if !ids.is_empty() {
                 let pcm = self.infer(&ids, speaker, length_scale)?;
                 out.extend_from_slice(&pcm);
             }
-            if pause_ms > 0 && !out.is_empty() {
-                out.extend(std::iter::repeat(0.0f32).take(pause_ms * sr / 1000));
+            let speech_samples = out.len() - speech_start;
+            let pause_samples = if pause_ms > 0 && !out.is_empty() {
+                pause_ms * sr / 1000
+            } else {
+                0
+            };
+            if pause_samples > 0 {
+                out.extend(std::iter::repeat(0.0f32).take(pause_samples));
             }
+            spans.push(SegmentSpan {
+                text: segment,
+                speech_ms: (speech_samples as u64 * 1000) / sr as u64,
+                pause_ms: (pause_samples as u64 * 1000) / sr as u64,
+            });
         }
-        Ok(out)
+        Ok((out, spans))
     }
 
     /// Synthesize `text` for speaker `sid` at the given `speed`, emitting whole
@@ -644,7 +672,7 @@ impl PiperEngine {
                 break;
             }
             let t = std::time::Instant::now();
-            let samples = self.synth_chunk(chunk, sid, speed)?;
+            let (samples, _spans) = self.synth_chunk(chunk, sid, speed)?;
             if samples.is_empty() {
                 continue;
             }
