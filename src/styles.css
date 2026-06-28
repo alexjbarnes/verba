@@ -67,3 +67,14 @@ select {
   color: #ffffff;
   border-radius: 4px;
 }
+
+/* Words are tappable to jump playback there */
+#reading-text .rw {
+  cursor: pointer;
+  border-radius: 4px;
+}
+@media (hover: hover) {
+  #reading-text .rw:hover {
+    background: rgba(155, 168, 255, 0.15);
+  }
+}

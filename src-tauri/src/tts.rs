@@ -149,9 +149,21 @@ pub fn resume() {
 pub fn seek_ms(position_ms: u64) {
     let sr = sample_rate() as u64;
     if sr == 0 { return; }
-    log::info!("TTS seek -> {position_ms}ms");
     if let Some(player) = lock_player().as_ref() {
-        player.seek((position_ms * sr / 1000) as usize);
+        // Do NOT clamp to the buffered amount. Seeking past the generation
+        // frontier is allowed: the player rebuffers there and resumes once
+        // generation catches up (or finishes if it's past the end). Clamping to
+        // the frontier is what made forward seeks jump back. The audio callback
+        // only reads below `buffered`, so an out-of-range cursor just starves.
+        let buffered = player.position().buffered;
+        let target = (position_ms * sr / 1000) as usize;
+        let buffered_ms = buffered as u64 * 1000 / sr;
+        if target > buffered {
+            log::info!("TTS seek -> {position_ms}ms (ahead of buffered {buffered_ms}ms — will rebuffer)");
+        } else {
+            log::info!("TTS seek -> {position_ms}ms (buffered {buffered_ms}ms)");
+        }
+        player.seek(target);
     }
 }
 

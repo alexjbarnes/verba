@@ -1266,6 +1266,10 @@ document.getElementById('tts-download-btn').addEventListener('click', async () =
 // ── TTS Player Bar ──
 
 let ttsState = { position_ms: 0, buffered_ms: 0, duration_ms: 0, paused: false, finished: false };
+// Latest fragment-relative buffered ms, updated on every position event even
+// during a seek-drag (ttsState is frozen then). Used to decide whether a seek
+// target is already generated (instant cursor move) or needs a re-render.
+let liveBufferedMs = 0;
 let ttsSeeking = false;
 let ttsSpeed = 1.0;
 // Canonical selected voice: a speaker-id string ("37") or "custom:<name>".
@@ -1284,6 +1288,10 @@ let wordTimes = {};
 let genBaseWord = 0;
 let timingCursor = 0;
 let activeWord = -1;
+// Whether the highlight auto-scrolls the reading view. Disabled when the user
+// scrolls manually (so they can read elsewhere); re-enabled when the highlight
+// comes back into view.
+let autoFollow = true;
 // Word to resume from on the next Play (set when opening a part-read item); 0
 // means start from the top. Cleared once consumed.
 let resumeWord = 0;
@@ -1301,6 +1309,12 @@ let articleEstMs = 0;
 // genId whose real duration has already been saved, so a full play measures the
 // article's true length once (on gen_done) rather than repeatedly.
 let measuredGenId = -1;
+// The live duration estimate only refines the displayed total at these
+// generation-progress milestones (fraction of the fragment generated), so the
+// number changes a few discrete times rather than continuously. dynMilestoneIdx
+// is the next one to fire; reset per (re)start.
+const REFINE_MILESTONES = [0.25, 0.5, 0.75];
+let dynMilestoneIdx = 0;
 // Absolute ms offset of the current render fragment within the full text. The
 // player plays one fragment [genBaseWord..end]; this is the time before it.
 let timelineBaseMs = 0;
@@ -1336,7 +1350,11 @@ function fmtTime(ms) {
 // with speed. Keeping them separate is what makes the estimate hold up at slow
 // speeds (the old word-count/speed estimate doubled the pauses too). Approximate
 // — used for the library time-left and the ready-state bar before generation.
-const SPEAK_WPM = 165;
+// Calibrated against a real article (950 words, 0.75x measured 5:40): Piper
+// reads faster than a naive ~165 wpm, and the spliced pauses overlap/collapse so
+// they count for less than their raw splice lengths. These are rough — the real
+// duration is measured and saved after the first full play (itemDurationMs).
+const SPEAK_WPM = 255;
 function estDurationMsForText(text, speed) {
   if (!text || !text.trim()) return 0;
   const words = text.trim().split(/\s+/).filter(Boolean).length;
@@ -1344,7 +1362,7 @@ function estDurationMsForText(text, speed) {
   const sentences = (text.match(/[.!?…]+/g) || []).length;
   const clauses = (text.match(/[,;:–—]/g) || []).length;
   const paragraphs = (text.match(/\n+/g) || []).length;
-  const pauseMs = sentences * 500 + clauses * 250 + paragraphs * 800;
+  const pauseMs = sentences * 300 + clauses * 150 + paragraphs * 500;
   return Math.round(spokenMs + pauseMs);
 }
 
@@ -1415,6 +1433,10 @@ function updatePlayerBar(st) {
   const icon = playPauseBtn.querySelector('.material-symbols-outlined');
   if (st.finished) {
     icon.textContent = 'replay';
+  } else if (st.rebuffering && !st.paused) {
+    // Seeked ahead of (or generation fell behind) the buffer — show it's loading,
+    // not frozen. Resumes automatically once generation catches up.
+    icon.textContent = 'hourglass_top';
   } else {
     icon.textContent = st.paused ? 'play_arrow' : 'pause';
   }
@@ -1422,7 +1444,8 @@ function updatePlayerBar(st) {
 
 listen('tts-position', (event) => {
   if (event.payload.gen !== genId) return;
-  refineDuration(event.payload.buffered_ms);
+  liveBufferedMs = event.payload.buffered_ms || 0;
+  refineDuration();
   if (!ttsSeeking) updatePlayerBar(event.payload);
   showPlayerBar();
   highlightAt(timelineBaseMs + event.payload.position_ms);
@@ -1445,22 +1468,32 @@ function maybeSaveMeasuredDuration(p) {
   invoke('library_set_duration', { id: readingItem.id, durationMs: dur, speed: ttsSpeed }).catch(() => {});
 }
 
-// While generating, extrapolate the real per-character rate of the audio
-// produced so far to the rest of the fragment, so the displayed total converges
-// to the true duration within a few seconds instead of holding the guessed
-// word-rate estimate until generation finishes. (Generation runs ~10x faster
-// than playback, so a representative sample is available almost immediately.)
-function refineDuration(bufferedMs) {
+// While generating (and only for items without a measured duration), extrapolate
+// the real per-character rate of the audio produced so far to the rest of the
+// fragment. Updates the displayed total only when generation crosses the next
+// progress milestone (25/50/75%), so it changes a few discrete times rather than
+// continuously. Driven by the timing map (a single monotonic source).
+function refineDuration() {
+  // Never override a saved true duration with a live estimate; nothing left once
+  // all milestones have fired.
+  if (readingItem && readingItem.duration_ms > 0) return;
+  if (dynMilestoneIdx >= REFINE_MILESTONES.length) return;
   if (!readingText || timingCursor <= genBaseWord) return;
   const lastWord = timingCursor - 1;
-  if (!readingWords[lastWord] || !readingWords[genBaseWord]) return;
+  if (!readingWords[lastWord] || !readingWords[genBaseWord] || !wordTimes[lastWord]) return;
   const fragStartChar = readingWords[genBaseWord].start;
   const genChars = readingWords[lastWord].end - fragStartChar;
   const fragChars = readingText.length - fragStartChar;
-  // Wait for a representative sample before trusting the extrapolation.
-  if (genChars < 50 || bufferedMs < 2000 || fragChars <= 0) return;
-  const fragTotalMs = bufferedMs * fragChars / genChars;
-  articleEstMs = Math.round(timelineBaseMs + fragTotalMs);
+  if (fragChars <= 0) return;
+  const frac = genChars / fragChars;
+  if (frac < REFINE_MILESTONES[dynMilestoneIdx]) return;
+  // Crossed at least one milestone — advance past any we've passed and refine once.
+  while (dynMilestoneIdx < REFINE_MILESTONES.length && frac >= REFINE_MILESTONES[dynMilestoneIdx]) {
+    dynMilestoneIdx++;
+  }
+  const genMs = wordTimes[lastWord].e - timelineBaseMs; // fragment-relative audio so far
+  if (genMs < 1000) return;
+  articleEstMs = Math.round(timelineBaseMs + genMs * fragChars / genChars);
 }
 
 listen('tts-timing', (event) => {
@@ -1618,6 +1651,8 @@ async function startSpeak(text, baseWord, baseMs) {
 
   const myGen = ++genId;
   ttsStarted = true;
+  autoFollow = true;
+  dynMilestoneIdx = 0;
 
   const voiceVal = ttsVoice || '0';
   const isCustom = voiceVal.startsWith('custom:');
@@ -1641,6 +1676,7 @@ async function startSpeak(text, baseWord, baseMs) {
   }
 
   const sid = isCustom ? 0 : parseInt(voiceVal);
+  liveBufferedMs = 0; // new fragment: nothing generated yet
   // Position this fragment on the full-text timeline. A fresh play (baseWord 0)
   // resets everything; a resume/seek keeps prior word timings so seeking back
   // into already-rendered text can still locate its position.
@@ -1755,9 +1791,34 @@ function setActiveWord(i) {
   const span = el.querySelector(`[data-w="${i}"]`);
   if (span) {
     span.classList.add('rw-active');
-    span.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    // Don't fight a manual scroll. If following is off but the highlight is back
+    // in view (the user scrolled to it, or playback caught up), resume following
+    // without yanking this frame; otherwise only scroll while following.
+    if (!autoFollow) {
+      if (wordInReadingView(span)) autoFollow = true;
+    } else {
+      span.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    }
   }
 }
+
+function wordInReadingView(span) {
+  const el = document.getElementById('reading-text');
+  if (!el) return false;
+  const c = el.getBoundingClientRect();
+  const r = span.getBoundingClientRect();
+  return r.bottom > c.top && r.top < c.bottom;
+}
+
+// A manual scroll (wheel/touch drag — not our programmatic scrollIntoView) turns
+// off auto-follow so the user can read elsewhere without being yanked back.
+(function () {
+  const el = document.getElementById('reading-text');
+  if (!el) return;
+  const stop = () => { autoFollow = false; };
+  el.addEventListener('wheel', stop, { passive: true });
+  el.addEventListener('touchmove', stop, { passive: true });
+})();
 
 function highlightAt(pos) {
   // Highlight the last rendered word whose start time is at/before `pos`. Scan
@@ -1785,18 +1846,54 @@ function wordAtTime(ms) {
   return best;
 }
 
-// Seek to a full-timeline target: an in-fragment cursor move when the target is
-// within the current render, otherwise a re-render from the word at that point
-// (so backward seeks into already-heard text work).
+// Seek to a full-timeline target. If the target is inside the already-generated
+// region of the current fragment, it's an instant cursor move. Otherwise — a
+// backward seek before the fragment, OR a forward seek past the generation
+// frontier — re-render from the word at that point so generation produces from
+// there and playback starts in ~a second (rather than snapping to the frontier
+// or waiting for sequential generation to grind up to the target).
 function seekToFull(targetMs) {
   targetMs = Math.max(0, targetMs);
   const fragT = targetMs - timelineBaseMs;
-  if (fragT >= 0) {
-    invoke('tts_seek', { positionMs: Math.min(fragT, ttsState.buffered_ms) });
-  } else if (readingText) {
-    const w = wordAtTime(targetMs);
-    if (w == null || !readingWords[w]) return;
-    startSpeak(readingText.slice(readingWords[w].start), w, wordTimes[w] ? wordTimes[w].s : 0);
+  if (fragT >= 0 && fragT <= liveBufferedMs) {
+    // Inside generated audio: instant cursor move.
+    invoke('tts_seek', { positionMs: Math.floor(fragT) });
+    return;
+  }
+  if (!readingText) return;
+  // Ungenerated target -> re-render from there. Prefer a known timing (seeking
+  // back into already-heard text); otherwise estimate the word from the target's
+  // position in the article (the un-generated prefix on resume, or anything past
+  // the frontier, has no timing yet).
+  let w = (fragT >= 0) ? null : wordAtTime(targetMs);
+  let baseMs = (w != null && wordTimes[w]) ? wordTimes[w].s : targetMs;
+  if (w == null) {
+    const frac = articleEstMs > 0 ? Math.min(1, Math.max(0, targetMs / articleEstMs)) : 0;
+    w = wordIndexAtChar(Math.floor(frac * readingText.length));
+    baseMs = targetMs;
+  }
+  if (!readingWords[w]) return;
+  startSpeak(readingText.slice(readingWords[w].start), w, baseMs);
+}
+
+// Jump playback to a tapped word. Keyed on the word index (no ms<->word
+// guessing): start from it when idle, instant-seek when it's already generated,
+// else re-render from it (exact — generation begins at that word).
+function jumpToWord(i) {
+  if (!readingWords[i] || !ttsReady) return;
+  autoFollow = true;
+  setActiveWord(i); // immediate feedback while audio (re)starts
+  const estMs = readingText.length ? (readingWords[i].start / readingText.length) * articleEstMs : 0;
+  const baseMs = wordTimes[i] ? wordTimes[i].s : estMs;
+  if (!ttsStarted) {
+    startSpeak(readingText.slice(readingWords[i].start), i, baseMs);
+    return;
+  }
+  const fragT = baseMs - timelineBaseMs;
+  if (wordTimes[i] && fragT >= 0 && fragT <= liveBufferedMs) {
+    invoke('tts_seek', { positionMs: Math.floor(fragT) }); // already generated
+  } else {
+    startSpeak(readingText.slice(readingWords[i].start), i, baseMs);
   }
 }
 
@@ -1895,6 +1992,7 @@ async function openReading(id) {
   // that word and highlights it; a finished or fresh item starts at the top.
   const prog = item.progress || 0;
   resumeWord = (prog > 0 && prog < readingText.length) ? wordIndexAtChar(prog) : 0;
+  autoFollow = true;
   if (resumeWord > 0) setActiveWord(resumeWord);
 
   // Show the player bar in a ready (paused, not started) state, positioned at
@@ -1917,6 +2015,17 @@ document.getElementById('reading-back').addEventListener('click', () => {
   hidePlayerBar();
   showPanel('library');
   loadLibrary();
+});
+
+// Tap a word to jump playback there. Ignore taps that finish a text selection
+// (long-press to select/copy still works).
+document.getElementById('reading-text').addEventListener('click', (e) => {
+  const span = e.target.closest('.rw');
+  if (!span) return;
+  const sel = window.getSelection();
+  if (sel && !sel.isCollapsed) return;
+  const i = parseInt(span.dataset.w, 10);
+  if (!Number.isNaN(i)) jumpToWord(i);
 });
 
 // ── Voice sheet (player bar) ──
