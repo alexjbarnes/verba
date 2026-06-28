@@ -423,34 +423,46 @@ fn split_for_pauses(text: &str) -> Vec<(String, usize)> {
 
     while i < n {
         let ch = chars[i];
-        match pause_of(ch) {
-            None => {
-                cur.push(ch);
-                i += 1;
+        // Only pause at punctuation that ends a token — i.e. a newline, or a mark
+        // followed by whitespace / end / another mark. A mark mid-token (no space
+        // around it: "death,4", "1,000", "3.14", "e.g.") is NOT a clause/sentence
+        // break: splitting there would insert a wrong pause inside the token AND
+        // make the backend word count diverge from the reader's \S+ tokens.
+        let is_break = match pause_of(ch) {
+            None => false,
+            Some(_) => {
+                ch == '\n'
+                    || chars
+                        .get(i + 1)
+                        .map_or(true, |&c| c.is_whitespace() || pause_of(c).is_some())
             }
-            Some(mut pause) => {
-                // Keep a spoken punctuation mark in the segment (for intonation);
-                // newlines are whitespace, so don't. Then consume the rest of the
-                // break run, taking the longest pause, so "...", "?!", "\n\n" and
-                // trailing spaces collapse into a single gap instead of stacking.
-                if ch != '\n' {
-                    cur.push(ch);
-                }
+        };
+        if !is_break {
+            cur.push(ch);
+            i += 1;
+            continue;
+        }
+        let mut pause = pause_of(ch).unwrap();
+        // Keep a spoken punctuation mark in the segment (for intonation);
+        // newlines are whitespace, so don't. Then consume the rest of the break
+        // run, taking the longest pause, so "...", "?!", "\n\n" and trailing
+        // spaces collapse into a single gap instead of stacking.
+        if ch != '\n' {
+            cur.push(ch);
+        }
+        i += 1;
+        while i < n {
+            let c = chars[i];
+            if let Some(p) = pause_of(c) {
+                pause = pause.max(p);
                 i += 1;
-                while i < n {
-                    let c = chars[i];
-                    if let Some(p) = pause_of(c) {
-                        pause = pause.max(p);
-                        i += 1;
-                    } else if c.is_whitespace() {
-                        i += 1;
-                    } else {
-                        break;
-                    }
-                }
-                out.push((std::mem::take(&mut cur), pause));
+            } else if c.is_whitespace() {
+                i += 1;
+            } else {
+                break;
             }
         }
+        out.push((std::mem::take(&mut cur), pause));
     }
     if !cur.trim().is_empty() {
         out.push((cur, 0));
@@ -878,6 +890,23 @@ mod tests {
         assert_eq!(normalize_numbers("50% off"), "fifty percent off");
         assert_eq!(normalize_numbers("3rd place"), "third place");
         assert_eq!(normalize_numbers("no digits here"), "no digits here");
+    }
+
+    #[test]
+    fn pauses_only_at_token_boundaries() {
+        let segs = |t: &str| -> Vec<String> {
+            split_for_pauses(t).into_iter().map(|(s, _)| s).collect()
+        };
+        // Boundary punctuation (followed by space/end) splits; mid-token does not.
+        assert_eq!(segs("Hello, world."), vec!["Hello,", "world."]);
+        assert_eq!(segs("death,4 end"), vec!["death,4 end"]);
+        // Numbers stay intact (no pause inside, no extra segment word).
+        assert_eq!(segs("pi 3.14 and 1,000 items."), vec!["pi 3.14 and 1,000 items."]);
+        // Each kept segment's whitespace-word count matches the raw text's, so the
+        // reading-view word indices stay aligned.
+        let raw = "Hello, world. death,4 end";
+        let seg_words: usize = segs(raw).iter().map(|s| s.split_whitespace().count()).sum();
+        assert_eq!(seg_words, raw.split_whitespace().count());
     }
 }
 

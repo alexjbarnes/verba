@@ -1502,6 +1502,11 @@ listen('tts-timing', (event) => {
   const words = (text || '').trim().split(/\s+/).filter(Boolean);
   const n = words.length;
   if (n === 0) return;
+  // Anchor this segment to readingWords by matching its first word near the
+  // running cursor. The backend splits at punctuation, so a token like
+  // "death,4" becomes two backend words where the reader has one — without
+  // re-anchoring, each such miscount accumulates into a growing highlight drift.
+  timingCursor = anchorTiming(words, timingCursor);
   // Exact per-word durations from the model (w_ceil) when present and aligned;
   // otherwise distribute the segment duration by word character length.
   let durs;
@@ -1520,6 +1525,26 @@ listen('tts-timing', (event) => {
   }
   timingCursor += n;
 });
+
+// Find where a segment's words line up in readingWords, searching outward from
+// the expected cursor. Returns the matched start index (or the cursor unchanged
+// if no confident match), so per-segment word-count mismatches self-correct
+// each segment instead of accumulating.
+function anchorTiming(words, cursor) {
+  const R = 12;
+  for (let d = 0; d <= R; d++) {
+    for (const cand of (d === 0 ? [cursor] : [cursor + d, cursor - d])) {
+      if (cand < genBaseWord || cand >= readingWords.length || !readingWords[cand]) continue;
+      // Match the first word; for a 1-word segment also require a non-ambiguous
+      // hit by checking the next word, to avoid latching onto a common word.
+      if (readingWords[cand].text === words[0] &&
+          (words.length < 2 || !readingWords[cand + 1] || readingWords[cand + 1].text === words[1])) {
+        return cand;
+      }
+    }
+  }
+  return cursor;
+}
 
 listen('tts-finished', (event) => {
   if (event.payload && event.payload.gen !== genId) return;
