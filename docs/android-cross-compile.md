@@ -1,6 +1,6 @@
 # Android Cross-Compilation: Findings and Gotchas
 
-Hard-won lessons from porting Scribe (Tauri v2 + Rust + sherpa-onnx) to Android arm64.
+Hard-won lessons from porting Verba (Tauri v2 + Rust + sherpa-onnx) to Android arm64.
 Written March 2026.
 
 ## Quick Start
@@ -11,7 +11,7 @@ Build a signed APK with one command:
 just apk
 ```
 
-Output: `scribe.apk` in the repo root (~51MB, arm64 only).
+Output: `verba.apk` in the repo root (~51MB, arm64 only).
 
 Other commands:
 
@@ -341,7 +341,7 @@ Tauri provides `#[cfg(desktop)]` and `#[cfg(mobile)]` as convenience aliases.
 
 ```
 adb logcat -s RustStdoutStderr:V
-adb logcat | grep -i "scribe\|sherpa\|onnx\|crash\|signal"
+adb logcat | grep -i "verba\|sherpa\|onnx\|crash\|signal"
 ```
 
 ### Inspecting the built .so

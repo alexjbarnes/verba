@@ -239,6 +239,7 @@ pub fn speak(text: &str, speed: f32, sid: i32, app: Option<tauri::AppHandle>) ->
         .name("tts-generate".into())
         .spawn(move || {
             let gen_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let mut cumulative_ms: u64 = 0;
                 for (i, sentence) in sentences.iter().enumerate() {
                     if !player.is_active() { break; }
 
@@ -268,6 +269,17 @@ pub fn speak(text: &str, speed: f32, sid: i32, app: Option<tauri::AppHandle>) ->
                                 "TTS [{}/{}]: {:.1}s audio in {}ms, RTF {:.2}x",
                                 i + 1, total, audio_ms as f32 / 1000.0, elapsed_ms, rtf
                             );
+                            // Emit the text-to-time mapping for this chunk so the
+                            // reading view can highlight words as playback advances.
+                            if let Some(ref app) = app {
+                                let _ = app.emit("tts-timing", serde_json::json!({
+                                    "index": i,
+                                    "text": sentence,
+                                    "start_ms": cumulative_ms,
+                                    "duration_ms": audio_ms,
+                                }));
+                            }
+                            cumulative_ms += audio_ms;
                         }
                         // No audio this chunk: an empty Piper chunk -> skip.
                         Ok(Ok(None)) => continue,

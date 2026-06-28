@@ -1,4 +1,4 @@
-# Scribe: Architecture Notes
+# Verba: Architecture Notes
 
 ## Vision
 
@@ -479,12 +479,12 @@ choice for mobile to keep latency and thermal impact low.
 ## Implementation Patterns (from Handy)
 
 Handy (github.com/cjpais/Handy) is a Tauri v2 voice dictation app with a mature
-implementation of several subsystems scribe needs. MIT licensed. These patterns
+implementation of several subsystems verba needs. MIT licensed. These patterns
 are worth adopting regardless of inference engine choice.
 
 ### 1. Voice Activity Detection (VAD)
 
-Scribe currently has no VAD. All recorded audio (including silence) goes to the
+Verba currently has no VAD. All recorded audio (including silence) goes to the
 transcription engine. This wastes inference time and can degrade accuracy.
 
 **Architecture to adopt:**
@@ -522,7 +522,7 @@ frames for temporal context.
 
 ### 2. Audio Recorder with Worker Thread
 
-Scribe's current recording is a sleep-polling loop in dictation.rs. cpal is
+Verba's current recording is a sleep-polling loop in dictation.rs. cpal is
 opened fresh each recording, samples accumulate behind a Mutex, and a 50ms
 sleep loop keeps the stream alive. No resampling.
 
@@ -555,7 +555,7 @@ Key design decisions:
 
 ### 3. Shortcut State Machine
 
-Scribe's current shortcut handling is basic press/release on a single hardcoded
+Verba's current shortcut handling is basic press/release on a single hardcoded
 binding (alt+d). No debouncing, no cancel, no toggle mode.
 
 **Architecture to adopt:**
@@ -584,7 +584,7 @@ is to let it transcribe garbage.
 
 ### 4. Model Lifecycle Management
 
-Scribe loads models eagerly and keeps them in memory forever. For a dictation app
+Verba loads models eagerly and keeps them in memory forever. For a dictation app
 that might be used once an hour, this wastes hundreds of MB of RAM.
 
 **Pattern to adopt:**
@@ -600,7 +600,7 @@ that might be used once an hour, this wastes hundreds of MB of RAM.
 
 ### 5. Cross-Platform Text Insertion
 
-Scribe currently uses osascript to simulate Cmd+V on macOS only.
+Verba currently uses osascript to simulate Cmd+V on macOS only.
 
 **Pattern to adopt:**
 

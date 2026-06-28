@@ -11,6 +11,7 @@ body {
 #log-output,
 #history-list,
 #tts-text,
+#reading-text,
 .selectable {
   -webkit-user-select: text;
   user-select: text;
@@ -58,4 +59,11 @@ select {
   [data-tauri-drag-region] {
     -webkit-app-region: none;
   }
+}
+
+/* Reading view word highlighting */
+#reading-text .rw-active {
+  background: rgba(155, 168, 255, 0.28);
+  color: #ffffff;
+  border-radius: 4px;
 }

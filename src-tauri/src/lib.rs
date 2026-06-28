@@ -4,6 +4,7 @@ mod debug_log;
 mod delivery;
 mod engine;
 mod history;
+mod library;
 mod media;
 mod models;
 #[cfg(desktop)]
@@ -465,6 +466,50 @@ fn tts_list_custom_voices() -> Vec<String> {
     tts::list_custom_voices()
 }
 
+/// Speaker count for a TTS model read from its on-disk config, without loading
+/// the engine. Lets the Reader show the voice picker before first generation.
+#[tauri::command]
+fn tts_model_speakers(id: String) -> i32 {
+    let mgr = models::ModelManager::global();
+    match mgr.tts_model_config(&id) {
+        Some(tts::TtsModelConfig::PiperOrt { config, .. }) => {
+            piper::num_speakers_from_config(std::path::Path::new(&config))
+        }
+        None => 0,
+    }
+}
+
+// ── Library (saved texts for the Listen reader) ──
+
+#[tauri::command]
+fn library_list() -> Vec<library::LibraryItem> {
+    library::Library::global().list()
+}
+
+#[tauri::command]
+fn library_add(title: Option<String>, body: String) -> Result<library::LibraryItem, String> {
+    let body = body.trim().to_string();
+    if body.is_empty() {
+        return Err("Empty text".into());
+    }
+    Ok(library::Library::global().add(title.unwrap_or_default(), body))
+}
+
+#[tauri::command]
+fn library_get(id: String) -> Option<library::LibraryItem> {
+    library::Library::global().get(&id)
+}
+
+#[tauri::command]
+fn library_delete(id: String) {
+    library::Library::global().delete(&id);
+}
+
+#[tauri::command]
+fn library_set_position(id: String, position_ms: u64) {
+    library::Library::global().set_position(&id, position_ms);
+}
+
 /// Start recording from the UI (no hotkey, no delivery).
 /// The frontend calls this, then later calls `ui_stop_and_transcribe`
 /// to get the text back.
@@ -615,6 +660,7 @@ pub fn run() {
                 return Ok(());
             }
             history::History::init_global();
+            library::Library::init_global();
             snippets::SnippetManager::init_global();
             // Load neural grammar models on a background thread so the UI
             // stays responsive during startup.
@@ -906,6 +952,12 @@ pub fn run() {
             tts_resume,
             tts_seek,
             tts_list_custom_voices,
+            tts_model_speakers,
+            library_list,
+            library_add,
+            library_get,
+            library_delete,
+            library_set_position,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

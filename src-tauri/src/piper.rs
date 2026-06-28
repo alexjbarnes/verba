@@ -69,6 +69,22 @@ fn default_noise_scale() -> f32 { 0.667 }
 fn default_length_scale() -> f32 { 1.0 }
 fn default_noise_w() -> f32 { 0.8 }
 
+/// Read `num_speakers` from a Piper `.onnx.json` sidecar without loading the
+/// model (lets the UI show the speaker picker before generation). Returns 0
+/// when the file is missing or unparseable.
+pub fn num_speakers_from_config(json_path: &std::path::Path) -> i32 {
+    #[derive(Deserialize)]
+    struct OnlySpeakers {
+        #[serde(default)]
+        num_speakers: i64,
+    }
+    std::fs::read_to_string(json_path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<OnlySpeakers>(&s).ok())
+        .map(|c| c.num_speakers as i32)
+        .unwrap_or(0)
+}
+
 /// A-Z letter-name IPA spell-out table (OOV fallback). Each value is the IPA for
 /// the English *name* of the letter as a sequence of single-codepoint IPA
 /// symbols (the libritts_r id_map is keyed by single chars). e.g. "GPU" ->
@@ -275,6 +291,23 @@ fn normalize_numbers(text: &str) -> String {
     out
 }
 
+/// Normalize typographic characters the phonemizer and CMUdict don't understand
+/// into ASCII equivalents. Curly apostrophes become straight so contractions
+/// like "don't" stay one dictionary word instead of splitting into "don" + "t";
+/// curly quotes become straight; em/en dashes and ellipsis become pause marks.
+/// Runs before tokenization.
+fn normalize_text(text: &str) -> String {
+    text.chars()
+        .map(|c| match c {
+            '\u{2019}' | '\u{2018}' | '\u{02BC}' => '\'',
+            '\u{201C}' | '\u{201D}' => '"',
+            '\u{2014}' | '\u{2013}' => ',',
+            '\u{2026}' => '.',
+            _ => c,
+        })
+        .collect()
+}
+
 /// Split text into word / standalone-punctuation runs, preserving punctuation so
 /// it still phonemizes (commas, periods etc. are in the id_map and add prosody).
 fn split_tokens(text: &str) -> Vec<String> {
@@ -298,6 +331,13 @@ fn split_tokens(text: &str) -> Vec<String> {
     out
 }
 
+/// Silence inserted after punctuation / line breaks, in ms. This voice's own
+/// punctuation pause is negligible, so segments are synthesized separately and
+/// joined with real silence. Paragraph > sentence > clause. Tune to taste.
+const PARAGRAPH_PAUSE_MS: usize = 800; // newline / blank line
+const SENTENCE_PAUSE_MS: usize = 500; // . ! ?
+const CLAUSE_PAUSE_MS: usize = 250; // , ; :
+
 /// Phonemize whole text to a single IPA token stream with " " word separators.
 /// OOV words are spelled letter-by-letter so they still produce audio.
 fn phonemize(ph: &EnglishPhonemizer, text: &str) -> Result<Vec<String>, String> {
@@ -308,22 +348,33 @@ fn phonemize(ph: &EnglishPhonemizer, text: &str) -> Result<Vec<String>, String> 
     for piece in &pieces {
         let is_word = piece.chars().next().map(|c| c.is_alphanumeric()).unwrap_or(false);
 
-        let (mut p_tokens, _prosody) = ph
-            .phonemize_with_prosody(piece)
-            .map_err(|e| format!("phonemize: {e}"))?;
-        while p_tokens.first().map(|s| s == " ").unwrap_or(false) {
-            p_tokens.remove(0);
-        }
-        while p_tokens.last().map(|s| s == " ").unwrap_or(false) {
-            p_tokens.pop();
-        }
-
-        if is_word && is_oov(&p_tokens) {
-            let spelled = spell_word(piece);
-            if !spelled.is_empty() {
-                p_tokens = spelled;
+        let mut p_tokens: Vec<String> = if is_word {
+            let (mut pt, _prosody) = ph
+                .phonemize_with_prosody(piece)
+                .map_err(|e| format!("phonemize: {e}"))?;
+            while pt.first().map(|s| s == " ").unwrap_or(false) {
+                pt.remove(0);
             }
-        }
+            while pt.last().map(|s| s == " ").unwrap_or(false) {
+                pt.pop();
+            }
+            if is_oov(&pt) {
+                let spelled = spell_word(piece);
+                if !spelled.is_empty() {
+                    pt = spelled;
+                }
+            }
+            pt
+        } else {
+            // Punctuation pieces: the phonemizer skips bare punctuation, dropping
+            // the pause cue. Emit the marks it recognizes, repeated, so the model
+            // allocates more silent frames for a longer, clearer pause.
+            piece
+                .chars()
+                .filter(|c| matches!(c, ',' | '.' | ';' | ':' | '!' | '?'))
+                .map(|c| c.to_string())
+                .collect()
+        };
 
         if p_tokens.is_empty() {
             continue;
@@ -333,10 +384,66 @@ fn phonemize(ph: &EnglishPhonemizer, text: &str) -> Result<Vec<String>, String> 
             tokens.push(" ".to_string());
         }
         first = false;
-        tokens.extend(p_tokens);
+        tokens.append(&mut p_tokens);
     }
 
     Ok(tokens)
+}
+
+/// Split text into segments at sentence/clause punctuation, each paired with the
+/// silence (ms) to insert after it. Punctuation stays attached to its segment so
+/// the model still gets final intonation; the silence supplies the audible pause.
+fn split_for_pauses(text: &str) -> Vec<(String, usize)> {
+    fn pause_of(c: char) -> Option<usize> {
+        match c {
+            '\n' => Some(PARAGRAPH_PAUSE_MS),
+            '.' | '!' | '?' => Some(SENTENCE_PAUSE_MS),
+            ',' | ';' | ':' => Some(CLAUSE_PAUSE_MS),
+            _ => None,
+        }
+    }
+
+    let chars: Vec<char> = text.chars().collect();
+    let n = chars.len();
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut i = 0;
+
+    while i < n {
+        let ch = chars[i];
+        match pause_of(ch) {
+            None => {
+                cur.push(ch);
+                i += 1;
+            }
+            Some(mut pause) => {
+                // Keep a spoken punctuation mark in the segment (for intonation);
+                // newlines are whitespace, so don't. Then consume the rest of the
+                // break run, taking the longest pause, so "...", "?!", "\n\n" and
+                // trailing spaces collapse into a single gap instead of stacking.
+                if ch != '\n' {
+                    cur.push(ch);
+                }
+                i += 1;
+                while i < n {
+                    let c = chars[i];
+                    if let Some(p) = pause_of(c) {
+                        pause = pause.max(p);
+                        i += 1;
+                    } else if c.is_whitespace() {
+                        i += 1;
+                    } else {
+                        break;
+                    }
+                }
+                out.push((std::mem::take(&mut cur), pause));
+            }
+        }
+    }
+    if !cur.trim().is_empty() {
+        out.push((cur, 0));
+    }
+    out
 }
 
 static ORT_INIT: OnceLock<Result<(), String>> = OnceLock::new();
@@ -379,7 +486,10 @@ impl PiperEngine {
             .map_err(|e| format!("parse piper config: {e}"))?;
 
         let id_map: PhonemeIdMap = cfg.phoneme_id_map;
-        let encoder = PiperEncoder::new(id_map, UnknownTokenMode::Strict)
+        // Skip (not Strict) so a punctuation mark or stray token absent from a
+        // given model's id_map is dropped with a warning instead of failing the
+        // whole chunk.
+        let encoder = PiperEncoder::new(id_map, UnknownTokenMode::Skip)
             .map_err(|e| format!("piper encoder: {e}"))?;
 
         let dict: HashMap<String, String> = serde_json::from_slice(CMUDICT_BYTES)
@@ -485,16 +595,27 @@ impl PiperEngine {
             0
         };
 
-        let normalized = normalize_numbers(text);
-        let tokens = phonemize(&self.phonemizer, &normalized)?;
-        let ids = self
-            .encoder
-            .encode(&tokens)
-            .map_err(|e| format!("encode: {e}"))?;
-        if ids.is_empty() {
-            return Ok(Vec::new());
+        let normalized = normalize_numbers(&normalize_text(text));
+        let sr = self.sample_rate.max(1) as usize;
+        let mut out: Vec<f32> = Vec::new();
+        // Synthesize each clause/sentence segment separately and join with real
+        // silence so the speech audibly pauses at punctuation (the model's own
+        // punctuation pause is negligible for this voice).
+        for (segment, pause_ms) in split_for_pauses(&normalized) {
+            let tokens = phonemize(&self.phonemizer, &segment)?;
+            let ids = self
+                .encoder
+                .encode(&tokens)
+                .map_err(|e| format!("encode: {e}"))?;
+            if !ids.is_empty() {
+                let pcm = self.infer(&ids, speaker, length_scale)?;
+                out.extend_from_slice(&pcm);
+            }
+            if pause_ms > 0 && !out.is_empty() {
+                out.extend(std::iter::repeat(0.0f32).take(pause_ms * sr / 1000));
+            }
         }
-        self.infer(&ids, speaker, length_scale)
+        Ok(out)
     }
 
     /// Synthesize `text` for speaker `sid` at the given `speed`, emitting whole

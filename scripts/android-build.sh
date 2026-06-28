@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Build Scribe for Android (arm64-v8a).
+# Build Verba for Android (arm64-v8a).
 #
 # NOTE: For day-to-day builds, use `just apk` instead. This script is
 # primarily useful for first-time setup (--setup-only) to build and cache
@@ -362,7 +362,7 @@ if $SETUP_ONLY; then
     exit 0
 fi
 
-info "Building Scribe for Android ($BUILD_TYPE)..."
+info "Building Verba for Android ($BUILD_TYPE)..."
 cd "$REPO_ROOT"
 
 BUILD_ARGS=()

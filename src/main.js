@@ -27,12 +27,9 @@ function showConfirm(message) {
 
 const sidebar = document.getElementById('sidebar');
 const sidebarOverlay = document.getElementById('sidebar-overlay');
-const pageTitle = document.getElementById('page-title');
-
-const tabLabels = {
-  history: 'History', models: 'Models', audio: 'Audio',
-  snippets: 'Snippets', reader: 'Reader', general: 'Settings', debug: 'Debug',
-};
+const isDesktop = !navigator.userAgent.includes('Android');
+const modeDefaultTab = { speak: 'history', listen: 'library' };
+let currentMode = 'speak';
 
 function openSidebar() {
   sidebar.classList.remove('-translate-x-full');
@@ -58,7 +55,6 @@ document.querySelectorAll('.nav-btn').forEach(btn => {
     btn.classList.remove('text-on-surface-variant');
     btn.classList.add('text-primary', 'bg-primary/10');
     document.getElementById(btn.dataset.tab).classList.remove('hidden');
-    pageTitle.textContent = tabLabels[btn.dataset.tab] || '';
 
     closeSidebar();
 
@@ -67,8 +63,37 @@ document.querySelectorAll('.nav-btn').forEach(btn => {
     if (btn.dataset.tab === 'models') loadModels();
     if (btn.dataset.tab === 'general') loadVocab();
     if (btn.dataset.tab === 'snippets') loadSnippets();
-    if (btn.dataset.tab === 'reader') updateTtsPanel();
+    if (btn.dataset.tab === 'library') loadLibrary();
   });
+});
+
+// ── Speak / Listen mode ──
+
+function applyModeVisibility(mode) {
+  document.querySelectorAll('.nav-btn').forEach(btn => {
+    const m = btn.dataset.mode;
+    const visible = (m === mode || m === 'global')
+      && (btn.dataset.desktopOnly !== 'true' || isDesktop);
+    btn.classList.toggle('hidden', !visible);
+  });
+}
+
+function setMode(mode) {
+  currentMode = mode;
+  document.querySelectorAll('.mode-btn').forEach(b => {
+    const active = b.dataset.mode === mode;
+    b.classList.toggle('bg-surface-container-low', active);
+    b.classList.toggle('shadow-sm', active);
+    b.classList.toggle('text-on-surface', active);
+    b.classList.toggle('text-on-surface-variant', !active);
+  });
+  applyModeVisibility(mode);
+  const target = document.querySelector(`.nav-btn[data-tab="${modeDefaultTab[mode]}"]`);
+  if (target) target.click();
+}
+
+document.querySelectorAll('.mode-btn').forEach(b => {
+  b.addEventListener('click', () => setMode(b.dataset.mode));
 });
 
 // ── History tab ──
@@ -398,11 +423,6 @@ async function loadModels() {
     .map(renderModelRow)
     .join('');
 
-  document.getElementById('tts-models').innerHTML = models
-    .filter(m => m.engine.startsWith('tts_'))
-    .map(renderModelRow)
-    .join('');
-
   // Attach download button handlers
   document.querySelectorAll('.dl-btn').forEach(btn => {
     btn.addEventListener('click', async () => {
@@ -463,6 +483,14 @@ listen('download-progress', (event) => {
   const { id, progress } = event.payload;
   const pct = Math.round(progress * 100);
 
+  // Reader's inline voice-download bar (it has no model-row container)
+  if (id === ttsModelId) {
+    const rf = document.getElementById('tts-dl-fill');
+    const rp = document.getElementById('tts-dl-pct');
+    if (rf) rf.style.width = `${pct}%`;
+    if (rp) rp.textContent = `${pct}%`;
+  }
+
   const container = document.querySelector(`[data-model-id="${id}"]`);
   if (!container) return;
 
@@ -490,6 +518,7 @@ listen('download-progress', (event) => {
 
 listen('download-complete', async () => {
   await loadModels();
+  await updateTtsPanel();
 });
 
 listen('engine-ready', () => {
@@ -988,89 +1017,69 @@ const TTS_VOICE_PRESETS = {
   ],
 };
 
+let ttsModelId = null;       // single Piper TTS model id, resolved from the registry
 let ttsLoadedModelId = null;
 let ttsLoadedEngine = null;
 
 async function updateTtsPanel() {
   const models = await invoke('list_models');
-  const ttsModels = models.filter(m => m.engine.startsWith('tts_'));
-  const select = document.getElementById('tts-model-select');
-  const actionBtn = document.getElementById('tts-model-action');
+  const tts = models.find(m => m.engine.startsWith('tts_'));
+  const block = document.getElementById('tts-model-block');
+  const dlRow = document.getElementById('tts-download-row');
+  const dlLabel = document.getElementById('tts-download-label');
   const playBtn = document.getElementById('tts-play');
+
+  if (!tts) {
+    ttsModelId = null;
+    block.classList.add('hidden');
+    playBtn.disabled = true;
+    return;
+  }
+
+  ttsModelId = tts.id;
+  ttsLoadedEngine = tts.engine;
   const info = await invoke('tts_info');
+  if (info.loaded) ttsLoadedModelId = tts.id;
 
-  select.innerHTML = ttsModels.map(m => {
-    const suffix = m.status === 'not_downloaded' ? ` (${m.size})` : '';
-    const loaded = info.loaded && ttsLoadedModelId === m.id;
-    const tag = loaded ? ' [loaded]' : '';
-    return `<option value="${m.id}" data-status="${m.status}" data-engine="${m.engine}">${m.name}${suffix}${tag}</option>`;
-  }).join('');
+  const downloaded = tts.status === 'downloaded' || tts.status === 'active';
+  const downloading = tts.status === 'downloading';
 
-  if (ttsModels.length === 0) {
-    select.innerHTML = '<option value="">No TTS models available</option>';
-    actionBtn.disabled = true;
-    playBtn.disabled = true;
-    return;
-  }
+  dlLabel.textContent = `${tts.name}, ${tts.size}`;
+  dlRow.classList.toggle('hidden', downloaded || downloading);
 
-  if (info.loaded && ttsLoadedModelId) {
-    select.value = ttsLoadedModelId;
-  }
+  const numSpeakers = info.loaded
+    ? info.num_speakers
+    : (downloaded ? await invoke('tts_model_speakers', { id: tts.id }) : 0);
+  await updateTtsVoices(numSpeakers);
+  const voiceVisible = !document.getElementById('tts-voice-row').classList.contains('hidden');
 
-  updateTtsActionBtn();
-  updateTtsVoices(info);
+  // Play is available as soon as the voice is on disk; the model itself loads
+  // lazily at generation time (see the play handler).
+  playBtn.disabled = !downloaded;
+
+  block.classList.toggle('hidden', !(!downloaded || downloading || voiceVisible));
 }
 
-function updateTtsActionBtn() {
-  const select = document.getElementById('tts-model-select');
-  const actionBtn = document.getElementById('tts-model-action');
-  const playBtn = document.getElementById('tts-play');
-  const opt = select.selectedOptions[0];
-  if (!opt || !opt.value) {
-    actionBtn.disabled = true;
-    return;
-  }
-  const status = opt.dataset.status;
-  const isCurrentLoaded = ttsLoadedModelId === opt.value;
-
-  if (isCurrentLoaded) {
-    actionBtn.textContent = 'Loaded';
-    actionBtn.disabled = true;
-    playBtn.disabled = false;
-  } else if (status === 'downloaded' || status === 'active') {
-    actionBtn.textContent = 'Load';
-    actionBtn.disabled = false;
-    playBtn.disabled = true;
-  } else if (status === 'downloading') {
-    actionBtn.textContent = 'Downloading...';
-    actionBtn.disabled = true;
-    playBtn.disabled = true;
-  } else {
-    actionBtn.textContent = 'Download';
-    actionBtn.disabled = false;
-    playBtn.disabled = true;
-  }
-}
-
-async function updateTtsVoices(info) {
+async function updateTtsVoices(numSpeakers) {
   const voiceRow = document.getElementById('tts-voice-row');
   const voiceSelect = document.getElementById('tts-voice-select');
-  if (!info.loaded || info.num_speakers <= 1) {
+  const custom = await invoke('tts_list_custom_voices');
+
+  if (numSpeakers <= 1 && custom.length === 0) {
     voiceRow.classList.add('hidden');
     return;
   }
 
   voiceRow.classList.remove('hidden');
   const prevVal = voiceSelect.value;
-  const count = info.num_speakers;
-  const presets = TTS_VOICE_PRESETS[ttsLoadedModelId] || [];
+  const presets = TTS_VOICE_PRESETS[ttsModelId] || [];
 
   // Cap the numbered list: some models (e.g. Piper LibriTTS) expose ~900
   // speakers, which would build a huge sluggish dropdown.
   const MAX_VOICES = 60;
-  const shown = Math.min(count, MAX_VOICES);
+  const shown = Math.min(numSpeakers, MAX_VOICES);
   let html = presets
-    .filter(v => v.sid < count)
+    .filter(v => v.sid < numSpeakers)
     .map(v => `<option value="${v.sid}">${v.label}</option>`)
     .join('');
   for (let i = presets.length; i < shown; i++) {
@@ -1078,7 +1087,6 @@ async function updateTtsVoices(info) {
   }
   voiceSelect.innerHTML = html;
 
-  const custom = await invoke('tts_list_custom_voices');
   if (custom.length > 0) {
     voiceSelect.innerHTML += '<option disabled>-- Custom --</option>';
     for (const name of custom) {
@@ -1089,44 +1097,22 @@ async function updateTtsVoices(info) {
   if (prevVal) voiceSelect.value = prevVal;
 }
 
-document.getElementById('tts-model-select').addEventListener('change', updateTtsActionBtn);
-
-document.getElementById('tts-model-action').addEventListener('click', async () => {
-  const select = document.getElementById('tts-model-select');
-  const actionBtn = document.getElementById('tts-model-action');
-  const id = select.value;
-  if (!id) return;
-
-  const opt = select.selectedOptions[0];
-  const status = opt.dataset.status;
-
-  if (status === 'downloaded' || status === 'active') {
-    actionBtn.textContent = 'Loading...';
-    actionBtn.disabled = true;
-    try {
-      await invoke('tts_load', { id });
-      ttsLoadedModelId = id;
-      ttsLoadedEngine = opt.dataset.engine;
-      await updateTtsPanel();
-    } catch (err) {
-      showToast('TTS load failed: ' + err);
-      actionBtn.textContent = 'Load';
-      actionBtn.disabled = false;
-    }
-  } else {
-    actionBtn.textContent = 'Downloading...';
-    actionBtn.disabled = true;
-    document.getElementById('tts-dl-progress').classList.remove('hidden');
-    try {
-      await invoke('download_model', { id });
-      document.getElementById('tts-dl-progress').classList.add('hidden');
-      await updateTtsPanel();
-    } catch (err) {
-      showToast('Download failed: ' + err);
-      document.getElementById('tts-dl-progress').classList.add('hidden');
-      actionBtn.textContent = 'Download';
-      actionBtn.disabled = false;
-    }
+document.getElementById('tts-download-btn').addEventListener('click', async () => {
+  if (!ttsModelId) return;
+  const btn = document.getElementById('tts-download-btn');
+  const progress = document.getElementById('tts-dl-progress');
+  btn.disabled = true;
+  btn.textContent = 'Downloading...';
+  progress.classList.remove('hidden');
+  try {
+    await invoke('download_model', { id: ttsModelId });
+    progress.classList.add('hidden');
+    await updateTtsPanel();
+  } catch (err) {
+    showToast('Download failed: ' + err);
+    progress.classList.add('hidden');
+    btn.disabled = false;
+    btn.textContent = 'Download';
   }
 });
 
@@ -1135,7 +1121,15 @@ document.getElementById('tts-model-action').addEventListener('click', async () =
 let ttsState = { position_ms: 0, buffered_ms: 0, duration_ms: 0, paused: false, finished: false };
 let ttsSeeking = false;
 let ttsSpeed = 1.0;
-let ttsLastParams = null;
+let ttsSpeakParams = { sid: 0 };
+// Reading view state (Listen library)
+let readingItem = null;
+let readingText = '';
+let readingWords = [];
+let wordTimes = {};
+let genBaseWord = 0;
+let timingCursor = 0;
+let activeWord = -1;
 
 const playerBar = document.getElementById('tts-player');
 const positionFill = document.getElementById('tts-position-fill');
@@ -1194,6 +1188,23 @@ function updatePlayerBar(st) {
 listen('tts-position', (event) => {
   if (!ttsSeeking) updatePlayerBar(event.payload);
   showPlayerBar();
+  highlightAt(event.payload.position_ms);
+});
+
+listen('tts-timing', (event) => {
+  const { start_ms, duration_ms, text } = event.payload;
+  const words = (text || '').trim().split(/\s+/).filter(Boolean);
+  const n = words.length;
+  if (n === 0) return;
+  let totalLen = 0;
+  const lens = words.map(w => { const l = w.length || 1; totalLen += l; return l; });
+  let acc = start_ms;
+  for (let k = 0; k < n; k++) {
+    const dur = duration_ms * (lens[k] / totalLen);
+    wordTimes[timingCursor + k] = { s: acc, e: acc + dur };
+    acc += dur;
+  }
+  timingCursor += n;
 });
 
 listen('tts-finished', () => {
@@ -1288,57 +1299,233 @@ function updateSpeedChips() {
 speedBtn.addEventListener('click', openSpeedSheet);
 document.getElementById('speed-sheet-overlay').addEventListener('click', closeSpeedSheet);
 
-speedPresets.forEach(chip => {
-  chip.addEventListener('click', () => {
-    setTtsSpeed(parseFloat(chip.dataset.speed));
-    closeSpeedSheet();
-  });
-});
+// Speed is applied at generation time (Piper length_scale), so a change can't
+// retro-edit already-buffered audio. The word timing map lets playback continue
+// from the current word at the new speed/voice instead of restarting.
 
-speedSlider.addEventListener('input', () => {
-  const val = parseFloat(speedSlider.value);
-  setTtsSpeed(val);
-});
-
-// ── TTS Play in Reader tab ──
-
-document.getElementById('tts-play').addEventListener('click', async () => {
-  const text = document.getElementById('tts-text').value.trim();
-  if (!text) { showToast('Enter some text first'); return; }
-  if (!ttsLoadedModelId) { showToast('Load a TTS model first'); return; }
+// Synthesize `text`, mapping its words onto the reading view starting at word
+// index `baseWord` (0 for a fresh play, the resume point on speed/voice change).
+async function startSpeak(text, baseWord) {
+  if (!text || !text.trim()) { showToast('Nothing to read'); return; }
+  if (!ttsModelId) { showToast('No voice available'); return; }
 
   const playBtn = document.getElementById('tts-play');
   const label = document.getElementById('tts-play-label');
-
-  // Disable before any await so a second tap during async setup (e.g. custom
-  // voice load) can't start a second playback. Two players overlap audio and
-  // make it jump forward then back.
-  if (playBtn.disabled) return;
   playBtn.disabled = true;
   label.textContent = 'Generating...';
 
   const voiceVal = document.getElementById('tts-voice-select').value || '0';
   const isCustom = voiceVal.startsWith('custom:');
+
+  // Lazy-load the voice at generation time, no manual load step. The custom
+  // branch loads the engine itself, so only plain-load when not custom.
+  if (!isCustom && !ttsLoadedModelId) {
+    label.textContent = 'Loading voice...';
+    try {
+      await invoke('tts_load', { id: ttsModelId });
+      ttsLoadedModelId = ttsModelId;
+    } catch (err) { showToast('Voice load failed: ' + err); resetTtsUI(); return; }
+    label.textContent = 'Generating...';
+  }
   if (isCustom) {
-    try { await invoke('tts_load', { id: ttsLoadedModelId, customVoice: voiceVal.slice(7) }); }
-    catch (err) { showToast('Failed to load custom voice: ' + err); resetTtsUI(); return; }
+    try {
+      await invoke('tts_load', { id: ttsModelId, customVoice: voiceVal.slice(7) });
+      ttsLoadedModelId = ttsModelId;
+    } catch (err) { showToast('Failed to load custom voice: ' + err); resetTtsUI(); return; }
   }
 
-  const speed = ttsSpeed;
   const sid = isCustom ? 0 : parseInt(voiceVal);
-  ttsLastParams = { text, sid, customVoice: isCustom ? voiceVal.slice(7) : null };
+  ttsSpeakParams = { sid };
+  // Reset the timing map for this generation; words map from baseWord onward.
+  genBaseWord = baseWord;
+  timingCursor = baseWord;
+  wordTimes = {};
 
   showPlayerBar();
   updatePlayerBar({ position_ms: 0, buffered_ms: 0, duration_ms: 0, paused: false, finished: false });
 
   try {
-    await invoke('tts_speak', { text, speed, sid });
+    await invoke('tts_speak', { text, speed: ttsSpeed, sid });
     label.textContent = 'Playing...';
   } catch (err) {
     showToast('TTS error: ' + err);
     resetTtsUI();
     hidePlayerBar();
   }
+}
+
+// On a speed or voice change mid-listen, continue from the current word at the
+// new setting rather than restarting from the top.
+async function resumeFromCurrentWord() {
+  if (ttsState.finished || ttsState.paused) return;
+  if (playerBar.classList.contains('translate-y-full')) return; // not playing
+  if (!readingText || activeWord < 0 || !readingWords[activeWord]) return;
+  const fromWord = activeWord;
+  const remaining = readingText.slice(readingWords[fromWord].start);
+  if (!remaining.trim()) return;
+  await startSpeak(remaining, fromWord);
+}
+
+speedPresets.forEach(chip => {
+  chip.addEventListener('click', () => {
+    setTtsSpeed(parseFloat(chip.dataset.speed));
+    closeSpeedSheet();
+    resumeFromCurrentWord();
+  });
+});
+
+// `input` updates the label live during the drag; `change` (release) commits
+// and applies the new speed to playback.
+speedSlider.addEventListener('input', () => {
+  setTtsSpeed(parseFloat(speedSlider.value));
+});
+speedSlider.addEventListener('change', () => {
+  setTtsSpeed(parseFloat(speedSlider.value));
+  resumeFromCurrentWord();
+});
+
+// ── Listen: library + reading view ──
+
+function showPanel(id) {
+  document.querySelectorAll('.tab-panel').forEach(p => p.classList.add('hidden'));
+  const el = document.getElementById(id);
+  if (el) el.classList.remove('hidden');
+}
+
+function tokenizeWords(text) {
+  const words = [];
+  const re = /\S+/g;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    words.push({ text: m[0], start: m.index, end: m.index + m[0].length });
+  }
+  return words;
+}
+
+function renderReading(text) {
+  readingWords = tokenizeWords(text);
+  const el = document.getElementById('reading-text');
+  let html = '';
+  let cursor = 0;
+  readingWords.forEach((w, i) => {
+    html += escapeHtml(text.slice(cursor, w.start));
+    html += `<span data-w="${i}" class="rw">${escapeHtml(w.text)}</span>`;
+    cursor = w.end;
+  });
+  html += escapeHtml(text.slice(cursor));
+  el.innerHTML = html;
+}
+
+function setActiveWord(i) {
+  if (i === activeWord) return;
+  const el = document.getElementById('reading-text');
+  if (!el) return;
+  const prev = el.querySelector('.rw-active');
+  if (prev) prev.classList.remove('rw-active');
+  activeWord = i;
+  const span = el.querySelector(`[data-w="${i}"]`);
+  if (span) {
+    span.classList.add('rw-active');
+    span.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  }
+}
+
+function highlightAt(pos) {
+  // Walk forward from the generation's first word to the one whose time range
+  // holds `pos`. wordTimes is only filled as chunks finish generating.
+  for (let i = genBaseWord; i < readingWords.length; i++) {
+    const t = wordTimes[i];
+    if (!t) break;          // generation hasn't reached this word yet
+    if (pos < t.s) break;   // position is before this word
+    if (pos < t.e) { setActiveWord(i); return; }
+  }
+}
+
+async function loadLibrary() {
+  const items = await invoke('library_list');
+  const list = document.getElementById('lib-list');
+  const empty = document.getElementById('lib-empty');
+  empty.classList.toggle('hidden', items.length > 0);
+  list.innerHTML = items.slice().reverse().map(it => `
+    <div class="lib-item flex items-center justify-between gap-3 bg-surface-container-low rounded-xl px-4 py-3 cursor-pointer hover:bg-surface-container-high transition-colors" data-id="${escapeHtml(it.id)}">
+      <div class="min-w-0">
+        <div class="text-sm font-medium text-on-surface truncate">${escapeHtml(it.title)}</div>
+        <div class="text-xs text-on-surface-variant truncate mt-0.5">${escapeHtml(it.body.slice(0, 80))}</div>
+      </div>
+      <button class="lib-del shrink-0 text-on-surface-variant/50 hover:text-error transition-colors p-1 cursor-pointer" data-id="${escapeHtml(it.id)}">
+        <span class="material-symbols-outlined text-lg">delete</span>
+      </button>
+    </div>`).join('');
+  list.querySelectorAll('.lib-item').forEach(el => {
+    el.addEventListener('click', (e) => {
+      if (e.target.closest('.lib-del')) return;
+      openReading(el.dataset.id);
+    });
+  });
+  list.querySelectorAll('.lib-del').forEach(btn => {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      await invoke('library_delete', { id: btn.dataset.id });
+      loadLibrary();
+    });
+  });
+}
+
+async function openReading(id) {
+  let item;
+  try { item = await invoke('library_get', { id }); }
+  catch (err) { showToast('Open failed: ' + err); return; }
+  if (!item) { showToast('Text not found'); return; }
+  readingItem = item;
+  readingText = item.body;
+  activeWord = -1; genBaseWord = 0; timingCursor = 0; wordTimes = {};
+  document.getElementById('reading-title').textContent = item.title;
+  renderReading(readingText);
+  showPanel('reading');
+  resetTtsUI();
+  await updateTtsPanel();
+}
+
+document.getElementById('reading-back').addEventListener('click', () => {
+  invoke('tts_stop');
+  hidePlayerBar();
+  showPanel('library');
+  loadLibrary();
+});
+
+document.getElementById('tts-play').addEventListener('click', () => {
+  if (document.getElementById('tts-play').disabled) return;
+  startSpeak(readingText, 0);
+});
+
+// Changing the voice mid-listen continues from the current word in the new voice.
+document.getElementById('tts-voice-select').addEventListener('change', () => {
+  resumeFromCurrentWord();
+});
+
+// ── Add-text modal ──
+
+const libAddModal = document.getElementById('lib-add-modal');
+function closeAddModal() {
+  libAddModal.classList.add('hidden');
+  libAddModal.classList.remove('flex');
+}
+document.getElementById('lib-add-btn').addEventListener('click', () => {
+  document.getElementById('lib-add-title').value = '';
+  document.getElementById('lib-add-body').value = '';
+  libAddModal.classList.remove('hidden');
+  libAddModal.classList.add('flex');
+});
+document.getElementById('lib-add-cancel').addEventListener('click', closeAddModal);
+document.getElementById('lib-add-save').addEventListener('click', async () => {
+  const title = document.getElementById('lib-add-title').value;
+  const body = document.getElementById('lib-add-body').value;
+  if (!body.trim()) { showToast('Paste some text first'); return; }
+  try {
+    await invoke('library_add', { title: title || null, body });
+    closeAddModal();
+    loadLibrary();
+  } catch (err) { showToast('Save failed: ' + err); }
 });
 
 // ── Debug tab ──
@@ -1390,10 +1577,8 @@ document.getElementById('copy-logs').addEventListener('click', () => {
 
 document.addEventListener('DOMContentLoaded', async () => {
   // Show desktop-only UI elements when not on Android
-  const isDesktop = !navigator.userAgent.includes('Android');
   if (isDesktop) {
     document.getElementById('hotkey-row')?.classList.remove('hidden');
-    document.getElementById('nav-audio')?.classList.remove('hidden');
   }
 
   await loadHistory();
@@ -1402,6 +1587,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   await loadConfig();
   await loadVocab();
   await loadSnippets();
+
+  setMode('speak');
 
   if (!engineReady && await invoke('is_engine_ready')) {
     engineReady = true;

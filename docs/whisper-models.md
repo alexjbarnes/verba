@@ -83,7 +83,7 @@ Some degradation on certain languages (Thai, Cantonese).
 All 12 models have ONNX conversions by csukuangfj on HuggingFace, each with
 INT8 quantized variants. Repo pattern: `csukuangfj/sherpa-onnx-whisper-{model}`.
 
-## What Scribe Registers
+## What Verba Registers
 
 Currently 5 Whisper models in the registry (all INT8, English-only where available):
 
