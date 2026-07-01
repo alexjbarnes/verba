@@ -68,6 +68,10 @@ select {
   border-radius: 4px;
 }
 
+/* Buffering spinner on the player play/pause button */
+@keyframes tts-spin { to { transform: rotate(360deg); } }
+.tts-spin { animation: tts-spin 0.9s linear infinite; }
+
 /* Words are tappable to jump playback there */
 #reading-text .rw {
   cursor: pointer;

@@ -1266,6 +1266,33 @@ document.getElementById('tts-download-btn').addEventListener('click', async () =
 // ── TTS Player Bar ──
 
 let ttsState = { position_ms: 0, buffered_ms: 0, duration_ms: 0, paused: false, finished: false };
+// True from when a render starts until the player actually begins emitting audio
+// (drives the buffering spinner during the generate/pre-buffer gap, which has no
+// position events). Cleared on the first non-rebuffering position event.
+let ttsLoading = false;
+// The spinner is delay-gated: every play press (fresh, resume, speed/voice/seek)
+// has a short generate+pre-buffer gap, and showing the spinner instantly made it
+// flash on every start. Only a wait past SPINNER_DELAY_MS arms it, so quick starts
+// just go straight to playing. Mid-playback rebuffering is NOT gated (audio has
+// genuinely stopped, so it should show at once).
+let spinnerArmed = false;
+let spinnerTimer = null;
+const SPINNER_DELAY_MS = 350;
+function setTtsLoading(on) {
+  ttsLoading = on;
+  if (spinnerTimer) { clearTimeout(spinnerTimer); spinnerTimer = null; }
+  spinnerArmed = false;
+  if (on) {
+    spinnerTimer = setTimeout(() => {
+      spinnerTimer = null;
+      spinnerArmed = true;
+      if (ttsLoading) updatePlayerBar(ttsState);
+    }, SPINNER_DELAY_MS);
+  }
+}
+// When a re-render is triggered while paused (a seek that can't be an in-buffer
+// cursor move), keep it paused after the new render starts instead of playing.
+let renderStartPaused = false;
 // Latest fragment-relative buffered ms, updated on every position event even
 // during a seek-drag (ttsState is frozen then). Used to decide whether a seek
 // target is already generated (instant cursor move) or needs a re-render.
@@ -1336,7 +1363,16 @@ const timeCurrent = document.getElementById('tts-time-current');
 const timeTotal = document.getElementById('tts-time-total');
 const playPauseBtn = document.getElementById('tts-play-pause');
 const progressTrack = document.getElementById('tts-progress-track');
+const cacheSegmentsEl = document.getElementById('tts-cache-segments');
 const speedBtn = document.getElementById('tts-speed-btn');
+// Disk-cache coverage for the open article at the current voice+speed: merged
+// [startMs,endMs] blocks already synthesized, painted on the bar as buffered so
+// what's instantly playable is visible before (and during) playback. cacheTotalMs
+// is the article timeline those ranges sit on (real for cached segments, a
+// word-rate estimate for the rest); it doubles as the duration when fully cached.
+let cacheRanges = [];
+let cacheTotalMs = 0;
+let cacheStatusGen = -1; // last genId we refreshed coverage for (refresh once per gen_done)
 const PLAYER_PAD = '7rem';
 
 function fmtTime(ms) {
@@ -1399,6 +1435,7 @@ function resetTtsUI() {
   // The player bar is the only transport now; returning to a not-started state
   // means the next play press starts (resume or from 0) rather than pausing.
   ttsStarted = false;
+  setTtsLoading(false);
 }
 
 // Enable/disable the player-bar play control based on voice readiness.
@@ -1431,26 +1468,94 @@ function updatePlayerBar(st) {
   timeCurrent.textContent = fmtTime(fullPos);
   timeTotal.textContent = fmtTime(fullDur);
   const icon = playPauseBtn.querySelector('.material-symbols-outlined');
+  // Spinner while generating the new render or rebuffering (and not paused), e.g.
+  // right after a speed/voice change or a seek past the buffer — so it reads as
+  // loading rather than stuck or paused.
+  // !! is load-bearing: when st has no `rebuffering` field (the openReading and
+  // startSpeak literals) and ttsLoading is false, the && chain short-circuits to
+  // `undefined`, not false. classList.toggle('tts-spin', undefined) FLIPS the
+  // class (Chromium treats an explicit undefined force as "toggle"), which spun
+  // the play button on every article open. Coerce to a real boolean.
+  const buffering = !!(((ttsLoading && spinnerArmed) || st.rebuffering) && !st.paused && !st.finished);
+  icon.classList.toggle('tts-spin', buffering);
   if (st.finished) {
     icon.textContent = 'replay';
-  } else if (st.rebuffering && !st.paused) {
-    // Seeked ahead of (or generation fell behind) the buffer — show it's loading,
-    // not frozen. Resumes automatically once generation catches up.
-    icon.textContent = 'hourglass_top';
+  } else if (buffering) {
+    icon.textContent = 'progress_activity';
   } else {
     icon.textContent = st.paused ? 'play_arrow' : 'pause';
   }
+  renderCacheSegments();
+}
+
+// Paint the cached blocks as a buffered underlay, positioned over the same total
+// the bar displays (lastFullDurMs == cacheTotalMs once coverage is loaded), so a
+// fully-cached article reads as fully buffered and partial caches show as gaps.
+function renderCacheSegments() {
+  if (!cacheSegmentsEl) return;
+  const total = lastFullDurMs || cacheTotalMs || articleEstMs || 1;
+  cacheSegmentsEl.replaceChildren();
+  for (const r of cacheRanges) {
+    const s = Math.max(0, r[0]);
+    const e = Math.min(total, r[1]);
+    if (e <= s) continue;
+    const div = document.createElement('div');
+    div.className = 'absolute top-0 h-full bg-primary/20 pointer-events-none';
+    div.style.left = `${(s / total) * 100}%`;
+    div.style.width = `${((e - s) / total) * 100}%`;
+    cacheSegmentsEl.appendChild(div);
+  }
+}
+
+// Ask the backend which segments of the open article are already on disk for the
+// current voice+speed, and reflect it on the bar before any playback. When the
+// whole article is cached, its summed real duration is the true length, so adopt
+// it as the displayed total (fixes the bar showing an estimate on reopen).
+async function loadCacheStatus() {
+  cacheRanges = [];
+  cacheTotalMs = 0;
+  if (!readingItem || !ttsModelId || !readingText) { renderCacheSegments(); return; }
+  const voiceVal = ttsVoice || '0';
+  const sid = voiceVal.startsWith('custom:') ? 0 : (parseInt(voiceVal) || 0);
+  const text = readingText;
+  try {
+    const st = await invoke('tts_cache_status', { id: ttsModelId, sid, speed: ttsSpeed, text });
+    if (readingText !== text) return; // article/voice changed while awaiting
+    if (!st || !st.supported) { renderCacheSegments(); return; }
+    cacheRanges = Array.isArray(st.ranges) ? st.ranges : [];
+    cacheTotalMs = st.total_ms || 0;
+    // Only a FULLY cached article may set the displayed total: then cacheTotalMs
+    // is the exact real duration at this speed. A partial (or empty) coverage
+    // total is a real+estimate hybrid and must NOT overwrite the duration the
+    // library list shows (itemDurationMs: the saved measured length, or estimate)
+    // — doing so was loading a wrong duration on open. Partial coverage only
+    // paints its cached blocks; the total stays whatever openReading chose.
+    if (st.all_cached && cacheTotalMs > 0) {
+      articleEstMs = cacheTotalMs;
+      if (!ttsStarted) {
+        updatePlayerBar({ position_ms: 0, buffered_ms: 0, gen_done: false, paused: true, finished: false });
+      }
+    }
+    renderCacheSegments();
+  } catch (_) { renderCacheSegments(); }
 }
 
 listen('tts-position', (event) => {
   if (event.payload.gen !== genId) return;
   liveBufferedMs = event.payload.buffered_ms || 0;
+  // Playback has begun once we get a non-rebuffering event; stop the spinner.
+  if (!event.payload.rebuffering) setTtsLoading(false);
   refineDuration();
   if (!ttsSeeking) updatePlayerBar(event.payload);
   showPlayerBar();
   highlightAt(timelineBaseMs + event.payload.position_ms);
   if (!event.payload.paused) saveProgress(false);
   maybeSaveMeasuredDuration(event.payload);
+  // Generation just cached more of the article — refresh coverage once per gen.
+  if (event.payload.gen_done && cacheStatusGen !== genId) {
+    cacheStatusGen = genId;
+    loadCacheStatus();
+  }
 });
 
 // Once a full-article play finishes generating, the buffered amount IS the true
@@ -1655,6 +1760,8 @@ function setTtsSpeed(val) {
 function rememberSpeedForVoice() {
   ttsVoiceSpeeds[ttsVoice] = ttsSpeed;
   persistVoicePrefs();
+  // Cache coverage is per speed — refresh what's shown as buffered.
+  if (readingItem) loadCacheStatus();
 }
 
 function updateSpeedChips() {
@@ -1683,31 +1790,14 @@ async function startSpeak(text, baseWord, baseMs) {
 
   const myGen = ++genId;
   ttsStarted = true;
+  setTtsLoading(true); // generating/pre-buffering until the first audio plays
   autoFollow = true;
   dynMilestoneIdx = 0;
 
   const voiceVal = ttsVoice || '0';
   const isCustom = voiceVal.startsWith('custom:');
-
-  // Lazy-load the voice at generation time, no manual load step. First load can
-  // take a couple seconds, so toast while it happens. The custom branch loads
-  // the engine itself, so only plain-load when not custom.
-  if (!isCustom && !ttsLoadedModelId) {
-    showToast('Loading voice…');
-    try {
-      await invoke('tts_load', { id: ttsModelId });
-      ttsLoadedModelId = ttsModelId;
-    } catch (err) { showToast('Voice load failed: ' + err); resetTtsUI(); return; }
-  }
-  if (isCustom) {
-    showToast('Loading voice…');
-    try {
-      await invoke('tts_load', { id: ttsModelId, customVoice: voiceVal.slice(7) });
-      ttsLoadedModelId = ttsModelId;
-    } catch (err) { showToast('Failed to load custom voice: ' + err); resetTtsUI(); return; }
-  }
-
   const sid = isCustom ? 0 : parseInt(voiceVal);
+
   liveBufferedMs = 0; // new fragment: nothing generated yet
   // Position this fragment on the full-text timeline. A fresh play (baseWord 0)
   // resets everything; a resume/seek keeps prior word timings so seeking back
@@ -1727,15 +1817,75 @@ async function startSpeak(text, baseWord, baseMs) {
     }
   }
 
+  // Show the bar in a starting state up front, before the voice load, so the
+  // buffering spinner (not a toast) covers the first-run load as well as the
+  // generate/pre-buffer gap. The 350ms delay-gate keeps a cached, instant load
+  // from flashing anything. A seek-while-paused re-render renders paused, so no
+  // spinner shows then.
+  const keepPaused = renderStartPaused;
+  renderStartPaused = false;
   showPlayerBar();
   // Recompute the full-article duration at the current speed (measured if known,
   // else estimated); updatePlayerBar holds this as the total until generation
   // completes, so the bar stays stable (and consistent with the library).
   articleEstMs = itemDurationMs(readingItem, ttsSpeed) || estDurationMsForText(readingText, ttsSpeed);
-  updatePlayerBar({ position_ms: 0, buffered_ms: 0, gen_done: false, paused: false, finished: false });
+  updatePlayerBar({ position_ms: 0, buffered_ms: 0, gen_done: false, paused: keepPaused, finished: false });
+
+  // Try playing straight from the persistent cache first: if every segment this
+  // text needs is already on disk, this starts playback with no engine load at
+  // all (the ONNX session load is the multi-second wait the spinner otherwise
+  // covers). Backend re-verifies coverage itself on the exact text, so a stale
+  // guess here just costs one extra round trip, not correctness. Falls through
+  // to the normal load+speak path unchanged on a miss.
+  try {
+    const cached = await invoke('tts_speak_cached', {
+      id: ttsModelId,
+      customVoice: isCustom ? voiceVal.slice(7) : null,
+      text, speed: ttsSpeed, sid, gen: myGen,
+    });
+    if (cached) {
+      if (keepPaused) {
+        setTtsLoading(false);
+        ttsState.paused = true;
+        await invoke('tts_pause');
+        updatePlayerBar(ttsState);
+      }
+      return;
+    }
+  } catch (_) {
+    // Cache-only attempt errored rather than just missing (backend already
+    // logs it) — fall through to the normal path below rather than failing the
+    // whole play.
+  }
+
+  // Lazy-load the voice at generation time, no manual load step. First load can
+  // take a couple seconds; the buffering spinner covers it (no toast). A custom
+  // voice loads the engine each time; a built-in voice loads once.
+  try {
+    if (isCustom) {
+      await invoke('tts_load', { id: ttsModelId, customVoice: voiceVal.slice(7) });
+      ttsLoadedModelId = ttsModelId;
+    } else if (!ttsLoadedModelId) {
+      await invoke('tts_load', { id: ttsModelId });
+      ttsLoadedModelId = ttsModelId;
+    }
+  } catch (err) {
+    showToast((isCustom ? 'Failed to load custom voice: ' : 'Voice load failed: ') + err);
+    resetTtsUI();
+    updatePlayerBar({ position_ms: 0, buffered_ms: 0, gen_done: false, paused: true, finished: false });
+    return;
+  }
 
   try {
     await invoke('tts_speak', { text, speed: ttsSpeed, sid, gen: myGen });
+    // Re-render started while paused (a seek): pause the new player before it
+    // pre-buffers so it stays paused at the new spot instead of auto-playing.
+    if (keepPaused) {
+      setTtsLoading(false);
+      ttsState.paused = true;
+      await invoke('tts_pause');
+      updatePlayerBar(ttsState);
+    }
   } catch (err) {
     showToast('TTS error: ' + err);
     resetTtsUI();
@@ -1905,6 +2055,8 @@ function seekToFull(targetMs) {
     baseMs = targetMs;
   }
   if (!readingWords[w]) return;
+  // Keep the paused state across a seek that has to re-render.
+  renderStartPaused = ttsState.paused;
   startSpeak(readingText.slice(readingWords[w].start), w, baseMs);
 }
 
@@ -2008,6 +2160,79 @@ async function loadLibrary() {
   });
 }
 
+// Handle text shared to the app from elsewhere. If it contains a URL, fetch the
+// page (in Rust, to dodge CORS) and run Readability to pull the article; plain
+// text is saved as-is. Either way it lands in the library and opens in Listen,
+// ready to play.
+let importingShared = false;
+async function importSharedText(text) {
+  if (importingShared) return; // ignore a duplicate trigger mid-import
+  const raw = (text || '').trim();
+  if (!raw) return;
+  const url = (raw.match(/https?:\/\/[^\s]+/) || [])[0];
+  importingShared = true;
+  try {
+    let title = null;
+    let body = raw;
+    if (url) {
+      showToast('Fetching article…');
+      let html;
+      try {
+        html = await invoke('fetch_article', { url });
+      } catch (err) {
+        showToast('Could not fetch: ' + err);
+        return;
+      }
+      try {
+        const doc = new DOMParser().parseFromString(html, 'text/html');
+        // Give Readability a base URL for its link/heuristics.
+        const base = doc.createElement('base');
+        base.href = url;
+        doc.head && doc.head.prepend(base);
+        // Drop semantic chrome up front. Some sites (e.g. a table-based masthead
+        // inside the same wrapper as the article) confuse Readability into
+        // climbing past the <article> and keeping the site header/nav; removing
+        // these landmarks first keeps it on the actual content.
+        doc.querySelectorAll('header, footer, nav, aside').forEach(n => n.remove());
+        // Strip footnote/reference markers: the little superscript numbers linking
+        // to notes end up glued to a word ("column1") and get read aloud as a
+        // stray number. Covers the common markdown/Hugo/Pandoc/MediaWiki markup,
+        // plus any bare superscript that only wraps an in-page anchor. Also drop
+        // the endnotes section itself (orphaned once the markers are gone).
+        doc.querySelectorAll('sup[id^="fnref"], sup.reference, a.footnote-ref, [role="doc-noteref"], .footnote-ref').forEach(n => n.remove());
+        doc.querySelectorAll('sup > a[href^="#"]').forEach(a => a.parentElement && a.parentElement.remove());
+        doc.querySelectorAll('.footnotes, section.footnotes, [role="doc-endnotes"], ol.references').forEach(n => n.remove());
+        const article = (typeof Readability !== 'undefined')
+          ? new Readability(doc).parse()
+          : null;
+        if (article && article.textContent && article.textContent.trim().length > 50) {
+          title = (article.title || '').trim() || url;
+          body = article.textContent.trim();
+        } else {
+          showToast('No readable article found');
+          return;
+        }
+      } catch (err) {
+        showToast('Parse failed: ' + err);
+        return;
+      }
+    }
+    let item;
+    try {
+      item = await invoke('library_add', { title, body });
+    } catch (err) {
+      showToast('Save failed: ' + err);
+      return;
+    }
+    setMode('listen');
+    await loadLibrary();
+    if (item && item.id) openReading(item.id);
+    showToast(url ? 'Article added' : 'Text added');
+  } finally {
+    importingShared = false;
+  }
+}
+
 async function openReading(id) {
   let item;
   try { item = await invoke('library_get', { id }); }
@@ -2031,7 +2256,13 @@ async function openReading(id) {
   // the resume point. timelineBaseMs is an estimate of the skipped prefix so the
   // bar reflects the saved progress before generation; pressing play continues
   // from there (startSpeak reuses this base), keeping the bar continuous.
+  // Fully reset transport state first: a previously-played article can leave
+  // ttsLoading true (with a pending spinner timer) or an in-flight tts-position
+  // event still tagged with the old genId, either of which would flip the ready
+  // button into the spinning buffering state before play is ever pressed.
   ttsStarted = false;
+  setTtsLoading(false);
+  genId++;
   articleEstMs = itemDurationMs(item, ttsSpeed);
   const frac = readingText.length ? Math.min(1, prog / readingText.length) : 0;
   timelineBaseMs = articleEstMs > 0 ? frac * articleEstMs : 0;
@@ -2039,6 +2270,9 @@ async function openReading(id) {
   updatePlayerBar({ position_ms: 0, buffered_ms: 0, gen_done: false, paused: true, finished: false });
 
   await updateTtsPanel();
+  // Reflect what's already cached for this voice+speed on the bar (and adopt the
+  // real duration if fully cached) before any play. Fire-and-forget.
+  loadCacheStatus();
 }
 
 document.getElementById('reading-back').addEventListener('click', () => {
@@ -2082,6 +2316,8 @@ function setTtsVoice(val) {
   // the speed control.
   setTtsSpeed(speedForVoice(ttsVoice));
   persistVoicePrefs();
+  // Cache coverage is per voice — refresh what's shown as buffered.
+  if (readingItem) loadCacheStatus();
 }
 
 // Persist the voice prefs touched here (last voice + per-voice speeds) without
@@ -2238,4 +2474,17 @@ document.addEventListener('DOMContentLoaded', async () => {
     engineReady = true;
   }
 
+  // A URL/text shared to the app before the webview was ready waits in Rust;
+  // pull it now that everything (incl. the library) is loaded.
+  try {
+    const shared = await invoke('take_shared_text');
+    if (shared) importSharedText(shared);
+  } catch (_) {}
+});
+
+// A share arriving while the app is already open: Rust emits this once it has
+// stashed the text; go back through take_shared_text so cold and warm shares
+// use one consumption path (delivered exactly once).
+listen('shared-text', () => {
+  invoke('take_shared_text').then(t => { if (t) importSharedText(t); }).catch(() => {});
 });

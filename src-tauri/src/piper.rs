@@ -10,7 +10,7 @@
 //! both coexist. The ort init and CPU-EP session build mirror
 //! `postprocess::grammar_neural` so ORT finds `libonnxruntime.so` the same way.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
 use ort::session::{builder::GraphOptimizationLevel, Session};
@@ -85,6 +85,209 @@ pub fn num_speakers_from_config(json_path: &std::path::Path) -> i32 {
         .unwrap_or(0)
 }
 
+/// Identity of a model file for cache keys: file name + byte length. Shared by
+/// `PiperEngine::load` and the cache-coverage path so the two can never compute
+/// a different key for the same model (a mismatch would make every lookup miss).
+pub fn model_fingerprint(model_path: &str) -> String {
+    let len = std::fs::metadata(model_path).map(|m| m.len()).unwrap_or(0);
+    let name = std::path::Path::new(model_path)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("model");
+    format!("{name}:{len}")
+}
+
+/// Per-segment cache coverage for an article, computed WITHOUT loading ORT (so
+/// the reading view can show what's already on disk before play). Mirrors
+/// `synth_chunk`'s segmentation, key, and speaker clamp exactly, reading each
+/// entry's header (not its PCM). Returns cached ms-ranges merged into blocks
+/// along an article timeline (cached segments use their real duration, uncached
+/// a word-rate estimate), the total ms, and whether every segment is cached.
+pub struct CacheCoverage {
+    pub ranges: Vec<(u64, u64)>,
+    pub total_ms: u64,
+    pub cached_ms: u64,
+    pub total_segments: u32,
+    pub cached_segments: u32,
+}
+
+impl CacheCoverage {
+    /// True if every segment this text needs is already on disk — the article
+    /// can be played straight from the cache with the ONNX engine never loaded.
+    pub fn is_all_cached(&self) -> bool {
+        self.total_segments > 0 && self.cached_segments == self.total_segments
+    }
+}
+
+/// Read `(sample_rate, num_speakers)` from a Piper `.onnx.json` sidecar without
+/// loading the ORT session. Shared by `cache_coverage` and the cache-only
+/// playback path, both of which need this metadata before (or instead of)
+/// committing to the expensive engine load.
+pub fn read_piper_meta(config_path: &str) -> Option<(u32, i64)> {
+    let cfg_text = std::fs::read_to_string(config_path).ok()?;
+    let cfg: PiperConfig = serde_json::from_str(&cfg_text).ok()?;
+    Some((cfg.audio.sample_rate.max(1), cfg.num_speakers))
+}
+
+/// Clamp a requested speaker id into a model's valid range (0 if it declares no
+/// speakers). Shared by `cache_coverage` and cache-only playback so both derive
+/// the same cache key for the same request.
+fn clamp_speaker(sid: i32, num_speakers: i64) -> i32 {
+    if num_speakers > 0 {
+        (sid as i64).clamp(0, num_speakers - 1) as i32
+    } else {
+        0
+    }
+}
+
+pub fn cache_coverage(
+    model_path: &str,
+    config_path: &str,
+    sid: i32,
+    speed: f32,
+    text: &str,
+) -> CacheCoverage {
+    let mut cov = CacheCoverage {
+        ranges: Vec::new(),
+        total_ms: 0,
+        cached_ms: 0,
+        total_segments: 0,
+        cached_segments: 0,
+    };
+    let Some((sample_rate, num_speakers)) = read_piper_meta(config_path) else { return cov };
+    let sr = sample_rate as u64;
+    let model_fp = model_fingerprint(model_path);
+    let speed_milli = (speed.max(0.0) * 1000.0).round() as u32;
+    let speed_safe = if speed > 0.0 { speed } else { 1.0 } as f64;
+    let speaker = clamp_speaker(sid, num_speakers);
+
+    // Replicate the synthesis segmentation EXACTLY so the keys match what
+    // synth_chunk stored: speak() chunks the text via split_sentences +
+    // batch_sentences, then synth_chunk runs split_for_pauses on each CHUNK.
+    // Running split_for_pauses on the whole article instead yields different
+    // segment strings at chunk boundaries, so every lookup would miss and the
+    // total would fall back to the estimate.
+    let clean = text.replace('\u{0}', " ");
+    let chunks = crate::tts::batch_sentences(crate::tts::split_sentences(&clean), 15, 45);
+    let mut cum: u64 = 0;
+    for (segment, pause_ms) in chunks.iter().flat_map(|c| split_for_pauses(c)) {
+        cov.total_segments += 1;
+        let key = crate::tts_cache::key(&model_fp, speaker, speed_milli, &segment);
+        match crate::tts_cache::cached_meta(&key, sr as u32, &segment) {
+            Some(pcm_len) => {
+                cov.cached_segments += 1;
+                let speech_ms = (pcm_len as u64 * 1000) / sr;
+                // Cover speech + its trailing pause so consecutive cached
+                // segments form one solid block after the merge below.
+                cov.ranges.push((cum, cum + speech_ms + pause_ms as u64));
+                cov.cached_ms += speech_ms + pause_ms as u64;
+                cum += speech_ms + pause_ms as u64;
+            }
+            None => {
+                let words = segment.split_whitespace().count() as f64;
+                let est = (words / 255.0 * 60_000.0 / speed_safe) as u64;
+                cum += est + pause_ms as u64;
+            }
+        }
+    }
+    cov.total_ms = cum;
+
+    // Merge touching/overlapping ranges so a run of cached segments is one block.
+    cov.ranges.sort_by_key(|r| r.0);
+    let mut merged: Vec<(u64, u64)> = Vec::new();
+    for (s, e) in cov.ranges.drain(..) {
+        match merged.last_mut() {
+            Some(last) if s <= last.1 => last.1 = last.1.max(e),
+            _ => merged.push((s, e)),
+        }
+    }
+    cov.ranges = merged;
+    cov
+}
+
+/// Build one chunk's PCM + timing straight from the persistent cache, touching
+/// neither the ONNX session nor the phonemizer/encoder — this is what lets
+/// playback of a fully-cached article skip the (multi-second) engine load
+/// entirely. Segmentation/keying mirrors `synth_chunk` exactly (same
+/// `split_for_pauses` per chunk, same key), so this only ever hits entries that
+/// `synth_chunk` itself wrote. Returns `None` if ANY segment misses — the
+/// caller (`tts::speak_from_cache`) only calls this after `cache_coverage`
+/// confirms full coverage, so a miss here means a genuine race (e.g. a
+/// concurrent eviction) rather than a normal case.
+pub fn synth_chunk_cache_only(
+    model_fp: &str,
+    sample_rate: i32,
+    num_speakers: i64,
+    sid: i32,
+    speed: f32,
+    text: &str,
+) -> Option<(Vec<f32>, Vec<SegmentSpan>)> {
+    let sr = sample_rate.max(1) as usize;
+    let speed_milli = (speed.max(0.0) * 1000.0).round() as u32;
+    let speaker = clamp_speaker(sid, num_speakers);
+
+    let mut out: Vec<f32> = Vec::new();
+    let mut spans: Vec<SegmentSpan> = Vec::new();
+    for (segment, pause_ms) in split_for_pauses(text) {
+        let key = crate::tts_cache::key(model_fp, speaker, speed_milli, &segment);
+        let cached = crate::tts_cache::get(&key, sr as u32, &segment)?;
+        let speech_start = out.len();
+        out.extend_from_slice(&cached.pcm);
+        let speech_samples = out.len() - speech_start;
+        let pause_samples = if pause_ms > 0 && !out.is_empty() {
+            pause_ms * sr / 1000
+        } else {
+            0
+        };
+        if pause_samples > 0 {
+            out.extend(std::iter::repeat(0.0f32).take(pause_samples));
+        }
+        spans.push(SegmentSpan {
+            text: segment,
+            speech_ms: (speech_samples as u64 * 1000) / sr as u64,
+            pause_ms: (pause_samples as u64 * 1000) / sr as u64,
+            word_ms: cached.word_ms,
+        });
+    }
+    Some((out, spans))
+}
+
+/// Shortest first piece (so the second word keeps its leading letter) that a
+/// dictionary segmentation can start with. 3 keeps common prefixes ("pre",
+/// "mis", "non") while excluding 1-2 char noise that fragments everything.
+const SEGMENT_MIN_PIECE: usize = 3;
+
+/// Try to split an out-of-vocabulary word into exactly two dictionary words
+/// (e.g. "pushbuffer" -> ["push","buffer"], "codebase" -> ["code","base"]) so
+/// the phonemizer can pronounce each half instead of spelling the whole thing
+/// letter-by-letter. `word_set` is the set of dict keys (lowercased).
+///
+/// Deliberately conservative: exactly two pieces (binary compounds are the
+/// common tech case; 3+ splits multiply garbage like "rat eli miter"), each at
+/// least `SEGMENT_MIN_PIECE` chars, and among candidates the one with the
+/// SHORTEST first piece — because the frequent failure mode of a greedy match
+/// is stealing the second word's first letter ("standa|lone", "pret|raining").
+/// Without word-frequency data this can still mis-split the odd word
+/// ("datastore" -> "dat|astore"), but even a slightly-off split reads far closer
+/// than letter spelling, and acronyms/unsplittable proper nouns return None and
+/// fall through to spelling unchanged. Returns None unless a full two-word cover
+/// exists.
+fn segment_compound(word_set: &std::collections::HashSet<String>, word: &str) -> Option<Vec<String>> {
+    let lower = word.to_lowercase();
+    let n = lower.len();
+    if n < SEGMENT_MIN_PIECE * 2 || !lower.chars().all(|c| c.is_ascii_alphabetic()) {
+        return None;
+    }
+    // Char-boundary safe because we required all-ASCII above.
+    for cut in SEGMENT_MIN_PIECE..=(n - SEGMENT_MIN_PIECE) {
+        let (head, tail) = (&lower[..cut], &lower[cut..]);
+        if word_set.contains(head) && word_set.contains(tail) {
+            return Some(vec![head.to_string(), tail.to_string()]);
+        }
+    }
+    None
+}
+
 /// A-Z letter-name IPA spell-out table (OOV fallback). Each value is the IPA for
 /// the English *name* of the letter as a sequence of single-codepoint IPA
 /// symbols (the libritts_r id_map is keyed by single chars). e.g. "GPU" ->
@@ -121,6 +324,120 @@ fn letter_ipa(c: char) -> Option<&'static [&'static str]> {
         _ => return None,
     })
 }
+
+/// Manual pronunciation entries merged into the bundled CMUdict at load time
+/// (same lowercase-key, space-separated-ARPAbet format as the dict itself).
+/// Reported mispronounced (2026-06-30): proper nouns/products absent from a
+/// 1990s dictionary, two-word brand names glued into one token (openai,
+/// humanlayer, victoriametrics, victorialogs — the standalone words already
+/// phonemize correctly), and British spellings CMUdict only has as American
+/// (optimise/behaviour/authorised alias their -ize/-or/-ized entries). Checked
+/// against the bundled dict first (data/cmudict_data.json) so this doesn't
+/// paper over words that were already correct: "meta", "tendency", and
+/// "apache" are already present and unchanged; not in this table.
+const PRONUNCIATION_OVERRIDES: &[(&str, &str)] = &[
+    ("google", "G UW1 G AH0 L"),
+    ("openai", "OW1 P AH0 N AY1"),
+    ("agentic", "AH0 JH EH1 N T IH0 K"),
+    ("misalignment", "M IH0 S AH0 L AY1 N M AH0 N T"),
+    ("optimise", "AA1 P T AH0 M AY2 Z"),
+    ("behaviour", "B IH0 HH EY1 V Y ER0"),
+    ("humanlayer", "HH Y UW1 M AH0 N L EY1 ER0"),
+    ("observability", "AH0 B Z ER1 V AH0 B IH1 L AH0 T IY0"),
+    ("ollama", "OW0 L AA1 M AH0"),
+    ("qwen", "K W EH1 N"),
+    ("api", "EY1 P IY1 AY1"),
+    ("semgrep", "S EH1 M G R EH1 P"),
+    ("incomprehension", "IH2 N K AA2 M P R IY0 HH EH1 N SH AH0 N"),
+    ("codebase", "K OW1 D B EY1 S"),
+    ("codebases", "K OW1 D B EY1 S AH0 Z"),
+    ("affordance", "AH0 F AO1 R D AH0 N S"),
+    ("affordances", "AH0 F AO1 R D AH0 N S AH0 Z"),
+    ("anthropic", "AE0 N TH R AA1 P IH0 K"),
+    ("pushback", "P UH1 SH B AE0 K"),
+    ("authorised", "AO1 TH ER0 AY2 Z D"),
+    ("pretraining", "P R IY0 T R EY1 N IH0 NG"),
+    ("hadoop", "HH AH0 D UW1 P"),
+    ("filesystem", "F AY1 L S IH0 S T AH0 M"),
+    ("victoriametrics", "V IH0 K T AO1 R IY0 AH0 M EH1 T R IH0 K S"),
+    ("victorialogs", "V IH0 K T AO1 R IY0 AH0 L AO1 G Z"),
+    ("loki", "L OW1 K IY0"),
+    // Reported 2026-07-01 (CUDA/GPU-tooling article). Checked first: "embedded"
+    // is already correct in the bundled dict (EH0 M B EH1 D IH0 D) and NOT
+    // touched. Rest were genuinely missing/OOV, same causes as above: -er/-tion/
+    // -able suffix derivations built from real entries (classify, execute,
+    // action), compounds glued into one token (standalone, walkthrough,
+    // runtime, fatbin — a real CUDA term for a multi-arch bundled binary), and
+    // acronyms read letter-by-letter (gpu, matching the existing "api" entry).
+    ("classifier", "K L AE1 S AH0 F AY2 ER0"),
+    ("classifiers", "K L AE1 S AH0 F AY2 ER0 Z"),
+    ("compaction", "K AH0 M P AE1 K SH AH0 N"),
+    ("compactions", "K AH0 M P AE1 K SH AH0 N Z"),
+    ("standalone", "S T AE1 N D AH0 L OW2 N"),
+    ("gpu", "JH IY1 P IY1 Y UW1"),
+    ("gpus", "JH IY1 P IY1 Y UW1 Z"),
+    ("walkthrough", "W AO1 K TH R UW2"),
+    ("walkthroughs", "W AO1 K TH R UW2 S"),
+    ("fatbin", "F AE1 T B IH0 N"),
+    ("fatbins", "F AE1 T B IH0 N Z"),
+    ("executable", "EH1 K S AH0 K Y UW2 T AH0 B AH0 L"),
+    ("executables", "EH1 K S AH0 K Y UW2 T AH0 B AH0 L Z"),
+    ("cuda", "K UW1 D AH0"),
+    ("runtime", "R AH1 N T AY2 M"),
+    ("runtimes", "R AH1 N T AY2 M Z"),
+    // Reported 2026-07-01. "lazily" was already correct in the dict (not added).
+    // "upload(s)" can't reach the compound splitter (its "up" prefix is 2 chars,
+    // below SEGMENT_MIN_PIECE); "pushbuffer" and "mispronunciation(s)" are left
+    // to the splitter (push+buffer, mis+pronunciation) rather than pinned here.
+    ("upload", "AH1 P L OW2 D"),
+    ("uploads", "AH1 P L OW2 D Z"),
+    ("uploaded", "AH1 P L OW2 D IH0 D"),
+    ("uploading", "AH1 P L OW2 D IH0 NG"),
+    // Reported 2026-07-01. Missing words, built from existing morphemes
+    // (extensive/extend for extensible; purpose + re- for repurpose*).
+    ("extensible", "IH0 K S T EH1 N S AH0 B AH0 L"),
+    ("repurpose", "R IY0 P ER1 P AH0 S"),
+    ("repurposed", "R IY0 P ER1 P AH0 S T"),
+    ("repurposes", "R IY0 P ER1 P AH0 S IH0 Z"),
+    ("repurposing", "R IY0 P ER1 P AH0 S IH0 NG"),
+    // Heteronyms whose CMUdict default is the wrong sense for a reader: it stores
+    // read -> "R EH1 D" (past tense) and reading -> "R EH1 D IH0 NG" (the town),
+    // but the present/infinitive/noun sense (reed) dominates article prose. Flip
+    // them (insert overwrites the dict entry). TRADEOFF: past-tense "I read it
+    // yesterday" now says "reed" — correct disambiguation needs POS/tense from a
+    // grammar tagger, which the TTS path doesn't run.
+    ("read", "R IY1 D"),
+    ("reading", "R IY1 D IH0 NG"),
+    // Reported 2026-07-01. json is pronounced "Jason" (already in the dict under
+    // that spelling). "scapes" was missing (only "scape" existed), so the
+    // compound splitter couldn't do hellscapes -> hell+scapes; adding it unlocks
+    // the whole -scapes family (soundscapes, cityscapes...), and hellscape(s) are
+    // pinned too for certainty. Built from scape (S K EY1 P) / landscape's -scape.
+    ("json", "JH EY1 S AH0 N"),
+    ("scapes", "S K EY1 P S"),
+    ("hellscape", "HH EH1 L S K EY2 P"),
+    ("hellscapes", "HH EH1 L S K EY2 P S"),
+    // Reported 2026-07-01. Missing words built from morphemes (iterative stem;
+    // un- + ordered).
+    ("iteration", "IH2 T ER0 EY1 SH AH0 N"),
+    ("iterations", "IH2 T ER0 EY1 SH AH0 N Z"),
+    ("iterate", "IH1 T ER0 EY2 T"),
+    ("unordered", "AH0 N AO1 R D ER0 D"),
+    // "AI" collides with the dict word "ai" (AY1 = "eye"), so it was read as "I".
+    // Say the letters A-I. Composes with the possessive handler: "AI's" -> A-I-z.
+    ("ai", "EY1 AY1"),
+    // Heteronym: dict stores the verb "lives" (L IH1 V Z, "he lives"); the noun
+    // plural of life (L AY1 V Z, "our lives") dominates article prose. Flip it.
+    // TRADEOFF: verb "she lives here" now uses the long-i, like read/reading.
+    ("lives", "L AY1 V Z"),
+    // Reported 2026-07-01. Missing words built from morphemes (val; verify + er;
+    // plug + in). "MCPs" is handled generically by the acronym-plural rule above.
+    ("eval", "IY0 V AE1 L"),
+    ("verifier", "V EH1 R AH0 F AY2 ER0"),
+    ("verifiers", "V EH1 R AH0 F AY2 ER0 Z"),
+    ("plugin", "P L AH1 G IH0 N"),
+    ("plugins", "P L AH1 G IH0 N Z"),
+];
 
 /// Expand each (possibly multi-codepoint, like "ɑː" or "iː") token into
 /// single-codepoint tokens, since the model id_map is keyed by single chars.
@@ -340,7 +657,26 @@ const CLAUSE_PAUSE_MS: usize = 250; // , ; :
 
 /// Phonemize whole text to a single IPA token stream with " " word separators.
 /// OOV words are spelled letter-by-letter so they still produce audio.
-fn phonemize(ph: &EnglishPhonemizer, text: &str) -> Result<Vec<String>, String> {
+fn phonemize(
+    ph: &EnglishPhonemizer,
+    word_set: &std::collections::HashSet<String>,
+    text: &str,
+) -> Result<Vec<String>, String> {
+    // Phonemize one already-isolated word, trimming the phonemizer's edge
+    // spaces. Returns whatever it produced (possibly OOV/empty — caller checks).
+    let phonemize_word = |w: &str| -> Result<Vec<String>, String> {
+        let (mut pt, _prosody) = ph
+            .phonemize_with_prosody(w)
+            .map_err(|e| format!("phonemize: {e}"))?;
+        while pt.first().map(|s| s == " ").unwrap_or(false) {
+            pt.remove(0);
+        }
+        while pt.last().map(|s| s == " ").unwrap_or(false) {
+            pt.pop();
+        }
+        Ok(pt)
+    };
+
     let pieces = split_tokens(text);
     let mut tokens: Vec<String> = Vec::new();
     let mut first = true;
@@ -349,19 +685,81 @@ fn phonemize(ph: &EnglishPhonemizer, text: &str) -> Result<Vec<String>, String> 
         let is_word = piece.chars().next().map(|c| c.is_alphanumeric()).unwrap_or(false);
 
         let mut p_tokens: Vec<String> = if is_word {
-            let (mut pt, _prosody) = ph
-                .phonemize_with_prosody(piece)
-                .map_err(|e| format!("phonemize: {e}"))?;
-            while pt.first().map(|s| s == " ").unwrap_or(false) {
-                pt.remove(0);
-            }
-            while pt.last().map(|s| s == " ").unwrap_or(false) {
-                pt.pop();
-            }
+            let mut pt = phonemize_word(piece)?;
             if is_oov(&pt) {
-                let spelled = spell_word(piece);
-                if !spelled.is_empty() {
-                    pt = spelled;
+                let mut replaced = false;
+                // Possessive of an OOV word ("Claude's", "Anthropic's"): the base
+                // is often pronounceable (in the dict or an override) even when
+                // the whole "word's" token isn't. Pronounce the base and append
+                // the possessive /z/ instead of spelling the whole thing out.
+                // (Common possessives like "cat's"/"it's" are in the dict already,
+                // so they never reach here; this is for proper nouns.)
+                if let Some(base) = piece.strip_suffix("'s") {
+                    if !base.is_empty() {
+                        let mut b = phonemize_word(base)?;
+                        if !is_oov(&b) {
+                            b.push("z".to_string());
+                            pt = b;
+                            replaced = true;
+                        }
+                    }
+                }
+                // Acronym plural: an all-caps acronym + a lowercase "s" ("MCPs",
+                // "APIs", "LLMs"). Spelling it letter-by-letter would read the "s"
+                // as "ess"; instead say/spell the acronym and append /z/ so it's
+                // "em-see-peez". The base goes through phonemize first so an
+                // acronym with an override (API, GPU) uses it.
+                if !replaced {
+                    let ch: Vec<char> = piece.chars().collect();
+                    let n = ch.len();
+                    if n >= 3 && ch[n - 1] == 's' && ch[..n - 1].iter().all(|c| c.is_ascii_uppercase()) {
+                        let base: String = ch[..n - 1].iter().collect();
+                        let mut b = phonemize_word(&base)?;
+                        if is_oov(&b) {
+                            b = spell_word(&base);
+                        }
+                        if !b.is_empty() {
+                            b.push("z".to_string());
+                            pt = b;
+                            replaced = true;
+                        }
+                    }
+                }
+                // Else split a glued compound into two dictionary words and
+                // pronounce each half (pushbuffer -> push + buffer). Sub-words
+                // come from `word_set` so they phonemize; concatenate their tokens
+                // with no separator so it reads as one word, not two with a pause.
+                if !replaced {
+                    if let Some(parts) = segment_compound(word_set, piece) {
+                        let mut combined: Vec<String> = Vec::new();
+                        let mut ok = true;
+                        for (pi, part) in parts.iter().enumerate() {
+                            let mut sub = phonemize_word(part)?;
+                            if is_oov(&sub) { ok = false; break; }
+                            // Each word carries a primary stress marker (ˈ). Joined
+                            // as-is, the second word's ˈ starts a new prosodic unit
+                            // and the model inserts an audible pause (salesforce ->
+                            // "sales ... force"). A compound has ONE primary stress,
+                            // so demote later parts' ˈ (U+02C8) to secondary ˌ
+                            // (U+02CC): it reads as one word, no mid-word pause.
+                            if pi > 0 {
+                                for t in sub.iter_mut() {
+                                    if t == "\u{02C8}" { *t = "\u{02CC}".to_string(); }
+                                }
+                            }
+                            combined.append(&mut sub);
+                        }
+                        if ok && !combined.is_empty() {
+                            pt = combined;
+                            replaced = true;
+                        }
+                    }
+                }
+                if !replaced {
+                    let spelled = spell_word(piece);
+                    if !spelled.is_empty() {
+                        pt = spelled;
+                    }
                 }
             }
             pt
@@ -405,7 +803,7 @@ pub struct SegmentSpan {
     pub word_ms: Vec<u64>,
 }
 
-fn split_for_pauses(text: &str) -> Vec<(String, usize)> {
+pub fn split_for_pauses(text: &str) -> Vec<(String, usize)> {
     fn pause_of(c: char) -> Option<usize> {
         match c {
             '\n' => Some(PARAGRAPH_PAUSE_MS),
@@ -495,6 +893,7 @@ fn map_words_to_frames(
     tokens: &[String],
     wceil: &[f32],
     ph: &EnglishPhonemizer,
+    word_set: &HashSet<String>,
     id_map: &PhonemeIdMap,
 ) -> Option<Vec<f64>> {
     if words.is_empty() {
@@ -506,7 +905,7 @@ fn map_words_to_frames(
     let mut tok_word: Vec<usize> = Vec::new();
     for (wi, w) in words.iter().enumerate() {
         let norm = normalize_numbers(&normalize_text(w));
-        let wt = phonemize(ph, &norm).ok()?;
+        let wt = phonemize(ph, word_set, &norm).ok()?;
         if wt.is_empty() {
             continue;
         }
@@ -555,6 +954,7 @@ fn compute_word_ms(
     speech_samples: usize,
     sr: usize,
     ph: &EnglishPhonemizer,
+    word_set: &HashSet<String>,
     id_map: &PhonemeIdMap,
 ) -> Vec<u64> {
     if words.is_empty() {
@@ -562,7 +962,7 @@ fn compute_word_ms(
     }
     let total_ms = (speech_samples as u64 * 1000) / sr.max(1) as u64;
     if let Some(wc) = wceil {
-        if let Some(frames) = map_words_to_frames(words, tokens, wc, ph, id_map) {
+        if let Some(frames) = map_words_to_frames(words, tokens, wc, ph, word_set, id_map) {
             let total: f64 = frames.iter().sum();
             if total > 0.0 {
                 return frames
@@ -605,11 +1005,17 @@ pub struct PiperEngine {
     /// Kept alongside the encoder to replicate its id layout when attributing
     /// the model's per-id durations (`w_ceil`) to words.
     id_map: PhonemeIdMap,
+    /// Lowercased dictionary keys (CMUdict + overrides), for splitting an OOV
+    /// compound into two known words before falling back to letter-spelling.
+    word_set: HashSet<String>,
     sample_rate: i32,
     num_speakers: i64,
     noise_scale: f32,
     length_scale: f32,
     noise_w: f32,
+    /// Identity of the loaded model (file name + size) folded into cache keys so
+    /// a different voice/model never collides with another's stored audio.
+    model_fp: String,
 }
 
 impl PiperEngine {
@@ -627,8 +1033,20 @@ impl PiperEngine {
         let encoder = PiperEncoder::new(id_map.clone(), UnknownTokenMode::Skip)
             .map_err(|e| format!("piper encoder: {e}"))?;
 
-        let dict: HashMap<String, String> = serde_json::from_slice(CMUDICT_BYTES)
+        let mut dict: HashMap<String, String> = serde_json::from_slice(CMUDICT_BYTES)
             .map_err(|e| format!("parse bundled cmudict: {e}"))?;
+        // CMUdict predates these terms (proper nouns, compounds glued into one
+        // token, British spellings), so without an entry the OOV fallback in
+        // `phonemize` spells them out letter-by-letter. Override/add entries in
+        // the same ARPAbet format as the bundled dict so they route through the
+        // normal phonemizer instead.
+        for (word, phonemes) in PRONUNCIATION_OVERRIDES {
+            dict.insert(word.to_string(), phonemes.to_string());
+        }
+        // Snapshot the keys (dict is moved into the phonemizer next) for the
+        // OOV compound splitter. CMUdict keys are already lowercase, as are the
+        // overrides; a couple hundred KB of Strings, built once at load.
+        let word_set: HashSet<String> = dict.keys().cloned().collect();
         let phonemizer = EnglishPhonemizer::new_with_hashmap(dict);
 
         ensure_ort_init()?;
@@ -653,16 +1071,20 @@ impl PiperEngine {
             cfg.audio.sample_rate, cfg.num_speakers
         );
 
+        let model_fp = model_fingerprint(model_path);
+
         Ok(Self {
             session,
             phonemizer,
             encoder,
             id_map,
+            word_set,
             sample_rate: cfg.audio.sample_rate as i32,
             num_speakers: cfg.num_speakers,
             noise_scale: cfg.inference.noise_scale,
             length_scale: cfg.inference.length_scale,
             noise_w: cfg.inference.noise_w,
+            model_fp,
         })
     }
 
@@ -752,35 +1174,56 @@ impl PiperEngine {
         };
 
         let sr = self.sample_rate.max(1) as usize;
+        // Quantize speed so float jitter (0.7499 vs 0.75) can't fragment the
+        // cache; it keys the same render the user perceives as one speed.
+        let speed_milli = (speed.max(0.0) * 1000.0).round() as u32;
         let mut out: Vec<f32> = Vec::new();
         let mut spans: Vec<SegmentSpan> = Vec::new();
+        let (mut cache_hits, mut cache_misses) = (0u32, 0u32);
         // Split the RAW text (so segment word counts match the UI's tokens), then
         // normalize each segment for synthesis. Each segment is synthesized
         // separately and joined with real silence. Returning per-segment speech
         // timing (excluding the pause) lets the reading view highlight track
         // speech and treat the inserted pauses as gaps, not part of a word.
         for (segment, pause_ms) in split_for_pauses(text) {
-            let normalized = normalize_numbers(&normalize_text(&segment));
-            let tokens = phonemize(&self.phonemizer, &normalized)?;
-            let ids = self
-                .encoder
-                .encode(&tokens)
-                .map_err(|e| format!("encode: {e}"))?;
             let speech_start = out.len();
-            let mut wceil: Option<Vec<f32>> = None;
-            if !ids.is_empty() {
-                let (pcm, wc) = self.infer(&ids, speaker, length_scale)?;
-                out.extend_from_slice(&pcm);
-                wceil = wc;
-            }
+            // Persistent cache: a segment in this model+voice+speed is synthesized
+            // at most once, ever. Hit -> load pcm+timing and skip inference; miss
+            // -> synthesize then store. The pause silence below is deterministic
+            // and re-spliced either way, so it is not part of the cached audio.
+            let ck = crate::tts_cache::key(&self.model_fp, speaker as i32, speed_milli, &segment);
+            let (speech_pcm, word_ms) = match crate::tts_cache::get(&ck, sr as u32, &segment) {
+                Some(seg) => {
+                    cache_hits += 1;
+                    (seg.pcm, seg.word_ms)
+                }
+                None => {
+                    cache_misses += 1;
+                    let normalized = normalize_numbers(&normalize_text(&segment));
+                    let tokens = phonemize(&self.phonemizer, &self.word_set, &normalized)?;
+                    let ids = self
+                        .encoder
+                        .encode(&tokens)
+                        .map_err(|e| format!("encode: {e}"))?;
+                    let (pcm, wceil) = if !ids.is_empty() {
+                        self.infer(&ids, speaker, length_scale)?
+                    } else {
+                        (Vec::new(), None)
+                    };
+                    // Per-word speech timing for the reading-view highlight: exact
+                    // from the model's durations when available, else a char-length
+                    // estimate.
+                    let words: Vec<&str> = segment.split_whitespace().collect();
+                    let word_ms = compute_word_ms(
+                        &words, &tokens, wceil.as_deref(), pcm.len(), sr,
+                        &self.phonemizer, &self.word_set, &self.id_map,
+                    );
+                    crate::tts_cache::put(&ck, sr as u32, &segment, &pcm, &word_ms);
+                    (pcm, word_ms)
+                }
+            };
+            out.extend_from_slice(&speech_pcm);
             let speech_samples = out.len() - speech_start;
-            // Per-word speech timing for the reading-view highlight: exact from
-            // the model's durations when available, else a char-length estimate.
-            let words: Vec<&str> = segment.split_whitespace().collect();
-            let word_ms = compute_word_ms(
-                &words, &tokens, wceil.as_deref(), speech_samples, sr,
-                &self.phonemizer, &self.id_map,
-            );
             let pause_samples = if pause_ms > 0 && !out.is_empty() {
                 pause_ms * sr / 1000
             } else {
@@ -795,6 +1238,9 @@ impl PiperEngine {
                 pause_ms: (pause_samples as u64 * 1000) / sr as u64,
                 word_ms,
             });
+        }
+        if cache_hits + cache_misses > 0 {
+            log::info!("TTS cache: {cache_hits} hit / {cache_misses} miss");
         }
         Ok((out, spans))
     }
@@ -907,6 +1353,24 @@ mod tests {
         let raw = "Hello, world. death,4 end";
         let seg_words: usize = segs(raw).iter().map(|s| s.split_whitespace().count()).sum();
         assert_eq!(seg_words, raw.split_whitespace().count());
+    }
+
+    #[test]
+    fn compound_split() {
+        let ws: HashSet<String> = ["push", "buffer", "code", "base", "stand", "alone", "pre", "training", "up", "load"]
+            .iter().map(|s| s.to_string()).collect();
+        // Clean binary compounds split into their two words.
+        assert_eq!(segment_compound(&ws, "pushbuffer"), Some(vec!["push".into(), "buffer".into()]));
+        assert_eq!(segment_compound(&ws, "codebase"), Some(vec!["code".into(), "base".into()]));
+        // Shortest-first keeps the second word's leading letter (not "standa|lone").
+        assert_eq!(segment_compound(&ws, "standalone"), Some(vec!["stand".into(), "alone".into()]));
+        assert_eq!(segment_compound(&ws, "pretraining"), Some(vec!["pre".into(), "training".into()]));
+        // A 2-char word ("up") is below the min piece length, so "upload" doesn't split.
+        assert_eq!(segment_compound(&ws, "upload"), None);
+        // No cover -> None (would fall through to letter spelling).
+        assert_eq!(segment_compound(&ws, "buffed"), None);
+        // Non-alphabetic content is never segmented.
+        assert_eq!(segment_compound(&ws, "push2buffer"), None);
     }
 }
 

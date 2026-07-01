@@ -132,6 +132,12 @@ pub fn stop() {
     if let Some(player) = lock_player().take() {
         player.stop();
     }
+    // Explicit stop (dismiss/back/unload) ends the listening session: tear down
+    // the media session so its notification + audio focus are released. A
+    // mid-listen re-render stops the old player inline (not via stop()), so this
+    // does not fire on speed/voice/seek re-renders.
+    #[cfg(target_os = "android")]
+    crate::android_stop_media_session();
 }
 
 pub fn pause() {
@@ -175,6 +181,171 @@ pub fn sample_rate() -> i32 {
     SAMPLE_RATE.load(Ordering::SeqCst)
 }
 
+/// Build the player position callback: emits `tts-position` on every poll and
+/// `tts-finished` (once) when generation is done and playback has caught up to
+/// it. Shared by `speak()` and `speak_from_cache()` — completion is purely a
+/// function of the player's own position/buffered/gen_done state, identical
+/// regardless of whether the audio came from the engine or the cache.
+fn build_position_callback(
+    gen: u64,
+    sr: u64,
+    app: Option<tauri::AppHandle>,
+) -> Option<Box<dyn Fn(player::PlaybackPosition) + Send + 'static>> {
+    app.map(|app| {
+        let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        Box::new(move |pos: player::PlaybackPosition| {
+            let position_ms = (pos.cursor as u64 * 1000) / sr;
+            let buffered_ms = (pos.buffered as u64 * 1000) / sr;
+            let estimated_ms = (pos.estimated as u64 * 1000) / sr;
+            let duration_ms = if pos.gen_done { buffered_ms } else { estimated_ms.max(buffered_ms) };
+            let done = pos.gen_done && pos.cursor >= pos.buffered;
+            let _ = app.emit("tts-position", serde_json::json!({
+                "gen": gen,
+                "position_ms": position_ms,
+                "buffered_ms": buffered_ms,
+                "duration_ms": duration_ms,
+                "gen_done": pos.gen_done,
+                "paused": pos.paused,
+                "finished": done,
+                "rebuffering": pos.rebuffering,
+            }));
+            #[cfg(target_os = "android")]
+            crate::android_update_media_session(position_ms as i64, duration_ms as i64, pos.paused);
+            if done && !finished.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                let _ = app.emit("tts-finished", serde_json::json!({ "gen": gen }));
+                #[cfg(target_os = "android")]
+                crate::android_stop_media_session();
+            }
+        }) as Box<dyn Fn(player::PlaybackPosition) + Send + 'static>
+    })
+}
+
+/// Load the engine in the background if it isn't already, swallowing errors
+/// (best-effort warm-up). Used after a cache-only play starts, so the engine is
+/// likely ready if the user later seeks somewhere the cache can't cover — a
+/// real load attempt (`tts_load`) still runs and reports errors normally.
+pub fn load_in_background(config: TtsModelConfig, num_threads: i32) {
+    if is_loaded() {
+        return;
+    }
+    std::thread::spawn(move || match load(config, num_threads) {
+        Ok(()) => log::info!("TTS: background engine warm-up complete"),
+        Err(e) => log::warn!("TTS: background engine warm-up failed: {e}"),
+    });
+}
+
+/// Attempt to play `text` straight from the persistent segment cache, without
+/// loading the ONNX engine at all. Returns `Ok(true)` if every segment the text
+/// needs was already cached and playback has started; `Ok(false)` if any part
+/// is missing (the caller falls back to loading the engine + `speak()`, which
+/// generates normally and caches as it goes). `model`/`config` are the on-disk
+/// paths (from `TtsModelConfig::PiperOrt`) — read directly, independent of
+/// whatever is (or isn't) currently loaded into the global engine slot.
+pub fn speak_from_cache(
+    text: &str,
+    speed: f32,
+    sid: i32,
+    gen: u64,
+    app: Option<tauri::AppHandle>,
+    model: &str,
+    config: &str,
+) -> Result<bool, String> {
+    let Some((sample_rate_u32, num_speakers)) = crate::piper::read_piper_meta(config) else {
+        return Ok(false);
+    };
+    let sample_rate = sample_rate_u32 as i32;
+    let model_fp = crate::piper::model_fingerprint(model);
+
+    // Cheap header-only check BEFORE touching the player or the SPEAK_LOCK: a
+    // partial cache must have zero side effects so the caller's fallback to a
+    // normal load+speak starts from a clean slate (current playback untouched).
+    let cov = crate::piper::cache_coverage(model, config, sid, speed, text);
+    if !cov.is_all_cached() {
+        return Ok(false);
+    }
+
+    let _speak_guard = SPEAK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(old) = lock_player().take() {
+        log::info!("TTS: stopping previous player before new (cached) playback");
+        old.stop();
+        std::thread::sleep(std::time::Duration::from_millis(80));
+    }
+
+    let clean = text.replace('\u{0}', " ");
+    let text_owned = clean;
+    let chunks = split_sentences(&text_owned);
+    let chunks = batch_sentences(chunks, 15, 45);
+    let total = chunks.len();
+    log::info!("TTS: {total} chunks, all cached ({}ms) — skipping engine load", cov.cached_ms);
+
+    let sr = (sample_rate as u64).max(1);
+    // Exact, not estimated: every segment's real duration is already known.
+    let estimated_samples = ((cov.cached_ms as f64 / 1000.0) * sample_rate as f64) as usize;
+
+    let on_position = build_position_callback(gen, sr, app.clone());
+
+    #[cfg(target_os = "android")]
+    if app.is_some() {
+        crate::android_start_media_session();
+    }
+
+    let player = Arc::new(player::AudioPlayer::new(sample_rate, estimated_samples, on_position)?);
+    *lock_player() = Some(player.clone());
+
+    let player_cleanup = player.clone();
+    let app_cleanup = app.clone();
+    std::thread::Builder::new()
+        .name("tts-generate-cached".into())
+        .spawn(move || {
+            let gen_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let mut cumulative_ms: u64 = 0;
+                for (i, chunk) in chunks.iter().enumerate() {
+                    if !player.is_active() { break; }
+                    if let Some(ref app) = app {
+                        let _ = app.emit("tts-progress", serde_json::json!({ "current": i + 1, "total": total }));
+                    }
+                    match crate::piper::synth_chunk_cache_only(&model_fp, sample_rate, num_speakers, sid, speed, chunk) {
+                        Some((samples, spans)) => {
+                            player.push(samples);
+                            for span in &spans {
+                                if let Some(ref app) = app {
+                                    let _ = app.emit("tts-timing", serde_json::json!({
+                                        "gen": gen,
+                                        "text": span.text,
+                                        "start_ms": cumulative_ms,
+                                        "duration_ms": span.speech_ms,
+                                        "word_ms": span.word_ms,
+                                    }));
+                                }
+                                cumulative_ms += span.speech_ms + span.pause_ms;
+                            }
+                        }
+                        // A confirmed-cached segment vanished (e.g. a concurrent
+                        // eviction) — extremely rare given the coverage check just
+                        // ran. Stop here rather than silently switching to the
+                        // engine mid-stream; the player still finishes cleanly with
+                        // whatever was pushed.
+                        None => {
+                            log::warn!("TTS cache-only playback: chunk {}/{total} missing after coverage check — stopping early", i + 1);
+                            break;
+                        }
+                    }
+                }
+            }));
+            if let Err(panic) = gen_result {
+                let msg = panic_to_string("TTS cached-generation thread", panic);
+                log::error!("{msg}");
+                if let Some(ref a) = app_cleanup {
+                    let _ = a.emit("dictation-error", &msg);
+                }
+            }
+            player_cleanup.finish();
+        })
+        .map_err(|e| format!("spawn cached generator: {e}"))?;
+
+    Ok(true)
+}
+
 pub fn speak(text: &str, speed: f32, sid: i32, gen: u64, app: Option<tauri::AppHandle>) -> Result<(), String> {
     // Serialize the whole setup: two concurrent calls must not each spin up a
     // player. The second waits here, then stops the first's player below.
@@ -216,38 +387,7 @@ pub fn speak(text: &str, speed: f32, sid: i32, gen: u64, app: Option<tauri::AppH
     let estimated_samples = (estimated_secs * sample_rate as f64) as usize;
 
     let sr = (sample_rate as u64).max(1);
-    let app_pos = app.clone();
-    let finished_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let ff = finished_flag.clone();
-    let on_position: Option<Box<dyn Fn(player::PlaybackPosition) + Send + 'static>> =
-        app_pos.map(|app| {
-            Box::new(move |pos: player::PlaybackPosition| {
-                let position_ms = (pos.cursor as u64 * 1000) / sr;
-                let buffered_ms = (pos.buffered as u64 * 1000) / sr;
-                let estimated_ms = (pos.estimated as u64 * 1000) / sr;
-                let duration_ms = if pos.gen_done { buffered_ms } else { estimated_ms.max(buffered_ms) };
-                let done = pos.gen_done && pos.cursor >= pos.buffered;
-                let _ = app.emit("tts-position", serde_json::json!({
-                    "gen": gen,
-                    "position_ms": position_ms,
-                    "buffered_ms": buffered_ms,
-                    "duration_ms": duration_ms,
-                    "gen_done": pos.gen_done,
-                    "paused": pos.paused,
-                    "finished": done,
-                    "rebuffering": pos.rebuffering,
-                }));
-                #[cfg(target_os = "android")]
-                crate::android_update_media_session(
-                    position_ms as i64, duration_ms as i64, pos.paused,
-                );
-                if done && !ff.swap(true, std::sync::atomic::Ordering::SeqCst) {
-                    let _ = app.emit("tts-finished", serde_json::json!({ "gen": gen }));
-                    #[cfg(target_os = "android")]
-                    crate::android_stop_media_session();
-                }
-            }) as Box<dyn Fn(player::PlaybackPosition) + Send + 'static>
-        });
+    let on_position = build_position_callback(gen, sr, app.clone());
 
     // Samples (no app handle) play through the same player but must stay quiet:
     // no media-session notification, no UI events.

@@ -1,6 +1,7 @@
 package com.alexb151.verba
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
@@ -26,6 +27,31 @@ class MainActivity : TauriActivity() {
     enableEdgeToEdge()
     super.onCreate(savedInstanceState)
     requestNotificationPermission()
+    // Cold start via a share: the native lib is loaded here, but the webview
+    // (and its `shared-text` listener) isn't ready yet, so the text is stashed
+    // in Rust and the frontend pulls it once it initializes.
+    handleSharedIntent(intent)
+  }
+
+  // singleTask launch mode: a share while the app is already running arrives
+  // here rather than as a fresh onCreate.
+  override fun onNewIntent(intent: Intent) {
+    super.onNewIntent(intent)
+    setIntent(intent)
+    handleSharedIntent(intent)
+  }
+
+  private fun handleSharedIntent(intent: Intent?) {
+    if (VerbaApp.nativeLoadError != null) return
+    if (intent?.action != Intent.ACTION_SEND) return
+    if (intent.type?.startsWith("text/") != true) return
+    val text = intent.getStringExtra(Intent.EXTRA_TEXT) ?: return
+    if (text.isBlank()) return
+    try {
+      VerbaApp.nativeSharedText(text)
+    } catch (e: Throwable) {
+      android.util.Log.e("MainActivity", "nativeSharedText failed", e)
+    }
   }
 
   private fun requestNotificationPermission() {

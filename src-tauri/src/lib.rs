@@ -16,8 +16,10 @@ pub mod postprocess;
 mod sound;
 mod recorder;
 mod snippets;
+mod share;
 mod transcribe;
 mod tts;
+mod tts_cache;
 pub mod vad;
 #[cfg(target_os = "android")]
 mod android_ime;
@@ -245,6 +247,33 @@ pub extern "system" fn Java_com_alexb151_verba_VerbaApp_nativeTtsSeek(
     }
 }
 
+/// Android share-target bridge: MainActivity forwards an ACTION_SEND intent's
+/// text here. Mirrors the VerbaApp TTS JNI exports above.
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_com_alexb151_verba_VerbaApp_nativeSharedText(
+    mut env: jni::JNIEnv, _class: jni::objects::JClass, text: jni::objects::JString,
+) {
+    match env.get_string(&text) {
+        Ok(s) => share::push_shared_text(s.into()),
+        Err(e) => log::error!("share: failed to read shared text: {e}"),
+    }
+}
+
+/// Consume text shared to the app (URL or prose), if any. Returns null when
+/// nothing is pending. Called by the frontend on startup and on `shared-text`.
+#[tauri::command]
+fn take_shared_text() -> Option<String> {
+    share::take()
+}
+
+/// Fetch a URL's HTML so the frontend can run readability on it. Kept in Rust to
+/// bypass the webview's CORS restriction on cross-origin reads.
+#[tauri::command]
+async fn fetch_article(url: String) -> Result<String, String> {
+    share::fetch_html(&url).await
+}
+
 #[tauri::command]
 async fn switch_model(app: tauri::AppHandle, id: String) -> Result<(), String> {
     // Validate the model is downloaded before accepting the switch.
@@ -441,6 +470,51 @@ async fn tts_speak(app: tauri::AppHandle, text: String, speed: Option<f32>, sid:
     tts::speak(&text, speed, sid, gen.unwrap_or(0), Some(app))
 }
 
+/// Play `text` straight from the persistent cache if every segment it needs is
+/// already on disk, without loading the ONNX engine. Returns `false` (not an
+/// error) when any part is missing, so the frontend's normal fall back path
+/// (`tts_load` if needed, then `tts_speak`) takes over unchanged. On a
+/// successful cache-only start, also warms the engine in the background so a
+/// later seek into uncached text (or voice/speed change) doesn't start cold.
+#[tauri::command]
+async fn tts_speak_cached(
+    app: tauri::AppHandle,
+    id: String,
+    custom_voice: Option<String>,
+    text: String,
+    speed: Option<f32>,
+    sid: Option<i32>,
+    gen: Option<u64>,
+) -> Result<bool, String> {
+    let speed = speed.unwrap_or(1.0);
+    let sid = sid.unwrap_or(0);
+    let gen = gen.unwrap_or(0);
+
+    let mgr = models::ModelManager::global();
+    let Some(mut model_cfg) = mgr.tts_model_config(&id) else {
+        return Ok(false);
+    };
+    if let Some(name) = &custom_voice {
+        let path = tts::custom_voices_dir().join(format!("{name}.bin"));
+        if path.exists() {
+            model_cfg.override_voices(path.to_string_lossy().into_owned());
+        }
+    }
+    let tts::TtsModelConfig::PiperOrt { model, config } = model_cfg.clone();
+
+    let played = tokio::task::spawn_blocking(move || {
+        tts::speak_from_cache(&text, speed, sid, gen, Some(app), &model, &config)
+    })
+    .await
+    .map_err(|e| format!("{e}"))??;
+
+    if played {
+        let threads = config::AppConfig::load().threads as i32;
+        tts::load_in_background(model_cfg, threads);
+    }
+    Ok(played)
+}
+
 /// Play a short fixed phrase in one voice so the user can audition it on the
 /// Voices page. Passes no app handle, so `tts::speak` emits no UI events and
 /// starts no media session — it just plays through the shared player (stopping
@@ -480,6 +554,40 @@ fn tts_seek(position_ms: u64) {
 #[tauri::command]
 fn tts_list_custom_voices() -> Vec<String> {
     tts::list_custom_voices()
+}
+
+/// Which parts of `text` are already cached for this voice+speed, so the reader
+/// can show buffered ranges (and the real duration when fully cached) on open,
+/// before any playback. Computed from cache headers without loading the engine.
+#[tauri::command]
+fn tts_cache_status(id: String, sid: i32, speed: f32, text: String) -> serde_json::Value {
+    let mgr = models::ModelManager::global();
+    let Some(crate::tts::TtsModelConfig::PiperOrt { model, config }) = mgr.tts_model_config(&id)
+    else {
+        return serde_json::json!({ "supported": false });
+    };
+    let cov = piper::cache_coverage(&model, &config, sid, speed, &text);
+    serde_json::json!({
+        "supported": true,
+        "ranges": cov.ranges,            // [[start_ms, end_ms], ...] merged blocks
+        "total_ms": cov.total_ms,
+        "cached_ms": cov.cached_ms,
+        "total_segments": cov.total_segments,
+        "cached_segments": cov.cached_segments,
+        "all_cached": cov.total_segments > 0 && cov.cached_segments == cov.total_segments,
+    })
+}
+
+/// Size of the persistent generated-audio cache, in megabytes (for Settings).
+#[tauri::command]
+fn tts_cache_size_mb() -> f64 {
+    tts_cache::size_bytes() as f64 / (1024.0 * 1024.0)
+}
+
+/// Delete all cached generated audio.
+#[tauri::command]
+fn tts_cache_clear() -> Result<(), String> {
+    tts_cache::clear()
 }
 
 /// Speaker count for a TTS model read from its on-disk config, without loading
@@ -691,6 +799,7 @@ pub fn run() {
                 .ok();
 
             debug_log::set_app_handle(app.handle().clone());
+            share::set_app_handle(app.handle().clone());
 
             #[cfg(desktop)]
             {
@@ -968,6 +1077,7 @@ pub fn run() {
             tts_load,
             tts_unload,
             tts_speak,
+            tts_speak_cached,
             tts_sample,
             tts_stop,
             tts_pause,
@@ -975,8 +1085,13 @@ pub fn run() {
             tts_seek,
             tts_list_custom_voices,
             tts_model_speakers,
+            tts_cache_status,
+            tts_cache_size_mb,
+            tts_cache_clear,
             library_list,
             library_add,
+            take_shared_text,
+            fetch_article,
             library_get,
             library_delete,
             library_set_progress,

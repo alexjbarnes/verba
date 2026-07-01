@@ -87,10 +87,17 @@ class VerbaApp : Application() {
         private var mediaSession: MediaSessionCompat? = null
         private var ttsAudioFocus: AudioFocusRequest? = null
         private var lastPositionMs: Long = 0
+        private var sessionActive = false
 
         @JvmStatic
         fun startMediaSession() {
             val app = instance ?: return
+            // Idempotent: a mid-listen re-render (speed/voice change, seek) calls
+            // this again, but re-requesting audio focus while it's already held
+            // fires the existing listener's AUDIOFOCUS_LOSS -> nativeTtsPause(),
+            // which paused playback once buffering finished. Keep the one session.
+            if (sessionActive) return
+            sessionActive = true
             lastPositionMs = 0
             Handler(Looper.getMainLooper()).post {
                 requestTtsAudioFocus(app)
@@ -144,6 +151,7 @@ class VerbaApp : Application() {
         @JvmStatic
         fun stopMediaSession() {
             val app = instance
+            sessionActive = false
             mediaSession?.isActive = false
             mediaSession?.release()
             mediaSession = null
@@ -241,6 +249,8 @@ class VerbaApp : Application() {
         @JvmStatic external fun nativeTtsResume()
         @JvmStatic external fun nativeTtsStop()
         @JvmStatic external fun nativeTtsSeek(positionMs: Long)
+        // Inbound share-target: text/URL shared to the app from elsewhere.
+        @JvmStatic external fun nativeSharedText(text: String)
     }
 
     override fun onCreate() {
