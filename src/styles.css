@@ -61,6 +61,14 @@ select {
   }
 }
 
+/* The reader keeps article newlines with pre-wrap, but a single long token (a
+   URL, a long identifier) has nothing to wrap at and pushes the width out,
+   giving the page a horizontal scrollbar. Let long tokens break so they wrap. */
+#reading-text {
+  overflow-wrap: break-word;
+  word-break: break-word;
+}
+
 /* Reading view word highlighting */
 #reading-text .rw-active {
   background: rgba(155, 168, 255, 0.28);

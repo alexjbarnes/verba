@@ -487,18 +487,34 @@ pub fn speak(text: &str, speed: f32, sid: i32, gen: u64, app: Option<tauri::AppH
 }
 
 pub(crate) fn split_sentences(text: &str) -> Vec<String> {
-    let mut sentences = Vec::new();
+    let mut sentences: Vec<String> = Vec::new();
     let mut current = String::new();
     let mut chars = text.chars().peekable();
 
     while let Some(ch) = chars.next() {
-        current.push(ch);
-        let is_end = match ch {
-            '.' | '!' | '?' => chars.peek().map_or(true, |c| c.is_whitespace()),
-            '\n' => true,
-            _ => false,
-        };
+        // A newline is a paragraph/line break. Preserve it as a trailing '\n' on
+        // the sentence it follows so split_for_pauses can apply the longer
+        // paragraph pause downstream. Trimming it away (the old behaviour) made
+        // paragraphs sound like ordinary sentence breaks, and a line with no
+        // terminal punctuation (e.g. a heading) run straight into the next.
+        if ch == '\n' {
+            let trimmed = current.trim().to_string();
+            current.clear();
+            if !trimmed.is_empty() {
+                // Line ended without terminal punctuation.
+                sentences.push(format!("{trimmed}\n"));
+            } else if let Some(last) = sentences.last_mut() {
+                // Newline after a punctuation-ended sentence, or a blank line:
+                // mark the preceding sentence as ending a paragraph (once).
+                if !last.ends_with('\n') {
+                    last.push('\n');
+                }
+            }
+            continue;
+        }
 
+        current.push(ch);
+        let is_end = matches!(ch, '.' | '!' | '?') && chars.peek().map_or(true, |c| c.is_whitespace());
         if is_end {
             let trimmed = current.trim().to_string();
             if !trimmed.is_empty() {

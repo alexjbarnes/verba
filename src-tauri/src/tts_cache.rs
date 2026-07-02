@@ -29,9 +29,10 @@ const MAGIC: &[u8; 4] = b"TSC1";
 // (Claude's -> claude + /z/). v6: read/reading heteronym flip. v7: json/scapes/
 // hellscape(s). v8: iteration/unordered/ai + lives heteronym. v9: compound-split
 // stress demotion (salesforce joins without a mid-word pause). v10: acronym
-// plurals (MCPs -> "em-see-peez") + eval/verifier(s)/plugin(s). Each bump makes
+// plurals (MCPs -> "em-see-peez") + eval/verifier(s)/plugin(s). v11: macos/nvidia/
+// blog/kubernetes/chatgpt/reproducible/trillionaire/... batch. Each bump makes
 // any stale mispronunciation miss and regenerate.
-const CACHE_VERSION: u32 = 10;
+const CACHE_VERSION: u32 = 11;
 // Soft cap on total cache size. On write, oldest entries are evicted down to
 // ~90% of this. ~1 GiB is roughly 6-7 hours of 22 kHz i16 speech.
 const CACHE_CAP_BYTES: u64 = 1024 * 1024 * 1024;

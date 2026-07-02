@@ -437,6 +437,26 @@ const PRONUNCIATION_OVERRIDES: &[(&str, &str)] = &[
     ("verifiers", "V EH1 R AH0 F AY2 ER0 Z"),
     ("plugin", "P L AH1 G IH0 N"),
     ("plugins", "P L AH1 G IH0 N Z"),
+    // Reported 2026-07-02. All missing (CMUdict predates blog/bot too). Proper
+    // nouns and neologisms/compounds built from morphemes in the dict; macOS and
+    // ChatGPT mix a word with a letter-acronym (O-S, G-P-T).
+    ("macos", "M AE1 K OW1 EH1 S"),
+    ("reproducible", "R IY2 P R AH0 D UW1 S AH0 B AH0 L"),
+    ("bot", "B AA1 T"),
+    ("bots", "B AA1 T S"),
+    ("chatbot", "CH AE1 T B AA2 T"),
+    ("chatbots", "CH AE1 T B AA2 T S"),
+    ("nvidia", "EH0 N V IH1 D IY0 AH0"),
+    ("blog", "B L AA1 G"),
+    ("blogs", "B L AA1 G Z"),
+    ("reframe", "R IY0 F R EY1 M"),
+    ("kubernetes", "K UW2 B ER0 N EH1 T IY0 Z"),
+    ("reanimate", "R IY0 AE1 N AH0 M EY2 T"),
+    ("reanimated", "R IY0 AE1 N AH0 M EY2 T AH0 D"),
+    ("chatgpt", "CH AE1 T JH IY1 P IY1 T IY1"),
+    ("trillionaire", "T R IH2 L Y AH0 N EH1 R"),
+    ("unquenchable", "AH0 N K W EH1 N CH AH0 B AH0 L"),
+    ("vexation", "V EH0 K S EY1 SH AH0 N"),
 ];
 
 /// Expand each (possibly multi-codepoint, like "ɑː" or "iː") token into
