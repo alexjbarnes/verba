@@ -108,6 +108,9 @@
       <button class="nav-btn w-full flex items-center gap-3 px-5 py-3 text-sm font-medium text-on-surface-variant hover:text-on-surface hover:bg-surface-container-highest transition-colors cursor-pointer" data-tab="voices" data-mode="listen">
         <span class="material-symbols-outlined text-lg">graphic_eq</span> Voices
       </button>
+      <button class="nav-btn w-full flex items-center gap-3 px-5 py-3 text-sm font-medium text-on-surface-variant hover:text-on-surface hover:bg-surface-container-highest transition-colors cursor-pointer" data-tab="reports" data-mode="listen">
+        <span class="material-symbols-outlined text-lg">flag</span> Reports
+      </button>
       <button class="nav-btn w-full flex items-center gap-3 px-5 py-3 text-sm font-medium text-on-surface-variant hover:text-on-surface hover:bg-surface-container-highest transition-colors cursor-pointer" data-tab="debug" data-mode="global">
         <span class="material-symbols-outlined text-lg">bug_report</span> Debug
       </button>
@@ -422,6 +425,26 @@
   </div>
 
   <!-- Debug tab -->
+  <div id="reports" class="tab-panel hidden flex-1 overflow-y-auto px-5 py-6 flex flex-col">
+    <div class="flex items-center justify-between mb-4">
+      <div>
+        <h2 class="text-lg font-bold tracking-tight text-on-surface">Reports</h2>
+        <p class="text-xs text-on-surface-variant mt-0.5">Words you flagged as mispronounced</p>
+      </div>
+      <div class="flex items-center gap-2">
+        <button id="export-reports" class="text-xs font-semibold text-on-surface-variant hover:text-primary transition-colors px-3 py-1.5 rounded-lg hover:bg-primary/10">Export</button>
+        <button id="clear-reports" class="text-xs font-semibold text-on-surface-variant hover:text-error transition-colors px-3 py-1.5 rounded-lg hover:bg-error/10">Clear</button>
+      </div>
+    </div>
+    <div id="reports-list" class="flex-1 min-h-0 space-y-2 overflow-y-auto">
+      <div class="flex flex-col items-center justify-center pt-16 text-on-surface-variant">
+        <span class="material-symbols-outlined text-4xl mb-3 opacity-30">flag</span>
+        <p id="reports-placeholder" class="text-sm">No reports yet</p>
+        <p class="text-xs mt-2 max-w-xs text-center opacity-80">Select a word in an article and choose "Report mispronunciation" from the text menu.</p>
+      </div>
+    </div>
+  </div>
+
   <div id="debug" class="tab-panel hidden flex-1 overflow-y-auto px-5 py-6 flex flex-col">
     <div class="flex items-center justify-between mb-4">
       <h2 class="text-lg font-bold tracking-tight text-on-surface">Logs</h2>

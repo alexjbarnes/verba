@@ -69,6 +69,7 @@ document.querySelectorAll('.nav-btn').forEach(btn => {
     if (btn.dataset.tab === 'snippets') loadSnippets();
     if (btn.dataset.tab === 'library') loadLibrary();
     if (btn.dataset.tab === 'voices') loadVoices();
+    if (btn.dataset.tab === 'reports') loadReports();
   });
 });
 
@@ -361,6 +362,61 @@ document.getElementById('clear-history').addEventListener('click', async () => {
     renderHistory([]);
   } catch (err) {
     console.error('Failed to clear history:', err);
+  }
+});
+
+// ── Reports (mispronunciations) ──
+
+function renderReports(entries) {
+  const list = document.getElementById('reports-list');
+  list.innerHTML = '';
+  if (!entries || entries.length === 0) {
+    list.innerHTML = `
+      <div class="flex flex-col items-center justify-center pt-16 text-on-surface-variant">
+        <span class="material-symbols-outlined text-4xl mb-3 opacity-30">flag</span>
+        <p class="text-sm">No reports yet</p>
+        <p class="text-xs mt-2 max-w-xs text-center opacity-80">Select a word in an article and choose "Report mispronunciation" from the text menu.</p>
+      </div>`;
+    return;
+  }
+  for (const entry of [...entries].reverse()) {
+    const row = document.createElement('div');
+    row.className = 'flex items-center justify-between gap-3 bg-surface-container-low rounded-xl border border-outline-variant/20 px-4 py-3';
+    const when = entry.reported_at_ms ? new Date(entry.reported_at_ms).toLocaleString() : '';
+    row.innerHTML = `
+      <span class="text-sm font-medium text-on-surface truncate select-text">${escapeHtml(entry.word)}</span>
+      <span class="text-[11px] text-on-surface-variant tabular-nums shrink-0">${escapeHtml(when)}</span>`;
+    list.appendChild(row);
+  }
+}
+
+async function loadReports() {
+  try {
+    renderReports(await invoke('mispronunciations_list'));
+  } catch (err) {
+    console.error('Failed to load reports:', err);
+  }
+}
+
+document.getElementById('export-reports').addEventListener('click', async () => {
+  const btn = document.getElementById('export-reports');
+  try {
+    const json = await invoke('export_mispronunciations');
+    await invoke('copy_to_clipboard', { text: json });
+    btn.textContent = 'Copied!';
+  } catch (err) {
+    showToast('Export failed: ' + err);
+  }
+  setTimeout(() => { btn.textContent = 'Export'; }, 2000);
+});
+
+document.getElementById('clear-reports').addEventListener('click', async () => {
+  if (!await showConfirm('Clear all reports?')) return;
+  try {
+    await invoke('clear_mispronunciations');
+    renderReports([]);
+  } catch (err) {
+    console.error('Failed to clear reports:', err);
   }
 });
 

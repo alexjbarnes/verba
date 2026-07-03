@@ -5,6 +5,9 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.view.View
+import android.webkit.WebView
+import android.widget.FrameLayout
 import android.widget.TextView
 import android.widget.ScrollView
 import android.util.TypedValue
@@ -59,6 +62,31 @@ class MainActivity : TauriActivity() {
       if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
         requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1001)
       }
+    }
+  }
+
+  // Wry calls setContentView(webView) directly (main_pipe.rs). Slip the WebView
+  // into a wrapper ViewGroup whose startActionModeForChild we control, so we can
+  // add — and KEEP — a "Report mispronunciation" item in the text-selection
+  // toolbar. Adding it once via onActionModeStarted was unreliable: Chromium
+  // rebuilds the selection menu asynchronously (TextClassifier results, every
+  // selection-handle move), wiping a one-shot add. The wrapper re-adds on every
+  // rebuild. RustWebView is auto-generated and gitignored, so we cannot subclass
+  // it to override startActionMode directly — the parent hook is the way in.
+  override fun setContentView(view: View?) {
+    if (view is WebView) {
+      val wrapper = SelectionReportLayout(this)
+      wrapper.webView = view
+      wrapper.addView(
+        view,
+        FrameLayout.LayoutParams(
+          FrameLayout.LayoutParams.MATCH_PARENT,
+          FrameLayout.LayoutParams.MATCH_PARENT
+        )
+      )
+      super.setContentView(wrapper)
+    } else {
+      super.setContentView(view)
     }
   }
 }

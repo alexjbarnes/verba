@@ -251,6 +251,8 @@ class VerbaApp : Application() {
         @JvmStatic external fun nativeTtsSeek(positionMs: Long)
         // Inbound share-target: text/URL shared to the app from elsewhere.
         @JvmStatic external fun nativeSharedText(text: String)
+        // Selection-toolbar action: a word the user flagged as mispronounced.
+        @JvmStatic external fun nativeReportMispronunciation(text: String)
     }
 
     override fun onCreate() {

@@ -6,6 +6,7 @@ mod engine;
 mod history;
 mod library;
 mod media;
+mod mispronunciations;
 mod models;
 #[cfg(desktop)]
 mod paste;
@@ -69,6 +70,42 @@ fn clear_history() {
 #[tauri::command]
 fn export_history() -> Result<String, String> {
     history::History::global().export()
+}
+
+#[tauri::command]
+fn mispronunciations_list() -> Vec<mispronunciations::MispronunciationEntry> {
+    mispronunciations::Mispronunciations::global().list()
+}
+
+#[tauri::command]
+fn export_mispronunciations() -> Result<String, String> {
+    mispronunciations::Mispronunciations::global().export()
+}
+
+#[tauri::command]
+fn clear_mispronunciations() {
+    mispronunciations::Mispronunciations::global().clear()
+}
+
+/// In-app report path (e.g. a future button); the Android text-selection flow
+/// uses the JNI bridge below instead.
+#[tauri::command]
+fn report_mispronunciation(word: String) {
+    mispronunciations::Mispronunciations::global().add(word);
+}
+
+/// Android ACTION_PROCESS_TEXT bridge: ProcessTextActivity forwards the word the
+/// user selected + tapped "Report mispronunciation" on. Mirrors the VerbaApp TTS
+/// JNI exports.
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_com_alexb151_verba_VerbaApp_nativeReportMispronunciation(
+    mut env: jni::JNIEnv, _class: jni::objects::JClass, text: jni::objects::JString,
+) {
+    match env.get_string(&text) {
+        Ok(s) => mispronunciations::Mispronunciations::global().add(s.into()),
+        Err(e) => log::error!("report: failed to read text: {e}"),
+    }
 }
 
 #[cfg(desktop)]
@@ -1059,6 +1096,10 @@ pub fn run() {
             list_history,
             clear_history,
             export_history,
+            mispronunciations_list,
+            export_mispronunciations,
+            clear_mispronunciations,
+            report_mispronunciation,
             copy_to_clipboard,
             get_vocab_entries,
             add_vocab_entry,
