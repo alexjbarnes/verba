@@ -25,6 +25,21 @@ use serde::Deserialize;
 /// the phonemizer needs no filesystem or env var at runtime. Parsed once into a
 /// `HashMap<String, String>` and handed to `EnglishPhonemizer::new_with_hashmap`.
 static CMUDICT_BYTES: &[u8] = include_bytes!("../data/cmudict_data.json");
+/// British English dictionary (wikipron-derived, espeak en-gb-x-rp
+/// conventions, stress transferred from CMUdict). Built by
+/// scripts/build_gb_dict.py; ~76k words -> final IPA strings.
+static GB_DICT_BYTES: &[u8] = include_bytes!("../data/gb_dict.json");
+
+/// GB-only pronunciation fixes, final IPA (same conventions as gb_dict.json).
+/// For words the GB dictionary lacks or gets wrong where the US override +
+/// transform fallback isn't right either (lexical UK/US differences).
+const GB_PRONUNCIATION_OVERRIDES: &[(&str, &str)] = &[
+    ("schedule", "ʃˈɛdjuːl"),
+    ("schedules", "ʃˈɛdjuːlz"),
+    ("scheduled", "ʃˈɛdjuːld"),
+    ("scheduling", "ʃˈɛdjuːlɪŋ"),
+    ("z", "zˈɛd"),
+];
 
 /// Piper `.onnx.json` sidecar: audio params, speaker count, phoneme id map and
 /// the optional default inference scales.
@@ -36,6 +51,17 @@ struct PiperConfig {
     #[serde(default)]
     inference: PiperInference,
     phoneme_id_map: HashMap<String, Vec<i64>>,
+    /// Which espeak voice the model was trained against. Never used to run
+    /// espeak — it identifies the locale ("en-gb*" selects the GB dictionary
+    /// and the US->RP fallback transform).
+    #[serde(default)]
+    espeak: PiperEspeak,
+}
+
+#[derive(Deserialize, Default)]
+struct PiperEspeak {
+    #[serde(default)]
+    voice: String,
 }
 
 #[derive(Deserialize)]
@@ -97,6 +123,38 @@ pub fn model_fingerprint(model_path: &str) -> String {
     format!("{name}:{len}")
 }
 
+/// Bump when data/gb_dict.json (or the RP transform) changes pronunciations:
+/// GB models' cached audio embeds the old phoneme stream, so their cache keys
+/// must roll without invalidating US models' caches.
+const GB_DICT_VERSION: u32 = 2;
+
+/// True when the sidecar declares a GB espeak voice (same check as engine load).
+fn config_is_gb(config_path: &str) -> bool {
+    #[derive(Deserialize)]
+    struct OnlyEspeak {
+        #[serde(default)]
+        espeak: PiperEspeak,
+    }
+    std::fs::read_to_string(config_path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<OnlyEspeak>(&s).ok())
+        .map(|c| c.espeak.voice.starts_with("en-gb"))
+        .unwrap_or(false)
+}
+
+/// Cache fingerprint for a model+config pair: the file identity plus, for
+/// GB-locale models, the bundled dictionary version. All cache producers and
+/// consumers (engine load, cache coverage, cache-only playback) go through
+/// this so they can never disagree.
+pub fn cache_fingerprint(model_path: &str, config_path: &str) -> String {
+    let fp = model_fingerprint(model_path);
+    if config_is_gb(config_path) {
+        format!("{fp}+gb{GB_DICT_VERSION}")
+    } else {
+        fp
+    }
+}
+
 /// Per-segment cache coverage for an article, computed WITHOUT loading ORT (so
 /// the reading view can show what's already on disk before play). Mirrors
 /// `synth_chunk`'s segmentation, key, and speaker clamp exactly, reading each
@@ -156,7 +214,7 @@ pub fn cache_coverage(
     };
     let Some((sample_rate, num_speakers)) = read_piper_meta(config_path) else { return cov };
     let sr = sample_rate as u64;
-    let model_fp = model_fingerprint(model_path);
+    let model_fp = cache_fingerprint(model_path, config_path);
     let speed_milli = (speed.max(0.0) * 1000.0).round() as u32;
     let speed_safe = if speed > 0.0 { speed } else { 1.0 } as f64;
     let speaker = clamp_speaker(sid, num_speakers);
@@ -679,12 +737,21 @@ const CLAUSE_PAUSE_MS: usize = 250; // , ; :
 /// OOV words are spelled letter-by-letter so they still produce audio.
 fn phonemize(
     ph: &EnglishPhonemizer,
+    gb: Option<&HashMap<String, String>>,
     word_set: &std::collections::HashSet<String>,
     text: &str,
 ) -> Result<Vec<String>, String> {
     // Phonemize one already-isolated word, trimming the phonemizer's edge
     // spaces. Returns whatever it produced (possibly OOV/empty — caller checks).
+    // GB locale: the GB dictionary wins; anything it lacks takes the US path
+    // and gets the US->RP transform, so OOV handling (possessives, acronyms,
+    // compounds) needs no locale-specific code.
     let phonemize_word = |w: &str| -> Result<Vec<String>, String> {
+        if let Some(gb) = gb {
+            if let Some(ipa) = gb.get(&w.to_lowercase()) {
+                return Ok(ipa.chars().map(|c| c.to_string()).collect());
+            }
+        }
         let (mut pt, _prosody) = ph
             .phonemize_with_prosody(w)
             .map_err(|e| format!("phonemize: {e}"))?;
@@ -693,6 +760,9 @@ fn phonemize(
         }
         while pt.last().map(|s| s == " ").unwrap_or(false) {
             pt.pop();
+        }
+        if gb.is_some() && !is_oov(&pt) {
+            pt = crate::gb_english::us_to_rp(pt);
         }
         Ok(pt)
     };
@@ -913,6 +983,7 @@ fn map_words_to_frames(
     tokens: &[String],
     wceil: &[f32],
     ph: &EnglishPhonemizer,
+    gb: Option<&HashMap<String, String>>,
     word_set: &HashSet<String>,
     id_map: &PhonemeIdMap,
 ) -> Option<Vec<f64>> {
@@ -925,7 +996,7 @@ fn map_words_to_frames(
     let mut tok_word: Vec<usize> = Vec::new();
     for (wi, w) in words.iter().enumerate() {
         let norm = normalize_numbers(&normalize_text(w));
-        let wt = phonemize(ph, word_set, &norm).ok()?;
+        let wt = phonemize(ph, gb, word_set, &norm).ok()?;
         if wt.is_empty() {
             continue;
         }
@@ -974,6 +1045,7 @@ fn compute_word_ms(
     speech_samples: usize,
     sr: usize,
     ph: &EnglishPhonemizer,
+    gb: Option<&HashMap<String, String>>,
     word_set: &HashSet<String>,
     id_map: &PhonemeIdMap,
 ) -> Vec<u64> {
@@ -982,7 +1054,7 @@ fn compute_word_ms(
     }
     let total_ms = (speech_samples as u64 * 1000) / sr.max(1) as u64;
     if let Some(wc) = wceil {
-        if let Some(frames) = map_words_to_frames(words, tokens, wc, ph, word_set, id_map) {
+        if let Some(frames) = map_words_to_frames(words, tokens, wc, ph, gb, word_set, id_map) {
             let total: f64 = frames.iter().sum();
             if total > 0.0 {
                 return frames
@@ -1025,9 +1097,13 @@ pub struct PiperEngine {
     /// Kept alongside the encoder to replicate its id layout when attributing
     /// the model's per-id durations (`w_ceil`) to words.
     id_map: PhonemeIdMap,
-    /// Lowercased dictionary keys (CMUdict + overrides), for splitting an OOV
-    /// compound into two known words before falling back to letter-spelling.
+    /// Lowercased dictionary keys (CMUdict + overrides, plus GB entries when
+    /// applicable), for splitting an OOV compound into two known words before
+    /// falling back to letter-spelling.
     word_set: HashSet<String>,
+    /// British dictionary (word -> final IPA), present only for GB-locale
+    /// models; words it lacks take the US phonemizer + US->RP transform.
+    gb_dict: Option<HashMap<String, String>>,
     sample_rate: i32,
     num_speakers: i64,
     noise_scale: f32,
@@ -1066,8 +1142,23 @@ impl PiperEngine {
         // Snapshot the keys (dict is moved into the phonemizer next) for the
         // OOV compound splitter. CMUdict keys are already lowercase, as are the
         // overrides; a couple hundred KB of Strings, built once at load.
-        let word_set: HashSet<String> = dict.keys().cloned().collect();
+        let mut word_set: HashSet<String> = dict.keys().cloned().collect();
         let phonemizer = EnglishPhonemizer::new_with_hashmap(dict);
+
+        // Locale from the model's own sidecar: GB models get the British
+        // dictionary (US remains the fallback + transform for words it lacks).
+        let gb_dict = if cfg.espeak.voice.starts_with("en-gb") {
+            let mut gb: HashMap<String, String> = serde_json::from_slice(GB_DICT_BYTES)
+                .map_err(|e| format!("parse bundled gb dict: {e}"))?;
+            for (word, ipa) in GB_PRONUNCIATION_OVERRIDES {
+                gb.insert(word.to_string(), ipa.to_string());
+            }
+            word_set.extend(gb.keys().cloned());
+            log::info!("Piper locale: en-GB ({} GB dict entries)", gb.len());
+            Some(gb)
+        } else {
+            None
+        };
 
         ensure_ort_init()?;
 
@@ -1091,7 +1182,7 @@ impl PiperEngine {
             cfg.audio.sample_rate, cfg.num_speakers
         );
 
-        let model_fp = model_fingerprint(model_path);
+        let model_fp = cache_fingerprint(model_path, config_path);
 
         Ok(Self {
             session,
@@ -1099,6 +1190,7 @@ impl PiperEngine {
             encoder,
             id_map,
             word_set,
+            gb_dict,
             sample_rate: cfg.audio.sample_rate as i32,
             num_speakers: cfg.num_speakers,
             noise_scale: cfg.inference.noise_scale,
@@ -1133,6 +1225,7 @@ impl PiperEngine {
         let n = ids.len();
         let noise_scale = self.noise_scale;
         let noise_w = self.noise_w;
+        let multi_speaker = self.num_speakers > 1;
         let session = &mut self.session;
         let ids = ids.to_vec();
 
@@ -1143,17 +1236,29 @@ impl PiperEngine {
                 .map_err(|e| format!("input_lengths tensor: {e}"))?;
             let scales = Tensor::from_array(([3_usize], vec![noise_scale, length_scale, noise_w]))
                 .map_err(|e| format!("scales tensor: {e}"))?;
-            let sid = Tensor::from_array(([1_usize], vec![speaker]))
-                .map_err(|e| format!("sid tensor: {e}"))?;
 
-            let outputs = session
-                .run(ort::inputs! {
-                    "input" => input,
-                    "input_lengths" => input_lengths,
-                    "scales" => scales,
-                    "sid" => sid,
-                })
-                .map_err(|e| format!("piper run: {e}"))?;
+            // Single-speaker Piper models have NO sid input; passing one is an
+            // InvalidArgument error. Only multi-speaker graphs take it.
+            let outputs = if multi_speaker {
+                let sid = Tensor::from_array(([1_usize], vec![speaker]))
+                    .map_err(|e| format!("sid tensor: {e}"))?;
+                session
+                    .run(ort::inputs! {
+                        "input" => input,
+                        "input_lengths" => input_lengths,
+                        "scales" => scales,
+                        "sid" => sid,
+                    })
+                    .map_err(|e| format!("piper run: {e}"))?
+            } else {
+                session
+                    .run(ort::inputs! {
+                        "input" => input,
+                        "input_lengths" => input_lengths,
+                        "scales" => scales,
+                    })
+                    .map_err(|e| format!("piper run: {e}"))?
+            };
 
             // Output is f32 with raw shape (1, 1, 1, T); flatten to [T].
             let (_shape, data) = outputs["output"]
@@ -1220,7 +1325,8 @@ impl PiperEngine {
                 None => {
                     cache_misses += 1;
                     let normalized = normalize_numbers(&normalize_text(&segment));
-                    let tokens = phonemize(&self.phonemizer, &self.word_set, &normalized)?;
+                    let tokens =
+                        phonemize(&self.phonemizer, self.gb_dict.as_ref(), &self.word_set, &normalized)?;
                     let ids = self
                         .encoder
                         .encode(&tokens)
@@ -1236,7 +1342,7 @@ impl PiperEngine {
                     let words: Vec<&str> = segment.split_whitespace().collect();
                     let word_ms = compute_word_ms(
                         &words, &tokens, wceil.as_deref(), pcm.len(), sr,
-                        &self.phonemizer, &self.word_set, &self.id_map,
+                        &self.phonemizer, self.gb_dict.as_ref(), &self.word_set, &self.id_map,
                     );
                     crate::tts_cache::put(&ck, sr as u32, &segment, &pcm, &word_ms);
                     (pcm, word_ms)

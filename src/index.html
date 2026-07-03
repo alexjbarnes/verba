@@ -105,6 +105,9 @@
       <button class="nav-btn w-full flex items-center gap-3 px-5 py-3 text-sm font-medium text-on-surface-variant hover:text-on-surface hover:bg-surface-container-highest transition-colors cursor-pointer" data-tab="library" data-mode="listen">
         <span class="material-symbols-outlined text-lg">library_books</span> Library
       </button>
+      <button class="nav-btn w-full flex items-center gap-3 px-5 py-3 text-sm font-medium text-on-surface-variant hover:text-on-surface hover:bg-surface-container-highest transition-colors cursor-pointer" data-tab="feeds" data-mode="listen">
+        <span class="material-symbols-outlined text-lg">rss_feed</span> Feeds
+      </button>
       <button class="nav-btn w-full flex items-center gap-3 px-5 py-3 text-sm font-medium text-on-surface-variant hover:text-on-surface hover:bg-surface-container-highest transition-colors cursor-pointer" data-tab="voices" data-mode="listen">
         <span class="material-symbols-outlined text-lg">graphic_eq</span> Voices
       </button>
@@ -317,7 +320,7 @@
       </div>
       <button id="lib-add-btn" class="text-xs font-semibold text-on-primary bg-primary px-3 py-1.5 rounded-lg hover:brightness-110 transition-colors cursor-pointer">Add text</button>
     </div>
-    <div class="flex-1 min-h-0 overflow-y-auto">
+    <div id="lib-scroll" class="flex-1 min-h-0 overflow-y-auto">
       <div id="lib-list" class="space-y-2"></div>
       <div id="lib-empty" class="hidden flex flex-col items-center justify-center pt-16 text-on-surface-variant">
         <span class="material-symbols-outlined text-4xl mb-3 opacity-30">library_books</span>
@@ -369,12 +372,72 @@
     </div>
   </div>
 
+  <!-- Feeds tab (RSS subscriptions) -->
+  <div id="feeds" class="tab-panel hidden flex-1 flex flex-col px-5 py-6 min-h-0">
+    <div class="flex items-center justify-between mb-4">
+      <div>
+        <h2 class="text-lg font-bold tracking-tight text-on-surface">Feeds</h2>
+        <p class="text-xs text-on-surface-variant mt-0.5">Newsletters pulled into your library</p>
+      </div>
+      <div class="flex items-center gap-2">
+        <button id="feeds-refresh" class="text-xs font-semibold text-on-surface-variant hover:text-primary transition-colors px-3 py-1.5 rounded-lg hover:bg-primary/10 cursor-pointer">Refresh</button>
+        <button id="feed-add-btn" class="text-xs font-semibold text-on-primary bg-primary px-3 py-1.5 rounded-lg hover:brightness-110 transition-colors cursor-pointer">Add feed</button>
+      </div>
+    </div>
+    <div id="feeds-scroll" class="flex-1 min-h-0 overflow-y-auto">
+      <div id="feeds-list" class="space-y-2"></div>
+      <div id="feeds-empty" class="hidden flex flex-col items-center justify-center pt-16 text-on-surface-variant">
+        <span class="material-symbols-outlined text-4xl mb-3 opacity-30">rss_feed</span>
+        <p class="text-sm">No feeds yet</p>
+        <p class="text-xs mt-1 opacity-70">Tap "Add feed" to follow a newsletter's RSS</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Feed entries view (opened from Feeds; not a nav item) -->
+  <div id="feed-entries" class="tab-panel hidden flex-1 flex flex-col px-5 py-6 min-h-0">
+    <div class="flex items-center gap-2 mb-3">
+      <button id="feed-entries-back" class="text-on-surface-variant hover:text-on-surface p-1 -ml-1 rounded-lg hover:bg-surface-container-highest transition-colors cursor-pointer">
+        <span class="material-symbols-outlined">arrow_back</span>
+      </button>
+      <h2 id="feed-entries-title" class="text-base font-bold tracking-tight text-on-surface truncate flex-1">Feed</h2>
+    </div>
+    <label class="flex items-center justify-between bg-surface-container-low rounded-xl px-4 py-3 mb-3 cursor-pointer">
+      <span class="text-sm font-medium text-on-surface">Auto-add new articles</span>
+      <span class="relative inline-flex items-center">
+        <input id="feed-auto-add" type="checkbox" class="sr-only peer" />
+        <div class="w-9 h-5 bg-outline-variant/40 rounded-full peer peer-checked:bg-primary transition-colors after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:translate-x-full"></div>
+      </span>
+    </label>
+    <div id="feed-entries-scroll" class="flex-1 min-h-0 overflow-y-auto">
+      <div id="feed-entries-list" class="space-y-2"></div>
+    </div>
+  </div>
+
+  <!-- Add feed modal -->
+  <div id="feed-add-modal" class="fixed inset-0 z-50 hidden items-center justify-center bg-black/50 backdrop-blur-sm">
+    <div class="bg-surface-container-high rounded-2xl p-6 mx-4 max-w-sm w-full shadow-xl border border-outline-variant/20 space-y-4">
+      <p class="text-sm font-semibold text-on-surface">Add feed</p>
+      <input id="feed-add-url" type="url" placeholder="Site or feed URL" class="w-full bg-surface-container-highest border border-outline-variant/30 rounded-lg px-3 py-2 text-sm text-on-surface placeholder:text-on-surface-variant/50 focus:outline-none focus:ring-1 focus:ring-primary/50" />
+      <div class="flex justify-end gap-3">
+        <button id="feed-add-cancel" class="px-4 py-2 text-sm font-medium text-on-surface-variant rounded-lg hover:bg-surface-container-highest transition-colors cursor-pointer">Cancel</button>
+        <button id="feed-add-save" class="px-4 py-2 text-sm font-medium text-on-primary bg-primary rounded-lg hover:brightness-110 transition-colors cursor-pointer">Add</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Voices (TTS) tab -->
   <div id="voices" class="tab-panel hidden flex-1 overflow-y-auto px-5 py-6 space-y-6">
     <div>
       <h2 class="text-lg font-bold tracking-tight text-on-surface">Voices</h2>
       <p class="text-xs text-on-surface-variant mt-0.5">Tap a voice to hear a sample. Star your favourites to show them in the player.</p>
     </div>
+
+    <!-- Voice models: pick which downloaded model provides the voices below -->
+    <section id="voices-models-section" class="hidden">
+      <p class="text-xs font-semibold text-on-surface-variant uppercase tracking-wider mb-2">Voice models</p>
+      <div id="voices-models-list" class="bg-surface-container-low rounded-xl overflow-hidden divide-y divide-white/5"></div>
+    </section>
 
     <!-- Empty state when the voice model isn't downloaded yet -->
     <div id="voices-download" class="hidden flex flex-col items-center justify-center py-12 text-center text-on-surface-variant">

@@ -22,6 +22,34 @@ static ENGINE_LOADED: AtomicBool = AtomicBool::new(false);
 // forward then back). Held only during setup, never across generation.
 static SPEAK_LOCK: Mutex<()> = Mutex::new(());
 
+// Which voice is audible right now: "model-id[+custom][#sid]". Attached to
+// mispronunciation reports so a word flagged on one voice isn't "fixed" on
+// another. Base is set where the model id is known (the lib.rs commands);
+// the sid half updates at each speak.
+static CURRENT_VOICE: Mutex<(String, i32)> = Mutex::new((String::new(), -1));
+
+pub fn set_voice_base(base: String) {
+    let mut v = CURRENT_VOICE.lock().unwrap_or_else(|e| e.into_inner());
+    if v.0 != base {
+        *v = (base, -1);
+    }
+}
+
+fn note_speak_sid(sid: i32) {
+    CURRENT_VOICE.lock().unwrap_or_else(|e| e.into_inner()).1 = sid;
+}
+
+pub fn current_voice() -> String {
+    let v = CURRENT_VOICE.lock().unwrap_or_else(|e| e.into_inner());
+    if v.0.is_empty() {
+        String::new()
+    } else if v.1 < 0 {
+        v.0.clone()
+    } else {
+        format!("{}#{}", v.0, v.1)
+    }
+}
+
 fn global() -> &'static Mutex<Option<TtsEngine>> {
     TTS_ENGINE.get_or_init(|| Mutex::new(None))
 }
@@ -250,11 +278,12 @@ pub fn speak_from_cache(
     model: &str,
     config: &str,
 ) -> Result<bool, String> {
+    note_speak_sid(sid);
     let Some((sample_rate_u32, num_speakers)) = crate::piper::read_piper_meta(config) else {
         return Ok(false);
     };
     let sample_rate = sample_rate_u32 as i32;
-    let model_fp = crate::piper::model_fingerprint(model);
+    let model_fp = crate::piper::cache_fingerprint(model, config);
 
     // Cheap header-only check BEFORE touching the player or the SPEAK_LOCK: a
     // partial cache must have zero side effects so the caller's fallback to a
@@ -350,6 +379,7 @@ pub fn speak(text: &str, speed: f32, sid: i32, gen: u64, app: Option<tauri::AppH
     // Serialize the whole setup: two concurrent calls must not each spin up a
     // player. The second waits here, then stops the first's player below.
     let _speak_guard = SPEAK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    note_speak_sid(sid);
 
     // Atomically take and stop any existing player before creating a new one.
     if let Some(old) = lock_player().take() {

@@ -20,6 +20,11 @@ pub struct MispronunciationEntry {
     pub word: String,
     /// Unix epoch milliseconds; the frontend formats it for display.
     pub reported_at_ms: u64,
+    /// Voice audible when the report was made ("model[+custom][#sid]", "" when
+    /// unknown). The same word can be right on one voice and wrong on another,
+    /// so an untagged report isn't actionable once there are multiple voices.
+    #[serde(default)]
+    pub voice: String,
 }
 
 pub struct Mispronunciations {
@@ -44,9 +49,10 @@ impl Mispronunciations {
         if word.is_empty() {
             return;
         }
-        log::info!("mispronunciation reported: {word:?}");
+        let voice = crate::tts::current_voice();
+        log::info!("mispronunciation reported: {word:?} (voice: {voice})");
         let mut entries = self.entries.lock().unwrap();
-        entries.push(MispronunciationEntry { word, reported_at_ms: now_ms() });
+        entries.push(MispronunciationEntry { word, reported_at_ms: now_ms(), voice });
         if let Err(e) = Self::save_to_disk(&entries) {
             log::error!("save mispronunciations: {e}");
         }

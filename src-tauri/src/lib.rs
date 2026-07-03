@@ -3,6 +3,8 @@ mod config;
 mod debug_log;
 mod delivery;
 mod engine;
+mod feeds;
+mod gb_english;
 mod history;
 mod library;
 mod media;
@@ -21,6 +23,7 @@ mod share;
 mod transcribe;
 mod tts;
 mod tts_cache;
+mod webfetch;
 pub mod vad;
 #[cfg(target_os = "android")]
 mod android_ime;
@@ -250,6 +253,40 @@ pub fn android_stop_media_session() {
     android_call_static("stopMediaSession", "()V", &[]);
 }
 
+/// Ask Kotlin to load a URL in a hidden WebView (challenge-passing fallback
+/// fetch). The result comes back asynchronously via nativeWebFetchDone.
+#[cfg(target_os = "android")]
+pub fn android_webview_fetch(url: &str, request_id: i64) {
+    use jni::objects::JValue;
+    let vm = match GLOBAL_JVM.get() {
+        Some(v) => v,
+        None => return webfetch::complete(request_id, Err("JVM not ready".into())),
+    };
+    let class_ref = match VERBA_APP_CLASS.get() {
+        Some(c) => c,
+        None => return webfetch::complete(request_id, Err("app class not ready".into())),
+    };
+    let mut env = match vm.attach_current_thread_permanently() {
+        Ok(e) => e,
+        Err(e) => return webfetch::complete(request_id, Err(format!("JNI attach: {e}"))),
+    };
+    let Ok(url_str) = env.new_string(url) else {
+        return webfetch::complete(request_id, Err("JNI string alloc failed".into()));
+    };
+    let class = unsafe { jni::objects::JClass::from_raw(class_ref.as_raw()) };
+    if env
+        .call_static_method(
+            class,
+            "webViewFetch",
+            "(Ljava/lang/String;J)V",
+            &[JValue::Object(&*url_str), JValue::Long(request_id)],
+        )
+        .is_err()
+    {
+        webfetch::complete(request_id, Err("webViewFetch call failed".into()));
+    }
+}
+
 #[cfg(target_os = "android")]
 #[no_mangle]
 pub extern "system" fn Java_com_alexb151_verba_VerbaApp_nativeTtsPause(
@@ -297,6 +334,27 @@ pub extern "system" fn Java_com_alexb151_verba_VerbaApp_nativeSharedText(
     }
 }
 
+/// Hidden-WebView fetch completion: Kotlin hands back the page body (or an
+/// error) for the request id issued by webfetch::fetch.
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_com_alexb151_verba_VerbaApp_nativeWebFetchDone(
+    mut env: jni::JNIEnv,
+    _class: jni::objects::JClass,
+    request_id: jni::sys::jlong,
+    content: jni::objects::JString,
+    error: jni::objects::JString,
+) {
+    let content: String = env.get_string(&content).map(Into::into).unwrap_or_default();
+    let error: String = env.get_string(&error).map(Into::into).unwrap_or_default();
+    let result = if error.is_empty() {
+        Ok(content)
+    } else {
+        Err(error)
+    };
+    webfetch::complete(request_id, result);
+}
+
 /// Consume text shared to the app (URL or prose), if any. Returns null when
 /// nothing is pending. Called by the frontend on startup and on `shared-text`.
 #[tauri::command]
@@ -309,6 +367,14 @@ fn take_shared_text() -> Option<String> {
 #[tauri::command]
 async fn fetch_article(url: String) -> Result<String, String> {
     share::fetch_html(&url).await
+}
+
+/// Fallback fetch through a hidden WebView for sites whose HTTP endpoints sit
+/// behind a browser-verification challenge (Cloudflare 403s every non-browser
+/// TLS fingerprint). Android only; slow (the challenge takes seconds).
+#[tauri::command]
+async fn webview_fetch(url: String) -> Result<String, String> {
+    webfetch::fetch(&url).await
 }
 
 #[tauri::command]
@@ -463,6 +529,10 @@ async fn tts_load(id: String, custom_voice: Option<String>) -> Result<(), String
     let mgr = models::ModelManager::global();
     let mut config = mgr.tts_model_config(&id)
         .ok_or("TTS model not downloaded")?;
+    tts::set_voice_base(match &custom_voice {
+        Some(name) => format!("{id}+{name}"),
+        None => id.clone(),
+    });
     if let Some(name) = custom_voice {
         let path = tts::custom_voices_dir().join(format!("{name}.bin"));
         if !path.exists() {
@@ -531,6 +601,10 @@ async fn tts_speak_cached(
     let Some(mut model_cfg) = mgr.tts_model_config(&id) else {
         return Ok(false);
     };
+    tts::set_voice_base(match &custom_voice {
+        Some(name) => format!("{id}+{name}"),
+        None => id.clone(),
+    });
     if let Some(name) = &custom_voice {
         let path = tts::custom_voices_dir().join(format!("{name}.bin"));
         if path.exists() {
@@ -648,12 +722,24 @@ fn library_list() -> Vec<library::LibraryItem> {
 }
 
 #[tauri::command]
-fn library_add(title: Option<String>, body: String) -> Result<library::LibraryItem, String> {
+fn library_add(
+    title: Option<String>,
+    body: String,
+    url: Option<String>,
+    feed_id: Option<String>,
+    guid: Option<String>,
+) -> Result<library::LibraryItem, String> {
     let body = body.trim().to_string();
     if body.is_empty() {
         return Err("Empty text".into());
     }
-    Ok(library::Library::global().add(title.unwrap_or_default(), body))
+    Ok(library::Library::global().add(
+        title.unwrap_or_default(),
+        body,
+        url.unwrap_or_default(),
+        feed_id.unwrap_or_default(),
+        guid.unwrap_or_default(),
+    ))
 }
 
 #[tauri::command]
@@ -674,6 +760,47 @@ fn library_set_progress(id: String, progress: u64) {
 #[tauri::command]
 fn library_set_duration(id: String, duration_ms: u64, speed: f32) {
     library::Library::global().set_duration(&id, duration_ms, speed);
+}
+
+// ── RSS feeds (Listen reader subscriptions) ──
+
+#[tauri::command]
+fn feeds_list() -> Vec<feeds::Feed> {
+    feeds::Feeds::global().list()
+}
+
+#[tauri::command]
+fn feed_add(url: String, title: String, seen: Vec<String>) -> Result<feeds::Feed, String> {
+    feeds::Feeds::global().add(url, title, seen)
+}
+
+#[tauri::command]
+fn feed_delete(id: String) {
+    feeds::Feeds::global().delete(&id);
+}
+
+#[tauri::command]
+fn feed_set_auto_add(id: String, auto_add: bool) {
+    feeds::Feeds::global().set_auto_add(&id, auto_add);
+}
+
+#[tauri::command]
+fn feed_mark_seen(id: String, keys: Vec<String>) {
+    feeds::Feeds::global().mark_seen(&id, keys);
+}
+
+#[tauri::command]
+fn feed_checked(id: String, etag: String, last_modified: String) {
+    feeds::Feeds::global().checked(&id, etag, last_modified);
+}
+
+#[tauri::command]
+async fn fetch_feed(
+    url: String,
+    etag: String,
+    last_modified: String,
+) -> Result<feeds::FetchFeedResult, String> {
+    feeds::fetch_feed(&url, &etag, &last_modified).await
 }
 
 /// Start recording from the UI (no hotkey, no delivery).
@@ -827,6 +954,7 @@ pub fn run() {
             }
             history::History::init_global();
             library::Library::init_global();
+            feeds::Feeds::init_global();
             snippets::SnippetManager::init_global();
             // Load neural grammar models on a background thread so the UI
             // stays responsive during startup.
@@ -1137,6 +1265,14 @@ pub fn run() {
             library_delete,
             library_set_progress,
             library_set_duration,
+            feeds_list,
+            feed_add,
+            feed_delete,
+            feed_set_auto_add,
+            feed_mark_seen,
+            feed_checked,
+            fetch_feed,
+            webview_fetch,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

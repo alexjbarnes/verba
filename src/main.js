@@ -68,6 +68,7 @@ document.querySelectorAll('.nav-btn').forEach(btn => {
     if (btn.dataset.tab === 'general') loadVocab();
     if (btn.dataset.tab === 'snippets') loadSnippets();
     if (btn.dataset.tab === 'library') loadLibrary();
+    if (btn.dataset.tab === 'feeds') loadFeeds();
     if (btn.dataset.tab === 'voices') loadVoices();
     if (btn.dataset.tab === 'reports') loadReports();
   });
@@ -384,7 +385,10 @@ function renderReports(entries) {
     row.className = 'flex items-center justify-between gap-3 bg-surface-container-low rounded-xl border border-outline-variant/20 px-4 py-3';
     const when = entry.reported_at_ms ? new Date(entry.reported_at_ms).toLocaleString() : '';
     row.innerHTML = `
-      <span class="text-sm font-medium text-on-surface truncate select-text">${escapeHtml(entry.word)}</span>
+      <div class="min-w-0 flex-1">
+        <span class="text-sm font-medium text-on-surface truncate select-text block">${escapeHtml(entry.word)}</span>
+        ${entry.voice ? `<span class="text-[10px] text-on-surface-variant/70 truncate block mt-0.5">${escapeHtml(entry.voice)}</span>` : ''}
+      </div>
       <span class="text-[11px] text-on-surface-variant tabular-nums shrink-0">${escapeHtml(when)}</span>`;
     list.appendChild(row);
   }
@@ -635,6 +639,7 @@ async function loadConfig() {
   // Restore TTS voice favourites, last-selected voice, and per-voice speeds.
   ttsFavourites = Array.isArray(cfg.tts_favourite_sids) ? cfg.tts_favourite_sids.slice() : [];
   ttsVoiceSpeeds = (cfg.tts_voice_speeds && typeof cfg.tts_voice_speeds === 'object') ? cfg.tts_voice_speeds : {};
+  ttsActiveModel = cfg.tts_model || '';
   ttsVoice = cfg.tts_voice || '0';
   updateVoiceBtnLabel();
   // Apply the saved speed for the restored voice (default 1x).
@@ -1033,6 +1038,9 @@ listen('snippet-no-match', (event) => {
 // ── Reader (TTS) tab ──
 
 const TTS_VOICE_PRESETS = {
+  'tts-piper-alba': [
+    { sid: 0, label: 'Alba (EN-GB F)' },
+  ],
   'tts-kokoro-v1': [
     { sid: 0, label: 'Alloy (EN-US F)' },
     { sid: 1, label: 'Aoede (EN-US F)' },
@@ -1090,9 +1098,18 @@ const TTS_VOICE_PRESETS = {
   ],
 };
 
-let ttsModelId = null;       // single Piper TTS model id, resolved from the registry
+let ttsModelId = null;       // active Piper TTS model id, resolved from the registry
 let ttsLoadedModelId = null;
 let ttsLoadedEngine = null;
+// User-chosen TTS model (config.tts_model); '' = first registry TTS model.
+let ttsActiveModel = '';
+
+// Resolve the active TTS model from the registry list: the configured choice
+// when it exists, else the first TTS entry (original single-model behavior).
+function pickTtsModel(models) {
+  const all = models.filter(m => m.engine.startsWith('tts_'));
+  return all.find(m => m.id === ttsActiveModel) || all[0] || null;
+}
 
 // Friendly label for a speaker id. Models with a named preset (e.g. Kokoro) use
 // it; LibriTTS speakers are unnamed, so fall back to "Voice N".
@@ -1104,7 +1121,7 @@ function voiceLabel(sid) {
 
 async function updateTtsPanel() {
   const models = await invoke('list_models');
-  const tts = models.find(m => m.engine.startsWith('tts_'));
+  const tts = pickTtsModel(models);
   const block = document.getElementById('tts-model-block');
   const dlRow = document.getElementById('tts-download-row');
   const dlLabel = document.getElementById('tts-download-label');
@@ -1144,9 +1161,71 @@ let voicesNumSpeakers = 0;
 let samplingSid = -1;
 let sampleClearTimer = null;
 
+// The "Voice models" section: one row per registry TTS model with its
+// download/active state. Only rendered when there's a choice to make.
+function renderVoiceModels(models) {
+  const section = document.getElementById('voices-models-section');
+  const list = document.getElementById('voices-models-list');
+  const all = models.filter(m => m.engine.startsWith('tts_'));
+  section.classList.toggle('hidden', all.length < 2);
+  if (all.length < 2) return;
+  const active = pickTtsModel(models);
+  list.innerHTML = all.map(m => {
+    const downloaded = m.status === 'downloaded' || m.status === 'active';
+    const downloading = m.status === 'downloading';
+    const right = active && m.id === active.id
+      ? '<span class="text-[11px] font-semibold text-primary shrink-0 px-3">Active</span>'
+      : downloaded
+        ? `<button class="voice-model-use shrink-0 text-xs font-semibold text-on-surface-variant hover:text-primary transition-colors px-3 py-1.5 rounded-lg hover:bg-primary/10 cursor-pointer" data-id="${escapeHtml(m.id)}">Use</button>`
+        : `<button class="voice-model-dl shrink-0 text-xs font-semibold text-on-primary bg-primary px-3 py-1.5 rounded-lg hover:brightness-110 transition-colors cursor-pointer disabled:opacity-40" data-id="${escapeHtml(m.id)}" ${downloading ? 'disabled' : ''}>${downloading ? 'Downloading…' : 'Download'}</button>`;
+    return `
+    <div class="flex items-center justify-between gap-3 px-4 py-2.5">
+      <div class="min-w-0 flex-1">
+        <div class="text-sm text-on-surface truncate">${escapeHtml(m.name)}</div>
+        <div class="text-[11px] text-on-surface-variant truncate mt-0.5">${escapeHtml(m.desc || m.size)}</div>
+      </div>
+      ${right}
+    </div>`;
+  }).join('');
+}
+
+async function selectVoiceModel(id) {
+  ttsActiveModel = id;
+  try {
+    const cfg = await invoke('get_config');
+    cfg.tts_model = id;
+    await invoke('save_config', { cfg });
+  } catch (_) {}
+  // Force a reload on the next play/sample and reset to the model's first
+  // speaker (the old sid may not exist on the new model).
+  try { await invoke('tts_stop'); } catch (_) {}
+  ttsLoadedModelId = null;
+  ttsVoice = '0';
+  updateVoiceBtnLabel();
+  setTtsSpeed(speedForVoice(ttsVoice));
+  await loadVoices();
+}
+
+document.getElementById('voices-models-list').addEventListener('click', async (e) => {
+  const useBtn = e.target.closest('.voice-model-use');
+  if (useBtn) { selectVoiceModel(useBtn.dataset.id); return; }
+  const dlBtn = e.target.closest('.voice-model-dl');
+  if (dlBtn) {
+    dlBtn.disabled = true;
+    dlBtn.textContent = 'Downloading…';
+    try {
+      await invoke('download_model', { id: dlBtn.dataset.id });
+    } catch (err) {
+      showToast('Download failed: ' + err);
+    }
+    loadVoices();
+  }
+});
+
 async function loadVoices() {
   const models = await invoke('list_models');
-  const tts = models.find(m => m.engine.startsWith('tts_'));
+  renderVoiceModels(models);
+  const tts = pickTtsModel(models);
   const dl = document.getElementById('voices-download');
   const favSection = document.getElementById('voices-fav-section');
   const allSection = document.getElementById('voices-all-section');
@@ -2174,6 +2253,11 @@ function saveProgress(force) {
 
 async function loadLibrary() {
   const items = await invoke('library_list');
+  // Feed titles for the source badge on imported articles (cheap local JSON).
+  const feedsById = {};
+  try {
+    (await invoke('feeds_list')).forEach(f => { feedsById[f.id] = f; });
+  } catch (_) {}
   const list = document.getElementById('lib-list');
   const empty = document.getElementById('lib-empty');
   empty.classList.toggle('hidden', items.length > 0);
@@ -2186,13 +2270,24 @@ async function loadLibrary() {
     const totalMs = itemDurationMs(it, ttsSpeed);
     const leftMs = totalMs * (1 - prog / len);
     // Finished -> "Finished"; in-progress -> "42% · 6 min left"; fresh -> length.
-    const meta = pct >= 100 ? 'Finished'
+    let meta = pct >= 100 ? 'Finished'
       : pct > 0 ? `${pct}% · ${fmtMins(leftMs)} left`
       : fmtMins(totalMs);
+    // Feed provenance: source badge (feed title, else hostname once the feed
+    // is deleted) and a NEW chip until the article is first listened to.
+    if (it.feed_id) {
+      const feed = feedsById[it.feed_id];
+      let src = feed ? feed.title : '';
+      if (!src && it.url) { try { src = new URL(it.url).hostname; } catch (_) {} }
+      if (src) meta += ` · ${escapeHtml(src)}`;
+    }
+    const newChip = (it.feed_id && !(it.progress > 0))
+      ? '<span class="text-[10px] font-semibold text-primary bg-primary/10 rounded px-1.5 py-0.5 mr-1.5">NEW</span>'
+      : '';
     return `
     <div class="lib-item flex items-center justify-between gap-3 bg-surface-container-low rounded-xl px-4 py-3 cursor-pointer hover:bg-surface-container-high transition-colors" data-id="${escapeHtml(it.id)}">
       <div class="min-w-0 flex-1">
-        <div class="text-sm font-medium text-on-surface truncate">${escapeHtml(it.title)}</div>
+        <div class="text-sm font-medium text-on-surface truncate">${newChip}${escapeHtml(it.title)}</div>
         <div class="text-xs text-on-surface-variant truncate mt-0.5">${escapeHtml(it.body.slice(0, 80))}</div>
         <div class="text-[11px] ${pct >= 100 ? 'text-primary' : 'text-on-surface-variant'} tabular-nums mt-1">${meta}</div>
       </div>
@@ -2216,6 +2311,37 @@ async function loadLibrary() {
   });
 }
 
+// Shared Readability pipeline: parse HTML, strip site chrome and footnote
+// markers, extract the readable article. Used by the share-import flow and the
+// feed importer. Returns {title, body} or null when nothing readable is found.
+function extractArticle(html, baseUrl) {
+  const doc = new DOMParser().parseFromString(html, 'text/html');
+  // Give Readability a base URL for its link/heuristics.
+  const base = doc.createElement('base');
+  base.href = baseUrl;
+  doc.head && doc.head.prepend(base);
+  // Drop semantic chrome up front. Some sites (e.g. a table-based masthead
+  // inside the same wrapper as the article) confuse Readability into
+  // climbing past the <article> and keeping the site header/nav; removing
+  // these landmarks first keeps it on the actual content.
+  doc.querySelectorAll('header, footer, nav, aside').forEach(n => n.remove());
+  // Strip footnote/reference markers: the little superscript numbers linking
+  // to notes end up glued to a word ("column1") and get read aloud as a
+  // stray number. Covers the common markdown/Hugo/Pandoc/MediaWiki markup,
+  // plus any bare superscript that only wraps an in-page anchor. Also drop
+  // the endnotes section itself (orphaned once the markers are gone).
+  doc.querySelectorAll('sup[id^="fnref"], sup.reference, a.footnote-ref, [role="doc-noteref"], .footnote-ref').forEach(n => n.remove());
+  doc.querySelectorAll('sup > a[href^="#"]').forEach(a => a.parentElement && a.parentElement.remove());
+  doc.querySelectorAll('.footnotes, section.footnotes, [role="doc-endnotes"], ol.references').forEach(n => n.remove());
+  const article = (typeof Readability !== 'undefined')
+    ? new Readability(doc).parse()
+    : null;
+  if (article && article.textContent && article.textContent.trim().length > 50) {
+    return { title: (article.title || '').trim(), body: article.textContent.trim() };
+  }
+  return null;
+}
+
 // Handle text shared to the app from elsewhere. If it contains a URL, fetch the
 // page (in Rust, to dodge CORS) and run Readability to pull the article; plain
 // text is saved as-is. Either way it lands in the library and opens in Listen,
@@ -2234,36 +2360,16 @@ async function importSharedText(text) {
       showToast('Fetching article…');
       let html;
       try {
-        html = await invoke('fetch_article', { url });
+        html = await fetchArticleHtml(url);
       } catch (err) {
         showToast('Could not fetch: ' + err);
         return;
       }
       try {
-        const doc = new DOMParser().parseFromString(html, 'text/html');
-        // Give Readability a base URL for its link/heuristics.
-        const base = doc.createElement('base');
-        base.href = url;
-        doc.head && doc.head.prepend(base);
-        // Drop semantic chrome up front. Some sites (e.g. a table-based masthead
-        // inside the same wrapper as the article) confuse Readability into
-        // climbing past the <article> and keeping the site header/nav; removing
-        // these landmarks first keeps it on the actual content.
-        doc.querySelectorAll('header, footer, nav, aside').forEach(n => n.remove());
-        // Strip footnote/reference markers: the little superscript numbers linking
-        // to notes end up glued to a word ("column1") and get read aloud as a
-        // stray number. Covers the common markdown/Hugo/Pandoc/MediaWiki markup,
-        // plus any bare superscript that only wraps an in-page anchor. Also drop
-        // the endnotes section itself (orphaned once the markers are gone).
-        doc.querySelectorAll('sup[id^="fnref"], sup.reference, a.footnote-ref, [role="doc-noteref"], .footnote-ref').forEach(n => n.remove());
-        doc.querySelectorAll('sup > a[href^="#"]').forEach(a => a.parentElement && a.parentElement.remove());
-        doc.querySelectorAll('.footnotes, section.footnotes, [role="doc-endnotes"], ol.references').forEach(n => n.remove());
-        const article = (typeof Readability !== 'undefined')
-          ? new Readability(doc).parse()
-          : null;
-        if (article && article.textContent && article.textContent.trim().length > 50) {
-          title = (article.title || '').trim() || url;
-          body = article.textContent.trim();
+        const article = extractArticle(html, url);
+        if (article) {
+          title = article.title || url;
+          body = article.body;
         } else {
           showToast('No readable article found');
           return;
@@ -2275,7 +2381,7 @@ async function importSharedText(text) {
     }
     let item;
     try {
-      item = await invoke('library_add', { title, body });
+      item = await invoke('library_add', { title, body, url: url || null });
     } catch (err) {
       showToast('Save failed: ' + err);
       return;
@@ -2464,6 +2570,556 @@ document.getElementById('lib-add-save').addEventListener('click', async () => {
   } catch (err) { showToast('Save failed: ' + err); }
 });
 
+// ── Feeds (RSS subscriptions) ──
+
+let pollingFeeds = false;
+let browsingFeed = null;
+// Entries parsed this session, per feed id, backing the browse view.
+const sessionEntries = {};
+
+// Cloudflare-style browser checks 403 the app's HTTP client outright (the TLS
+// fingerprint gives it away, headers don't help). Fall back to a hidden
+// Android WebView — a real browser engine that passes the JS challenge. Slow
+// (seconds on first hit while the challenge runs), so only on 403/503.
+function isBotBlocked(err) {
+  return /HTTP (403|503)/.test(String(err));
+}
+
+async function fetchFeedBody(url, etag, lastModified) {
+  try {
+    return await invoke('fetch_feed', { url, etag, lastModified });
+  } catch (err) {
+    if (!isBotBlocked(err)) throw err;
+    const body = await invoke('webview_fetch', { url });
+    return { not_modified: false, body, etag: '', last_modified: '' };
+  }
+}
+
+async function fetchArticleHtml(url) {
+  try {
+    return await invoke('fetch_article', { url });
+  } catch (err) {
+    if (!isBotBlocked(err)) throw err;
+    return await invoke('webview_fetch', { url });
+  }
+}
+
+// Canonical form for matching an article URL against the library: drop the
+// fragment and a trailing slash so cosmetic variants of the same link match.
+function normArticleUrl(u) {
+  if (!u) return '';
+  try {
+    const x = new URL(u);
+    x.hash = '';
+    return x.href.replace(/\/$/, '');
+  } catch (_) {
+    return u.trim().replace(/\/$/, '');
+  }
+}
+
+// Parse RSS 2.0 / Atom XML into {title, entries: [{key, title, link, date,
+// dateMs, contentHtml}]}, or null when it isn't a recognizable feed. CSS type
+// selectors match any namespace in XML documents, so Atom elements resolve
+// without namespace plumbing; only content:encoded needs getElementsByTagNameNS.
+function parseFeedXml(xml, feedUrl) {
+  const doc = new DOMParser().parseFromString(xml, 'text/xml');
+  if (doc.querySelector('parsererror')) return null;
+
+  const text = (el, sel) => {
+    const n = el.querySelector(sel);
+    return n ? (n.textContent || '').trim() : '';
+  };
+  // Inner HTML of an XML node: element children (Atom xhtml content) get
+  // serialized; plain or entity-escaped content comes back as text.
+  const nodeHtml = (n) => {
+    if (!n) return '';
+    if (n.children && n.children.length) {
+      const s = new XMLSerializer();
+      return Array.from(n.childNodes).map(c => s.serializeToString(c)).join('');
+    }
+    return (n.textContent || '').trim();
+  };
+  const resolveLink = (link) => {
+    if (!link) return '';
+    try { return new URL(link, feedUrl).href; } catch (_) { return link; }
+  };
+  const entryOf = (el, isAtom) => {
+    let link = '';
+    if (isAtom) {
+      const links = Array.from(el.querySelectorAll('link'));
+      const alt = links.find(l => (l.getAttribute('rel') || 'alternate') === 'alternate');
+      link = (alt || links[0]) ? ((alt || links[0]).getAttribute('href') || '') : '';
+    } else {
+      link = text(el, 'link');
+      if (!link) {
+        // Some RSS items carry an atom:link (href attribute) instead.
+        const l = el.querySelector('link');
+        link = l ? (l.getAttribute('href') || '') : '';
+      }
+    }
+    link = resolveLink(link);
+    const guid = isAtom ? text(el, 'id') : text(el, 'guid');
+    const title = text(el, 'title');
+    const date = isAtom
+      ? (text(el, 'published') || text(el, 'updated'))
+      : text(el, 'pubDate');
+    const dateMs = date ? (Date.parse(date) || 0) : 0;
+    const contentHtml = isAtom
+      ? (nodeHtml(el.querySelector('content')) || nodeHtml(el.querySelector('summary')))
+      : (nodeHtml(el.getElementsByTagNameNS('*', 'encoded')[0]) || nodeHtml(el.querySelector('description')));
+    // Stable identity for seen-tracking; capped so a pathological guid can't
+    // bloat the stored list.
+    const key = (guid || link || `${title}|${date}`).slice(0, 500);
+    return { key, title, link, date, dateMs, contentHtml };
+  };
+
+  const rssItems = Array.from(doc.querySelectorAll('channel > item'));
+  if (rssItems.length || doc.querySelector('channel > title')) {
+    return {
+      title: text(doc, 'channel > title'),
+      entries: rssItems.map(el => entryOf(el, false)).filter(e => e.key),
+    };
+  }
+  const atomEntries = Array.from(doc.querySelectorAll('entry'));
+  if (atomEntries.length || (doc.documentElement && doc.documentElement.localName === 'feed')) {
+    return {
+      title: text(doc, 'feed > title'),
+      entries: atomEntries.map(el => entryOf(el, true)).filter(e => e.key),
+    };
+  }
+  return null;
+}
+
+// Discover a feed for a site URL that isn't itself a feed. Two passes,
+// borrowed from rsslookup: (1) the page's <link rel="alternate"> feed tags —
+// the reliable, site-declared signal; (2) common feed paths probed relative
+// to the page and its origin. Every candidate is validated by actually
+// parsing it as a feed (stronger than a content-type sniff, and we need the
+// parse for feed_add's pre-seeding anyway). Returns {url, parsed} or null.
+const COMMON_FEED_PATHS = [
+  '/atom', '/atom.xml', '/feed', '/feed/', '/feed.rss', '/feed.xml',
+  '/index.rss', '/index.xml', '/rss', '/rss/', '/rss.xml',
+  'atom', 'atom.xml', 'feed', 'feed/', 'feed.rss', 'feed.xml',
+  'index.rss', 'index.xml', 'rss', 'rss/', 'rss.xml',
+];
+
+async function discoverFeed(pageUrl, pageHtml) {
+  // Pass 1: <link rel="alternate" type="application/rss+xml|atom+xml">.
+  const linkCandidates = [];
+  try {
+    const doc = new DOMParser().parseFromString(pageHtml, 'text/html');
+    doc.querySelectorAll('link[rel~="alternate"][href]').forEach(l => {
+      const type = (l.getAttribute('type') || '').toLowerCase();
+      if (!/(rss|atom)/.test(type) || !type.includes('xml')) return;
+      let href = l.getAttribute('href');
+      try { href = new URL(href, pageUrl).href; } catch (_) { return; }
+      // Skip per-post comment feeds (WordPress emits one beside the real feed).
+      if (/comment/i.test(href)) return;
+      if (!linkCandidates.includes(href)) linkCandidates.push(href);
+    });
+  } catch (_) {}
+  // Site-declared candidates may sit behind the same bot check as the page,
+  // so they get the WebView fallback. Bounded: first 3.
+  for (const cand of linkCandidates.slice(0, 3)) {
+    try {
+      const r = await fetchFeedBody(cand, '', '');
+      const parsed = parseFeedXml(r.body, cand);
+      if (parsed && parsed.entries.length) return { url: cand, parsed };
+    } catch (_) {}
+  }
+
+  // Pass 2: common paths, deduped (at a site root the absolute and relative
+  // variants collapse). Plain fetch only — no WebView fallback here, or a
+  // bot-walled site would run the seconds-long challenge per probe.
+  const probes = [];
+  for (const path of COMMON_FEED_PATHS) {
+    try {
+      const u = new URL(path, pageUrl).href;
+      if (u !== pageUrl && !probes.includes(u)) probes.push(u);
+    } catch (_) {}
+  }
+  for (const cand of probes.slice(0, 12)) {
+    try {
+      const r = await invoke('fetch_feed', { url: cand, etag: '', lastModified: '' });
+      const parsed = parseFeedXml(r.body, cand);
+      if (parsed && parsed.entries.length) return { url: cand, parsed };
+    } catch (_) {}
+  }
+  return null;
+}
+
+// Import one feed entry into the library. Prefers the feed's embedded HTML
+// when it's substantial (full-content feeds like Substack); otherwise fetches
+// the article page. Throws when nothing readable can be extracted.
+async function importFeedEntry(feed, entry) {
+  let article = null;
+  if (entry.contentHtml) {
+    const textLen = new DOMParser().parseFromString(entry.contentHtml, 'text/html')
+      .body.textContent.trim().length;
+    if (textLen >= 500) {
+      try {
+        article = extractArticle(
+          `<html><head></head><body><article>${entry.contentHtml}</article></body></html>`,
+          entry.link || feed.url
+        );
+      } catch (_) {}
+    }
+  }
+  if (!article && entry.link) {
+    const html = await fetchArticleHtml(entry.link);
+    article = extractArticle(html, entry.link);
+  }
+  if (!article) throw 'no readable article';
+  return await invoke('library_add', {
+    title: entry.title || article.title || entry.link,
+    body: article.body,
+    url: entry.link || null,
+    feedId: feed.id,
+    guid: entry.key,
+  });
+}
+
+async function libraryUrlSet() {
+  const set = new Set();
+  try {
+    (await invoke('library_list')).forEach(it => {
+      const u = normArticleUrl(it.url);
+      if (u) set.add(u);
+    });
+  } catch (_) {}
+  return set;
+}
+
+// One feed's poll: fetch (conditional GET unless noValidators), parse, auto-
+// import what's new, then commit seen keys and validators. Ordering matters
+// for crash safety: state is only written after imports, so a crash mid-poll
+// means the next check re-fetches and picks the entries up again. Returns the
+// number of articles imported; throws on fetch/parse failure.
+async function checkFeed(feed, libUrls, opts) {
+  const useValidators = !(opts && opts.noValidators);
+  const r = await fetchFeedBody(
+    feed.url,
+    useValidators ? (feed.etag || '') : '',
+    useValidators ? (feed.last_modified || '') : ''
+  );
+  if (r.not_modified) {
+    await invoke('feed_checked', { id: feed.id, etag: feed.etag || '', lastModified: feed.last_modified || '' });
+    return 0;
+  }
+  const parsed = parseFeedXml(r.body, feed.url);
+  if (!parsed) throw 'not a valid feed';
+  sessionEntries[feed.id] = parsed.entries;
+  const seen = new Set(feed.seen || []);
+  const fresh = parsed.entries.filter(en => !seen.has(en.key));
+  let imported = 0;
+  if (feed.auto_add && fresh.length) {
+    // Belt and braces on top of seen-tracking: auto-import only entries
+    // published after the feed was added (with a week's slack for feeds that
+    // list late). Undated entries pass. This keeps any dedup regression from
+    // resurrecting archive posts; older entries stay addable from browse.
+    const addedMs = Date.parse(feed.added || '') || 0;
+    const cutoffMs = addedMs ? addedMs - 7 * 24 * 3600 * 1000 : 0;
+    const eligible = fresh.filter(en => !en.dateMs || en.dateMs >= cutoffMs);
+    // Cap the auto-import at the 5 newest; import oldest-first so insertion
+    // order keeps the library list newest-on-top. Entries beyond the cap are
+    // marked seen below and stay reachable from the browse view.
+    const newest = eligible.slice()
+      .sort((a, b) => (b.dateMs || 0) - (a.dateMs || 0))
+      .slice(0, 5)
+      .reverse();
+    for (const entry of newest) {
+      if (entry.link && libUrls.has(normArticleUrl(entry.link))) continue;
+      try {
+        await importFeedEntry(feed, entry);
+        if (entry.link) libUrls.add(normArticleUrl(entry.link));
+        imported++;
+      } catch (_) {
+        // Unreadable entry: skip. It's still marked seen (never retry-loop a
+        // broken page); manual add from the browse view remains possible.
+      }
+    }
+  }
+  // Seen = the feed's FULL current key set (the backend keeps a grace buffer
+  // of recently-departed keys on top). Passing only fresh keys into a capped
+  // FIFO churned on feeds listing more entries than the cap: live keys got
+  // evicted, looked new again, and resurrected old posts every poll.
+  await invoke('feed_mark_seen', { id: feed.id, keys: parsed.entries.map(en => en.key) });
+  await invoke('feed_checked', { id: feed.id, etag: r.etag || '', lastModified: r.last_modified || '' });
+  return imported;
+}
+
+// Check every feed for new articles. Runs at most once at a time; called on
+// app open (silent) and from refresh button / pull-to-refresh (interactive).
+async function pollFeeds(opts) {
+  const interactive = !!(opts && opts.interactive);
+  if (pollingFeeds) return;
+  pollingFeeds = true;
+  const btn = document.getElementById('feeds-refresh');
+  btn.disabled = true;
+  const btnLabel = btn.textContent;
+  btn.textContent = 'Refreshing…';
+  let imported = 0;
+  let failures = 0;
+  let hadFeeds = false;
+  try {
+    const feeds = await invoke('feeds_list');
+    hadFeeds = feeds.length > 0;
+    if (hadFeeds) {
+      const libUrls = await libraryUrlSet();
+      for (const feed of feeds) {
+        try {
+          imported += await checkFeed(feed, libUrls);
+        } catch (_) {
+          failures++;
+        }
+      }
+    }
+  } finally {
+    pollingFeeds = false;
+    btn.disabled = false;
+    btn.textContent = btnLabel;
+  }
+  if (imported > 0) {
+    showToast(imported === 1 ? '1 new article' : `${imported} new articles`);
+    if (!document.getElementById('library').classList.contains('hidden')) loadLibrary();
+  } else if (interactive && hadFeeds) {
+    showToast(failures ? 'Some feeds failed to update' : 'No new articles');
+  }
+  if (!document.getElementById('feeds').classList.contains('hidden')) loadFeeds();
+}
+
+async function loadFeeds() {
+  const feeds = await invoke('feeds_list');
+  const list = document.getElementById('feeds-list');
+  const empty = document.getElementById('feeds-empty');
+  empty.classList.toggle('hidden', feeds.length > 0);
+  list.innerHTML = feeds.slice().reverse().map(f => {
+    const checked = f.last_checked ? formatTimestamp(f.last_checked) : 'never';
+    const meta = `Checked ${checked} · Auto-add ${f.auto_add ? 'on' : 'off'}`;
+    return `
+    <div class="feed-item flex items-center justify-between gap-3 bg-surface-container-low rounded-xl px-4 py-3 cursor-pointer hover:bg-surface-container-high transition-colors" data-id="${escapeHtml(f.id)}">
+      <div class="min-w-0 flex-1">
+        <div class="text-sm font-medium text-on-surface truncate">${escapeHtml(f.title)}</div>
+        <div class="text-xs text-on-surface-variant truncate mt-0.5">${escapeHtml(f.url)}</div>
+        <div class="text-[11px] text-on-surface-variant tabular-nums mt-1">${meta}</div>
+      </div>
+      <button class="feed-del shrink-0 text-on-surface-variant/50 hover:text-error transition-colors p-1 cursor-pointer" data-id="${escapeHtml(f.id)}">
+        <span class="material-symbols-outlined text-lg">delete</span>
+      </button>
+    </div>`;
+  }).join('');
+  list.querySelectorAll('.feed-item').forEach(el => {
+    el.addEventListener('click', (e) => {
+      if (e.target.closest('.feed-del')) return;
+      openFeedEntries(el.dataset.id);
+    });
+  });
+  list.querySelectorAll('.feed-del').forEach(btn => {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      await invoke('feed_delete', { id: btn.dataset.id });
+      loadFeeds();
+    });
+  });
+}
+
+// Browse all entries currently in a feed. Browsing counts as a check: new
+// entries auto-import (when enabled) and everything current is marked seen.
+async function openFeedEntries(id) {
+  const feeds = await invoke('feeds_list');
+  const feed = feeds.find(f => f.id === id);
+  if (!feed) return;
+  browsingFeed = feed;
+  document.getElementById('feed-entries-title').textContent = feed.title;
+  document.getElementById('feed-auto-add').checked = !!feed.auto_add;
+  showPanel('feed-entries');
+  const listEl = document.getElementById('feed-entries-list');
+  if (!sessionEntries[feed.id]) {
+    listEl.innerHTML = '<div class="text-xs text-on-surface-variant px-1 py-4">Loading…</div>';
+    if (!pollingFeeds) {
+      pollingFeeds = true;
+      try {
+        // Empty validators: the browse view always needs the body, a 304
+        // would leave it with nothing to show.
+        await checkFeed(feed, await libraryUrlSet(), { noValidators: true });
+      } catch (err) {
+        listEl.innerHTML = `<div class="text-xs text-error px-1 py-4">Could not load feed: ${escapeHtml(String(err))}</div>`;
+        return;
+      } finally {
+        pollingFeeds = false;
+      }
+    } else {
+      // A poll is already running; fetch for display only, no state writes.
+      try {
+        const r = await fetchFeedBody(feed.url, '', '');
+        const parsed = parseFeedXml(r.body, feed.url);
+        if (parsed) sessionEntries[feed.id] = parsed.entries;
+      } catch (_) {}
+    }
+  }
+  renderFeedEntries(feed);
+}
+
+async function renderFeedEntries(feed) {
+  const entries = sessionEntries[feed.id] || [];
+  const listEl = document.getElementById('feed-entries-list');
+  if (!entries.length) {
+    listEl.innerHTML = '<div class="text-xs text-on-surface-variant px-1 py-4">No entries in this feed</div>';
+    return;
+  }
+  // "Added" state: exact provenance via the stored entry key, else the
+  // normalized article URL (also matches articles imported via share).
+  const byGuid = {};
+  const byUrl = {};
+  try {
+    (await invoke('library_list')).forEach(it => {
+      if (it.guid) byGuid[it.guid] = it.id;
+      const u = normArticleUrl(it.url);
+      if (u) byUrl[u] = it.id;
+    });
+  } catch (_) {}
+  listEl.innerHTML = entries.map((e, i) => {
+    const itemId = byGuid[e.key] || (e.link ? byUrl[normArticleUrl(e.link)] : '') || '';
+    const date = e.date ? formatTimestamp(e.date) : '';
+    const right = itemId
+      ? '<span class="text-[11px] font-semibold text-primary shrink-0">Added</span>'
+      : `<button class="feed-entry-add shrink-0 text-on-surface-variant hover:text-primary transition-colors p-1 cursor-pointer" data-i="${i}">
+           <span class="material-symbols-outlined text-lg">add_circle</span>
+         </button>`;
+    return `
+    <div class="feed-entry flex items-center justify-between gap-3 bg-surface-container-low rounded-xl px-4 py-3 ${itemId ? 'cursor-pointer hover:bg-surface-container-high transition-colors' : ''}" data-item-id="${escapeHtml(itemId)}">
+      <div class="min-w-0 flex-1">
+        <div class="text-sm font-medium text-on-surface truncate">${escapeHtml(e.title || e.link || 'Untitled')}</div>
+        ${date ? `<div class="text-[11px] text-on-surface-variant tabular-nums mt-1">${escapeHtml(date)}</div>` : ''}
+      </div>
+      ${right}
+    </div>`;
+  }).join('');
+  listEl.querySelectorAll('.feed-entry').forEach(el => {
+    el.addEventListener('click', (e) => {
+      if (e.target.closest('.feed-entry-add')) return;
+      if (el.dataset.itemId) openReading(el.dataset.itemId);
+    });
+  });
+  listEl.querySelectorAll('.feed-entry-add').forEach(btn => {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const entry = entries[Number(btn.dataset.i)];
+      if (!entry) return;
+      btn.disabled = true;
+      btn.innerHTML = '<span class="material-symbols-outlined text-lg tts-spin">progress_activity</span>';
+      try {
+        await importFeedEntry(feed, entry);
+        showToast('Article added');
+        renderFeedEntries(feed);
+      } catch (err) {
+        showToast('Could not add: ' + err);
+        btn.disabled = false;
+        btn.innerHTML = '<span class="material-symbols-outlined text-lg">add_circle</span>';
+      }
+    });
+  });
+}
+
+document.getElementById('feeds-refresh').addEventListener('click', () => {
+  pollFeeds({ interactive: true });
+});
+
+const feedAddModal = document.getElementById('feed-add-modal');
+function closeFeedAddModal() {
+  feedAddModal.classList.add('hidden');
+  feedAddModal.classList.remove('flex');
+}
+document.getElementById('feed-add-btn').addEventListener('click', () => {
+  document.getElementById('feed-add-url').value = '';
+  feedAddModal.classList.remove('hidden');
+  feedAddModal.classList.add('flex');
+});
+document.getElementById('feed-add-cancel').addEventListener('click', closeFeedAddModal);
+document.getElementById('feed-add-save').addEventListener('click', async () => {
+  let url = document.getElementById('feed-add-url').value.trim();
+  if (!url) { showToast('Enter a feed or site URL'); return; }
+  if (!/^https?:\/\//i.test(url)) url = 'https://' + url;
+  // Canonicalize (adds the root slash, lowercases the host) and reject garbage
+  // before any network round-trip.
+  try { url = new URL(url).href; } catch (_) { showToast('Not a valid URL'); return; }
+  const btn = document.getElementById('feed-add-save');
+  btn.disabled = true;
+  btn.textContent = 'Adding…';
+  try {
+    // Validate by fetching and parsing before anything is persisted.
+    const r = await fetchFeedBody(url, '', '');
+    let feedUrl = url;
+    let parsed = parseFeedXml(r.body, url);
+    if (!parsed) {
+      // Not feed XML — treat it as a site page and go find its feed.
+      btn.textContent = 'Finding feed…';
+      const found = await discoverFeed(url, r.body);
+      if (!found) { showToast('No feed found on that site'); return; }
+      feedUrl = found.url;
+      parsed = found.parsed;
+      showToast('Found feed: ' + feedUrl.replace(/^https?:\/\//, ''));
+    }
+    // Everything currently in the feed is pre-seen: only entries published
+    // after this point auto-add. Existing ones stay reachable via browse.
+    const feed = await invoke('feed_add', {
+      url: feedUrl,
+      title: parsed.title || '',
+      seen: parsed.entries.map(e => e.key),
+    });
+    sessionEntries[feed.id] = parsed.entries;
+    closeFeedAddModal();
+    loadFeeds();
+  } catch (err) {
+    showToast('Could not add feed: ' + err);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Add';
+  }
+});
+
+document.getElementById('feed-entries-back').addEventListener('click', () => {
+  browsingFeed = null;
+  showPanel('feeds');
+  loadFeeds();
+});
+
+document.getElementById('feed-auto-add').addEventListener('change', (e) => {
+  if (!browsingFeed) return;
+  browsingFeed.auto_add = e.target.checked;
+  invoke('feed_set_auto_add', { id: browsingFeed.id, autoAdd: e.target.checked }).catch(() => {});
+});
+
+// Pull-to-refresh on the Library and Feeds lists (Android; the Refresh button
+// covers desktop). Minimal gesture: touch starts with the scroller at the top
+// and drags down more than 70px.
+function attachPullToRefresh(el, onRefresh) {
+  if (!el) return;
+  let startY = 0;
+  let pulling = false;
+  el.addEventListener('touchstart', (e) => {
+    pulling = el.scrollTop === 0;
+    startY = pulling ? e.touches[0].clientY : 0;
+  }, { passive: true });
+  el.addEventListener('touchmove', () => {
+    if (pulling && el.scrollTop > 0) pulling = false;
+  }, { passive: true });
+  el.addEventListener('touchend', (e) => {
+    if (!pulling) return;
+    pulling = false;
+    const t = e.changedTouches && e.changedTouches[0];
+    if (t && t.clientY - startY > 70) onRefresh();
+  }, { passive: true });
+}
+attachPullToRefresh(document.getElementById('lib-scroll'), () => {
+  showToast('Refreshing…');
+  pollFeeds({ interactive: true }).then(() => loadLibrary());
+});
+attachPullToRefresh(document.getElementById('feeds-scroll'), () => {
+  showToast('Refreshing…');
+  pollFeeds({ interactive: true });
+});
+
 // ── Debug tab ──
 
 const logOutput = document.getElementById('log-output');
@@ -2536,6 +3192,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     const shared = await invoke('take_shared_text');
     if (shared) importSharedText(shared);
   } catch (_) {}
+
+  // Check RSS feeds for new articles. Fire-and-forget: never blocks startup,
+  // silent when offline.
+  pollFeeds({}).catch(() => {});
 });
 
 // A share arriving while the app is already open: Rust emits this once it has

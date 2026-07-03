@@ -717,6 +717,20 @@ fn builtin_registry() -> Vec<ModelDef> {
                 ModelFile { url: format!("{R2_PIPER_LIBRITTS}/en_US-libritts_r-medium.onnx.json"), rel_path: "tts/piper-libritts/model.onnx.json".into(), bytes: 20_123, role: "config".into() },
             ],
         },
+        ModelDef {
+            id: "tts-piper-alba".into(),
+            name: "Alba (UK)".into(),
+            desc: "British English voice \u{2014} single speaker, RP accent, ~63 MB".into(),
+            engine: "tts_piper_ort".into(),
+            size: "~63 MB".into(),
+            files: vec![
+                // Duration-patched (same /Ceil_output_0 surgery as libritts) so
+                // exact word timing works; the sidecar's espeak.voice ("en-gb-x-rp")
+                // routes phonemization through the GB dictionary.
+                ModelFile { url: format!("{R2_PIPER_LIBRITTS}/en_GB-alba-medium-dur.onnx"), rel_path: "tts/piper-alba/model_dur.onnx".into(), bytes: 63_201_318, role: "model".into() },
+                ModelFile { url: format!("{R2_PIPER_LIBRITTS}/en_GB-alba-medium.onnx.json"), rel_path: "tts/piper-alba/model.onnx.json".into(), bytes: 4_888, role: "config".into() },
+            ],
+        },
     ]
 }
 

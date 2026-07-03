@@ -22,6 +22,10 @@ pub struct AppConfig {
     /// "custom:<name>" for a custom voice. Empty means default (speaker 0).
     #[serde(default)]
     pub tts_voice: String,
+    /// Active TTS model id (e.g. "tts-piper-alba"). Empty means the first TTS
+    /// model in the registry (the original single-model behavior).
+    #[serde(default)]
+    pub tts_model: String,
     /// Playback speed remembered per voice (voice string -> speed multiplier).
     /// Selecting a voice restores its last speed (default 1.0). MUST stay the
     /// last field: `toml` emits map fields as `[tables]`, which must follow all
@@ -44,6 +48,7 @@ impl Default for AppConfig {
             haptic_feedback: true,
             tts_favourite_sids: Vec::new(),
             tts_voice: String::new(),
+            tts_model: String::new(),
             tts_voice_speeds: HashMap::new(),
         }
     }

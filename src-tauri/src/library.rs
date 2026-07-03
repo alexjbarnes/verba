@@ -26,6 +26,17 @@ pub struct LibraryItem {
     /// speeds. 0 = unmeasured.
     #[serde(default)]
     pub duration_speed: f32,
+    /// Source article URL; "" for pasted/typed text.
+    #[serde(default)]
+    pub url: String,
+    /// Feed this item was imported from; "" when not from a feed. Kept as a
+    /// dangling reference if the feed is deleted (the UI falls back to the
+    /// URL's hostname for the badge).
+    #[serde(default)]
+    pub feed_id: String,
+    /// Feed entry key, for exact provenance.
+    #[serde(default)]
+    pub guid: String,
 }
 
 pub struct Library {
@@ -63,7 +74,14 @@ impl Library {
         }
     }
 
-    pub fn add(&self, title: String, body: String) -> LibraryItem {
+    pub fn add(
+        &self,
+        title: String,
+        body: String,
+        url: String,
+        feed_id: String,
+        guid: String,
+    ) -> LibraryItem {
         let title = if title.trim().is_empty() {
             Self::derive_title(&body)
         } else {
@@ -78,6 +96,9 @@ impl Library {
             progress: 0,
             duration_ms: 0,
             duration_speed: 0.0,
+            url,
+            feed_id,
+            guid,
         };
         let mut items = self.items.lock().unwrap();
         items.push(item.clone());
@@ -175,9 +196,9 @@ mod tests {
     #[test]
     fn add_uses_explicit_title_then_derives() {
         let lib = Library { items: Mutex::new(vec![]) };
-        let a = lib.add("My Title".into(), "some body".into());
+        let a = lib.add("My Title".into(), "some body".into(), String::new(), String::new(), String::new());
         assert_eq!(a.title, "My Title");
-        let b = lib.add("  ".into(), "First line\nsecond".into());
+        let b = lib.add("  ".into(), "First line\nsecond".into(), String::new(), String::new(), String::new());
         assert_eq!(b.title, "First line");
         assert_ne!(a.id, b.id);
         assert_eq!(lib.items.lock().unwrap().len(), 2);
@@ -186,8 +207,8 @@ mod tests {
     #[test]
     fn delete_removes_by_id() {
         let lib = Library { items: Mutex::new(vec![]) };
-        let a = lib.add("t".into(), "one".into());
-        lib.add("t".into(), "two".into());
+        let a = lib.add("t".into(), "one".into(), String::new(), String::new(), String::new());
+        lib.add("t".into(), "two".into(), String::new(), String::new(), String::new());
         lib.delete(&a.id);
         let items = lib.items.lock().unwrap();
         assert_eq!(items.len(), 1);
@@ -197,7 +218,7 @@ mod tests {
     #[test]
     fn set_progress_updates_item() {
         let lib = Library { items: Mutex::new(vec![]) };
-        let a = lib.add("t".into(), "body".into());
+        let a = lib.add("t".into(), "body".into(), String::new(), String::new(), String::new());
         lib.set_progress(&a.id, 42);
         assert_eq!(lib.items.lock().unwrap()[0].progress, 42);
     }
@@ -208,5 +229,9 @@ mod tests {
         let json = r#"[{"id":"1","title":"t","body":"b","created":"now","position_ms":7}]"#;
         let items: Vec<LibraryItem> = serde_json::from_str(json).unwrap();
         assert_eq!(items[0].progress, 7);
+        // Provenance fields are additive; older JSON without them still loads.
+        assert_eq!(items[0].url, "");
+        assert_eq!(items[0].feed_id, "");
+        assert_eq!(items[0].guid, "");
     }
 }
