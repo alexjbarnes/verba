@@ -2,7 +2,8 @@
 //!
 //! Model files are embedded at compile time from `data/grammar/`. If those
 //! files are absent when the crate is built the entire stage compiles out
-//! and the pipeline falls back to nlprule silently.
+//! and grammar correction becomes a no-op (build.rs prints a warning;
+//! regenerate the files with scripts/download_t5_grammar_onnx.py).
 //!
 //! Model-specific parameters (input prefix, encoder output name, thresholds)
 //! are read from `data/grammar/config.json` at compile time. To swap models,
@@ -98,7 +99,7 @@ mod bundled {
             return;
         }
         let checker = GrammarNeuralChecker::load()
-            .map_err(|e| log::warn!("Neural grammar failed to load ({e}), using nlprule"))
+            .map_err(|e| log::warn!("Neural grammar failed to load ({e}), grammar stage disabled"))
             .ok();
         let _ = CHECKER.set(checker);
     }
@@ -391,16 +392,7 @@ mod bundled {
                 .decode(&token_ids, true)
                 .map_err(|e| format!("t5 decode: {e}"))?;
 
-            // Strip the task prefix if the model echoes it back.
-            Ok(if !self.corrector_prefix.is_empty() {
-                decoded
-                    .strip_prefix(&self.corrector_prefix)
-                    .or_else(|| decoded.strip_prefix(self.corrector_prefix.trim()))
-                    .unwrap_or(&decoded)
-                    .to_string()
-            } else {
-                decoded
-            })
+            Ok(super::strip_task_prefix(&decoded, &self.corrector_prefix))
         }
 
         /// Load 8 cross-attention K/V projection weight matrices from binary.
@@ -683,6 +675,24 @@ fn guard_negation_edits(original: &str, corrected: &str) -> (String, bool) {
     }
 }
 
+/// Strip the task prefix if the corrector echoes it back. The model
+/// re-cases it as a sentence opener ("grammar: " -> "Grammar: "), so the
+/// match must be case-insensitive.
+fn strip_task_prefix(decoded: &str, prefix: &str) -> String {
+    if prefix.is_empty() {
+        return decoded.to_string();
+    }
+    for cand in [prefix, prefix.trim_end()] {
+        if decoded.len() >= cand.len()
+            && decoded.is_char_boundary(cand.len())
+            && decoded[..cand.len()].eq_ignore_ascii_case(cand)
+        {
+            return decoded[cand.len()..].trim_start().to_string();
+        }
+    }
+    decoded.to_string()
+}
+
 #[cfg(grammar_neural_bundled)]
 pub use bundled::{global, init_global, GrammarNeuralChecker};
 
@@ -732,6 +742,22 @@ mod tests {
         let (result, guarded) = guard_negation_edits(text, text);
         assert_eq!(result, text);
         assert!(!guarded);
+    }
+
+    #[test]
+    fn test_strip_task_prefix() {
+        assert_eq!(strip_task_prefix("grammar: fixed text", "grammar: "), "fixed text");
+        // The corrector re-cases the echoed prefix as a sentence opener.
+        assert_eq!(strip_task_prefix("Grammar: fixed text", "grammar: "), "fixed text");
+        assert_eq!(strip_task_prefix("Grammar: Fixed text.", "grammar: "), "Fixed text.");
+        // Trimmed variant (no trailing space in the echo).
+        assert_eq!(strip_task_prefix("Grammar:fixed", "grammar: "), "fixed");
+        // No echo: text passes through untouched.
+        assert_eq!(strip_task_prefix("fixed text", "grammar: "), "fixed text");
+        assert_eq!(strip_task_prefix("fixed text", ""), "fixed text");
+        // A sentence merely starting with the word is still stripped only
+        // when it matches the exact prefix form.
+        assert_eq!(strip_task_prefix("Grammatical text", "grammar: "), "Grammatical text");
     }
 
     #[test]

@@ -45,23 +45,17 @@ Five stages run sequentially. Pipeline returns `PipelineResult` with intermediat
 1. **Filler removal** (`filler.rs`) - rule-based: "um", "uh", word duplicates (~1ms)
 2. **ITN** (`itn.rs`) - inverse text normalization: numbers, dates, ordinals (~5ms)
 3. **Vocab** (`vocab.rs`) - user vocab substitution + built-in informal contractions (gonna->going to) (<1ms)
-4. **Grammar** (`grammar_neural.rs` / nlprule fallback) - dual-path, see below (~4-65ms). Skipped for texts under 5 words
+4. **Grammar** (`grammar_neural.rs`) - CoLA router + T5 corrector, see below (~4-65ms). Skipped for texts under 5 words
 5. **Cleanup** (inline in `mod.rs`) - capitalize, spacing, trailing punctuation
 
-### Grammar correction (dual-path)
+### Grammar correction (`grammar_neural.rs`)
 
-The grammar stage has two paths selected at compile time:
-
-**Neural path** (when model files present in `src-tauri/data/grammar/`):
 - CoLA router (ELECTRA-small, 14MB ONNX INT8) scores sentence acceptability P(acceptable)
-- Below threshold (0.75) routes to T5 corrector (T5-efficient-tiny, 32MB ONNX INT8)
-- Per-sentence splitting and correction with negation guard (prevents meaning inversion)
-- `build.rs` sets `grammar_neural_bundled` cfg flag if all 6 model files exist
+- Below threshold (0.5, from `data/grammar/config.0.0.1.json`) routes to T5 corrector (T5-efficient-tiny, 30MB ONNX INT8)
+- Per-sentence splitting and correction with negation guard (prevents meaning inversion) and case-insensitive task-prefix strip
+- `build.rs` sets `grammar_neural_bundled` cfg flag only if ALL 7 model files exist; otherwise it prints a warning and the stage is a NO-OP in that build
+- Model files are gitignored (except config + KV weights) — after a fresh checkout run `python3 scripts/download_t5_grammar_onnx.py --output-dir src-tauri/data/grammar/ --version 0.0.1 --verify` BEFORE building, or the APK ships without grammar correction
 - Models embedded at compile time via `include_bytes!()`
-
-**nlprule fallback** (when neural models absent):
-- LanguageTool rules via nlprule crate (~5-10ms)
-- Compiles out silently when neural path is available
 
 ### Snippets (`src-tauri/src/snippets.rs`)
 

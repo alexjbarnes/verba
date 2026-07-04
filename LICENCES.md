@@ -20,10 +20,6 @@ original licence.
   (`src-tauri/data/frequency_dictionary_en_82_765.txt`,
   `frequency_bigramdictionary_en_243_342.txt`) — from
   [SymSpell](https://github.com/wolfgarbe/SymSpell), MIT licence.
-- **nlprule English rule/tokenizer binaries** (`src-tauri/data/nlprule/`) —
-  built from [LanguageTool](https://languagetool.org) rules
-  (**LGPL-2.1-or-later**) via [nlprule](https://github.com/bminixhofer/nlprule)
-  (MIT/Apache-2.0).
 - **Grammar models** (`src-tauri/data/grammar/`) — acceptability router
   fine-tuned from Google **ELECTRA-small** (Apache-2.0) and corrector
   fine-tuned from Google **T5-efficient-tiny** (Apache-2.0).

@@ -36,7 +36,6 @@ futures-util = "0.3"
 cpal = "0.15"
 sherpa-onnx = "1.12"
 chrono = { version = "0.4", features = ["serde"] }
-nlprule = { path = "../../nlprule/nlprule" }
 symspell = "0.5"
 ort = { version = "2.0.0-rc.12", default-features = false, features = ["load-dynamic", "ndarray", "api-18"] }
 tokenizers = { version = "0.21", default-features = false, features = ["fancy-regex"] }

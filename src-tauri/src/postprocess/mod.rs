@@ -3,11 +3,10 @@
 //! 1. Filler word removal (rule-based, ~1ms)
 //! 2. Inverse text normalization (rule-based, ~5ms)
 //! 3. User vocab substitution (rule-based, <1ms)
-//! 4. Grammar correction — neural (CoLA+T5, ~4-65ms) if models present,
-//!    otherwise nlprule (LanguageTool rules, ~5-10ms)
+//! 4. Grammar correction — neural (CoLA router + T5 corrector, ~4-65ms);
+//!    requires the bundled models (grammar_neural_bundled), no-op otherwise
 
 mod filler;
-mod grammar;
 pub mod grammar_neural;
 mod itn;
 mod spelling;
@@ -47,28 +46,24 @@ pub struct PipelineResult {
 }
 
 struct Pipeline {
-    grammar: grammar::GrammarChecker,
+    #[allow(dead_code)] // parked: see the disabled Spelling stage below
     spelling: spelling::SpellCorrector,
 }
 
 static PIPELINE: OnceLock<Pipeline> = OnceLock::new();
 
 fn get_pipeline() -> &'static Pipeline {
-    PIPELINE.get_or_init(|| {
-        let grammar = grammar::GrammarChecker::new()
-            .expect("failed to load nlprule grammar checker");
-        Pipeline {
-            grammar,
-            spelling: spelling::SpellCorrector::new(),
-        }
+    PIPELINE.get_or_init(|| Pipeline {
+        spelling: spelling::SpellCorrector::new(),
     })
 }
 
-/// Force-initialize the pipeline (Harper dictionary + rules).
+/// Force-initialize the pipeline (spelling dictionary + grammar models).
 /// Call during startup so the first transcription isn't slow.
 pub fn warm_up() {
     let t = Instant::now();
     let _ = get_pipeline();
+    grammar_neural::init_global();
     log::info!("Pipeline: warm-up took {}ms", t.elapsed().as_millis());
 }
 
@@ -144,9 +139,8 @@ pub fn postprocess(text: &str) -> PipelineResult {
         grammar_sentences: vec![],
     });
 
-    // Stage 4: Grammar correction.
-    // Neural path (CoLA router + T5 corrector) when models are loaded;
-    // nlprule (LanguageTool rules) otherwise.
+    // Stage 4: Grammar correction — CoLA router + T5 corrector. No-op when
+    // the models aren't bundled (grammar_neural_bundled unset at build time).
     //
     // Skipped for short texts: fragments and replacement phrases (e.g. two
     // words dictated over a selection) score very low on the grammar router
@@ -155,9 +149,9 @@ pub fn postprocess(text: &str) -> PipelineResult {
     // Long texts are handled by the corrector splitting on sentence boundaries
     // and correcting each sentence individually.
     //
-    // catch_unwind guards against any Rust panic (e.g., from ORT internals
-    // or nlprule deserialization) crossing a JNI boundary and aborting the
-    // process on Android. Native crashes (SIGSEGV) are not caught here.
+    // catch_unwind guards against any Rust panic (e.g., from ORT internals)
+    // crossing a JNI boundary and aborting the process on Android. Native
+    // crashes (SIGSEGV) are not caught here.
     const MIN_GRAMMAR_WORDS: usize = 5;
     let t = Instant::now();
     let prev = s.clone();
@@ -188,9 +182,7 @@ pub fn postprocess(text: &str) -> PipelineResult {
                 let min_score = results.iter().filter_map(|r| r.score).reduce(f32::min);
                 (corrected, "Grammar (neural)", min_score, results)
             } else {
-                let pipeline = get_pipeline();
-                let corrected = pipeline.grammar.correct(&s);
-                (corrected, "Grammar (nlprule)", None, vec![])
+                (s.clone(), "Grammar (unavailable)", None, vec![])
             }
         }));
         match grammar_result {
@@ -621,7 +613,7 @@ mod tests {
         assert_eq!(names[1], "Filler removal");
         assert_eq!(names[2], "ITN");
         assert_eq!(names[3], "Vocab");
-        // Stage 4 is grammar (neural, nlprule, or skipped)
+        // Stage 4 is grammar (neural, unavailable, or skipped)
         assert!(names[4].starts_with("Grammar"), "expected Grammar stage, got: {}", names[4]);
         assert_eq!(names[5], "Cleanup");
     }
