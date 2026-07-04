@@ -62,10 +62,22 @@ PREPOSITION = [
 INFINITIVE = [
     (r"\b(want|need|going|have|used|trying) to\b", r"\1"),
 ]
+COPULA = [
+    # "he is going" -> "he going": dropped copula before a gerund.
+    (r"\b(he|she|it|they|we|you|I|there) (?:is|are|am|was|were) ([a-z]+ing)\b",
+     r"\1 \2"),
+]
+MODAL = [
+    (r"\b(can|could|will|would|should|might|must) be\b", r"\1 is"),
+]
+A_AN = [
+    (r"\ban ([aeiouAEIOU])", r"a \1"),
+    (r"\ba ([bcdfghjklmnpqrstvwxz])", r"an \1"),
+]
 MENU = {
     "agreement": AGREEMENT, "article": ARTICLES, "tense": TENSE,
     "plural": PLURAL, "pronoun": PRONOUN, "preposition": PREPOSITION,
-    "infinitive": INFINITIVE,
+    "infinitive": INFINITIVE, "copula": COPULA, "modal": MODAL, "a_an": A_AN,
 }
 
 
@@ -95,17 +107,22 @@ def dup_word(sentence, rng):
     return " ".join(words)
 
 
-def corrupt(sentence, rng):
-    # dup_word is caught by the filler stage at runtime, so keep it a small
-    # slice of the corrupt class rather than the dominant pattern.
+def corrupt_variants(sentence, rng, n):
+    """Up to n distinct corruptions of the sentence, each a different kind.
+    dup_word is caught by the filler stage at runtime, so keep it a small
+    slice of the corrupt class rather than a dominant pattern."""
     kinds = list(MENU) + (["dup_word"] if rng.random() < 0.15 else [])
     rng.shuffle(kinds)
+    out, seen = [], set()
     for kind in kinds:
-        out = dup_word(sentence, rng) if kind == "dup_word" \
+        if len(out) >= n:
+            break
+        bad = dup_word(sentence, rng) if kind == "dup_word" \
             else apply_swap(sentence, MENU[kind], rng)
-        if out:
-            return out, kind
-    return None, None
+        if bad and bad not in seen:
+            out.append((bad, kind))
+            seen.add(bad)
+    return out
 
 
 SENT_SPLIT = re.compile(r"(?<=[.!?])\s+(?=[A-Z\"'])")
@@ -135,7 +152,10 @@ def main():
     ap.add_argument("corpus_dir")
     ap.add_argument("out_prefix")
     ap.add_argument("--seed", type=int, default=7)
-    ap.add_argument("--identity-rate", type=float, default=0.45)
+    ap.add_argument("--corrupt-rate", type=float, default=0.55,
+                    help="fraction of sentences that also get corrupted variants")
+    ap.add_argument("--variants", type=int, default=3,
+                    help="max corrupted variants per corrupted sentence")
     ap.add_argument("--val-frac", type=float, default=0.1)
     ap.add_argument("--asr-clean", action="append", default=[],
                     help="raws.json of a clean-text tts_roundtrip run; "
@@ -155,13 +175,13 @@ def main():
         pairs = []
         for path in files:
             for sent in sentences_of(path):
-                if rng.random() < args.identity_rate:
-                    pairs.append({"src": sent, "tgt": sent, "label": 1})
+                # Every sentence contributes an identity pair (T5 learns to
+                # copy, router learns the acceptable side); corrupted
+                # variants of the same sentence give contrastive signal.
+                pairs.append({"src": sent, "tgt": sent, "label": 1})
+                if rng.random() >= args.corrupt_rate:
                     continue
-                bad, kind = corrupt(sent, rng)
-                if bad is None:
-                    pairs.append({"src": sent, "tgt": sent, "label": 1})
-                else:
+                for bad, kind in corrupt_variants(sent, rng, args.variants):
                     pairs.append({"src": bad, "tgt": sent, "label": 0})
                     stats[kind] = stats.get(kind, 0) + 1
         if split == "train":

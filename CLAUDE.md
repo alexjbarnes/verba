@@ -50,11 +50,12 @@ Five stages run sequentially. Pipeline returns `PipelineResult` with intermediat
 
 ### Grammar correction (`grammar_neural.rs`)
 
-- CoLA router (ELECTRA-small, 14MB ONNX INT8) scores sentence acceptability P(acceptable)
-- Below threshold (0.5, from `data/grammar/config.0.0.1.json`) routes to T5 corrector (T5-efficient-tiny, 30MB ONNX INT8)
-- Per-sentence splitting and correction with negation guard (prevents meaning inversion) and case-insensitive task-prefix strip
+- Needs-repair router (ELECTRA-small, 14MB ONNX INT8) scores P(acceptable); below threshold (0.7, from `data/grammar/config.0.0.1.json`) routes to the T5 corrector (T5-efficient-tiny, 30MB ONNX INT8)
+- Both models are FINE-TUNED on synthetic spoken-register corruption pairs (see the fine-tuning pipeline below); the upstream stock checkpoints measure far worse on ASR output
+- Per-sentence splitting and correction with negation/contraction guard (prevents meaning inversion; same-type contraction replacements like "me've" -> "I've" are allowed) and case-insensitive task-prefix strip
 - `build.rs` sets `grammar_neural_bundled` cfg flag only if ALL 7 model files exist; otherwise it prints a warning and the stage is a NO-OP in that build
-- Model files are gitignored (except config + KV weights) — after a fresh checkout run `python3 scripts/download_t5_grammar_onnx.py --output-dir src-tauri/data/grammar/ --version 0.0.1 --verify` BEFORE building, or the APK ships without grammar correction
+- Model files are gitignored (except config + KV weights). After a fresh checkout regenerate them with the fine-tuning pipeline: `fetch_blog_corpus.py` -> `make_grammar_pairs.py` -> `finetune_grammar_router.py` + `finetune_grammar_t5.py` -> `export_finetuned_grammar.py`, then copy the exports over the 0.0.1 names. `download_t5_grammar_onnx.py` restores the STOCK models only (placebo-grade on ASR output — use for baselines, not shipping)
+- Measure any model change with `scripts/grammar_bench.py` (sentence-level) and `scripts/stt_grammar_probe.py` (round-trip article probe)
 - Models embedded at compile time via `include_bytes!()`
 
 ### Snippets (`src-tauri/src/snippets.rs`)

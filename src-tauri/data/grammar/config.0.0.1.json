@@ -1,6 +1,6 @@
 {
   "router": {
-    "threshold": 0.5
+    "threshold": 0.7
   },
   "corrector": {
     "input_prefix": "grammar: ",

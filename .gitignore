@@ -39,7 +39,7 @@ debug.keystore
 
 # Core dumps
 core
-src-tauri/data/grammar/
+src-tauri/data/grammar/*
 !src-tauri/data/grammar/cross_attn_kv_weights.*.bin
 !src-tauri/data/grammar/config.*.json
 

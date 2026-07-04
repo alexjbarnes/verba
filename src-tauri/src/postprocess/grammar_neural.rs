@@ -565,10 +565,17 @@ fn contraction_expansion(word: &str) -> Option<&'static str> {
 /// True if a contraction in the original was dropped without being expanded.
 /// "we'll keep" -> "we keep" is a drop (no "will" in corrected). Reverts.
 /// "it's always" -> "it is always" is an expansion ("is" present). Keeps.
+/// A replacement carrying the same contraction type also keeps ("me've" ->
+/// "I've"): the ASR can garble the stem and the corrector must be allowed
+/// to fix it without the suffix counting as dropped.
 fn is_contraction_dropped(orig_span: &[&str], corr_span: &[&str]) -> bool {
     for word in orig_span {
         if let Some(expansion) = contraction_expansion(word) {
-            if !corr_span.iter().any(|w| w.eq_ignore_ascii_case(expansion)) {
+            let preserved = corr_span.iter().any(|w| {
+                w.eq_ignore_ascii_case(expansion)
+                    || contraction_expansion(w) == Some(expansion)
+            });
+            if !preserved {
                 return true;
             }
         }
@@ -839,6 +846,21 @@ mod tests {
         let (result, guarded) = guard_negation_edits(orig, corr);
         assert!(result.contains("we'll"), "should preserve contraction, got: {result}");
         assert!(guarded);
+    }
+
+    #[test]
+    fn test_contraction_stem_fix_kept() {
+        // ASR-garbled stems: the correction keeps the same contraction type,
+        // so it must NOT count as a drop.
+        for (orig, corr) in [
+            ("me've had a lot of fun", "I've had a lot of fun"),
+            ("me'm not sure about it", "I'm not sure about it"),
+            ("me've had a lot of fun", "I have had a lot of fun"),
+        ] {
+            let (result, guarded) = guard_negation_edits(orig, corr);
+            assert_eq!(result, corr, "stem fix should be kept");
+            assert!(!guarded);
+        }
     }
 
     #[test]
