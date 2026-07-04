@@ -54,9 +54,9 @@ KNOWN_CHECKSUMS = {
     "0.0.1": {
         "decoder_with_past_quantized.onnx": "88e7f9f00085d51c0bfc777e5dc60fd9",
         "encoder_model_quantized.onnx": "87193644b7f16105f2a28e8347cf522e",
-        "cross_attn_kv_weights.bin": "2d25e8583031f543ebcc639856383bf3",
+        "cross_attn_kv_weights.bin": "d29c5831e60b94232b85703a8723c9c4",
         "t5_tokenizer.json": "4bab65b652e076c1a6fc8ed1bdfae2c2",
-        "special_tokens_map.json": "0d21dc8bbd9451f28b3609ed3dcb2375",
+        "special_tokens_map.json": "8fd03e945174de0818746ecbde1aad8e",
         "tokenizer_config.json": "d171383bb03ce07e046c17dc737db124",
     },
 }
