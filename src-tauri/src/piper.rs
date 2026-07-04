@@ -47,6 +47,13 @@ const GB_PRONUNCIATION_OVERRIDES: &[(&str, &str)] = &[
     ("weaponization", "wˌɛpənaɪzˈeɪʃən"),
     ("recursive", "ɹɪkˈɜːsɪv"),
     ("recursively", "ɹɪkˈɜːsɪvlɪ"),
+    // Found by the round-trip harness: wikipron variants with wrong vowels
+    // that the sweep's benign-notation folding can't distinguish (ɹiː- onset,
+    // ʊ for ʌ).
+    ("ridiculous", "ɹɪdˈɪkjʊləs"),
+    ("ridiculously", "ɹɪdˈɪkjʊləslɪ"),
+    ("rubberneck", "ɹˈʌbənˌɛk"),
+    ("rubbernecking", "ɹˈʌbənˌɛkɪŋ"),
 ];
 
 /// Piper `.onnx.json` sidecar: audio params, speaker count, phoneme id map and
@@ -134,7 +141,7 @@ pub fn model_fingerprint(model_path: &str) -> String {
 /// Bump when data/gb_dict.json (or the RP transform) changes pronunciations:
 /// GB models' cached audio embeds the old phoneme stream, so their cache keys
 /// must roll without invalidating US models' caches.
-const GB_DICT_VERSION: u32 = 3;
+const GB_DICT_VERSION: u32 = 7;
 
 /// True when the sidecar declares a GB espeak voice (same check as engine load).
 fn config_is_gb(config_path: &str) -> bool {
@@ -554,6 +561,13 @@ const PRONUNCIATION_OVERRIDES: &[(&str, &str)] = &[
     ("commoditize", "K AH0 M AA1 D AH0 T AY2 Z"),
     ("commoditized", "K AH0 M AA1 D AH0 T AY2 Z D"),
     ("commoditizing", "K AH0 M AA1 D AH0 T AY2 Z IH0 NG"),
+    // Reported 2026-07-04 (batch 3).
+    ("contextualize", "K AH0 N T EH1 K S CH UW0 AH0 L AY2 Z"),
+    ("contextualized", "K AH0 N T EH1 K S CH UW0 AH0 L AY2 Z D"),
+    ("contextualizing", "K AH0 N T EH1 K S CH UW0 AH0 L AY2 Z IH0 NG"),
+    // Found by the round-trip harness 2026-07-04 ("elon" was being spelled
+    // out letter-by-letter — heard as "yellow in").
+    ("elon", "IY1 L AA2 N"),
 ];
 
 /// Expand each (possibly multi-codepoint, like "ɑː" or "iː") token into
@@ -623,6 +637,36 @@ fn say_cardinal(n: u64) -> String {
         }
     }
     say_cardinal(n)
+}
+
+/// The text as it will be spoken, after typography and number normalization
+/// ("since 1980, $10B" -> "since nineteen eighty, ten billion dollars").
+/// Exposed for the round-trip harness, which aligns an ASR transcript of the
+/// synthesized audio against this form.
+pub fn spoken_text(text: &str) -> String {
+    normalize_numbers(&normalize_text(text))
+}
+
+/// Read a 4-digit year the spoken way: "1980" -> "nineteen eighty",
+/// "1905" -> "nineteen oh five", "1900" -> "nineteen hundred",
+/// "2007" -> "two thousand seven", "2026" -> "twenty twenty six".
+fn say_year(y: u64) -> String {
+    let hi = y / 100;
+    let lo = y % 100;
+    if (2000..=2009).contains(&y) {
+        return if lo == 0 {
+            "two thousand".to_string()
+        } else {
+            format!("two thousand {}", ONES[lo as usize])
+        };
+    }
+    if lo == 0 {
+        return format!("{} hundred", say_cardinal(hi));
+    }
+    if lo < 10 {
+        return format!("{} oh {}", say_cardinal(hi), ONES[lo as usize]);
+    }
+    format!("{} {}", say_cardinal(hi), say_cardinal(lo))
 }
 
 /// Spell an ordinal ("1" -> "first", "21" -> "twenty first", "30" -> "thirtieth").
@@ -695,16 +739,65 @@ fn normalize_numbers(text: &str) -> String {
                 i += 2;
             }
         }
+        // Magnitude suffix: "$10B" / "1.5M" / "200k" / "£3bn"-style. Lowercase
+        // m/b/t are only magnitudes with a currency sign ("10m" is metres in
+        // prose); uppercase and "k"/"bn" are safe either way.
+        let mut magnitude = "";
+        if !percent && !ordinal {
+            let c1 = chars.get(i).copied().unwrap_or('\0');
+            let c2 = chars.get(i + 1).copied().unwrap_or('\0');
+            let boundary_after = |n: usize| {
+                chars.get(i + n).map_or(true, |c| !c.is_alphanumeric())
+            };
+            if (c1 == 'b' || c1 == 'B') && (c2 == 'n' || c2 == 'N') && boundary_after(2) {
+                magnitude = "billion";
+                i += 2;
+            } else if boundary_after(1) {
+                magnitude = match c1 {
+                    'k' | 'K' => "thousand",
+                    'M' => "million",
+                    'B' => "billion",
+                    'T' => "trillion",
+                    'm' if currency => "million",
+                    'b' if currency => "billion",
+                    't' if currency => "trillion",
+                    _ => "",
+                };
+                if !magnitude.is_empty() {
+                    i += 1;
+                }
+            }
+        }
         let int_val: u64 = int_str.parse().unwrap_or(0);
+        // A bare 4-digit 1100-2099 integer in prose is a year: "since 1980"
+        // must read "nineteen eighty", not "one thousand nine hundred eighty".
+        let is_year = !currency && !percent && !ordinal && frac.is_empty()
+            && magnitude.is_empty() && int_str.len() == 4 && (1100..=2099).contains(&int_val);
         if out.ends_with(|c: char| c.is_alphanumeric()) {
             out.push(' ');
         }
-        if currency {
+        if is_year {
+            out.push_str(&say_year(int_val));
+        } else if currency {
             out.push_str(&say_cardinal(int_val));
-            out.push_str(if int_val == 1 { " dollar" } else { " dollars" });
-            if !frac.is_empty() {
+            if !magnitude.is_empty() {
+                // "$1.5B" -> "one point five billion dollars"
+                if !frac.is_empty() {
+                    out.push_str(" point");
+                    for d in frac.chars() {
+                        out.push(' ');
+                        out.push_str(ONES[d as usize - '0' as usize]);
+                    }
+                }
+                out.push(' ');
+                out.push_str(magnitude);
+                out.push_str(" dollars");
+            } else if !frac.is_empty() {
+                out.push_str(if int_val == 1 { " dollar" } else { " dollars" });
                 let cents: u64 = format!("{frac:0<2}")[..2].parse().unwrap_or(0);
                 out.push_str(&format!(" and {} cents", say_cardinal(cents)));
+            } else {
+                out.push_str(if int_val == 1 { " dollar" } else { " dollars" });
             }
         } else if ordinal {
             out.push_str(&say_ordinal(int_val));
@@ -715,8 +808,16 @@ fn normalize_numbers(text: &str) -> String {
                 out.push(' ');
                 out.push_str(ONES[d as usize - '0' as usize]);
             }
+            if !magnitude.is_empty() {
+                out.push(' ');
+                out.push_str(magnitude);
+            }
         } else {
             out.push_str(&say_cardinal(int_val));
+            if !magnitude.is_empty() {
+                out.push(' ');
+                out.push_str(magnitude);
+            }
         }
         if percent {
             out.push_str(" percent");
@@ -736,6 +837,16 @@ fn normalize_numbers(text: &str) -> String {
 /// curly quotes become straight; em/en dashes and ellipsis become pause marks.
 /// Runs before tokenization.
 fn normalize_text(text: &str) -> String {
+    // Latin abbreviations: the internal dots would otherwise read as pauses
+    // between the spelled letters ("eye. ee."). Stripped to bare letters they
+    // read naturally ("eye ee"); "etc" has a dictionary entry already. Word
+    // counts are unaffected (one \S+ token either way is rebuilt identically
+    // by the timing path).
+    let text = text
+        .replace("i.e.", "i e")
+        .replace("I.e.", "i e")
+        .replace("e.g.", "e g")
+        .replace("E.g.", "e g");
     text.chars()
         .map(|c| match c {
             '\u{2019}' | '\u{2018}' | '\u{02BC}' => '\'',
@@ -774,7 +885,7 @@ fn split_tokens(text: &str) -> Vec<String> {
 /// would otherwise read as the pronoun "us", "IT" as "it". Case is the only
 /// signal, so these are spelled letter-by-letter before the dict lookup.
 const SPELLED_ACRONYMS: &[&str] = &[
-    "us", "uk", "eu", "un", "tv", "id", "os", "ip", "ui", "ux", "pr", "hr",
+    "us", "uk", "eu", "un", "tv", "id", "os", "ip", "ui", "ux", "pr", "hr", "it",
 ];
 
 /// Prefixes tried against an OOV word ("unpatched" -> un + patched). The
@@ -866,7 +977,17 @@ fn phonemize(
     let mut first = true;
 
     for piece in &pieces {
-        let is_word = piece.chars().next().map(|c| c.is_alphanumeric()).unwrap_or(false);
+        // A piece is a word if it contains ANY alphanumeric — judging by the
+        // first character silently dropped quote-wrapped words ("'last" in
+        // «the 'last mile' stuff» classified as punctuation and was never
+        // spoken). Surrounding quotes/apostrophes are trimmed for processing;
+        // internal ones (don't, cat's) are untouched.
+        let is_word = piece.chars().any(|c| c.is_alphanumeric());
+        let piece: &str = if is_word {
+            piece.trim_matches(|c: char| !c.is_alphanumeric())
+        } else {
+            piece
+        };
 
         let mut p_tokens: Vec<String> = if is_word {
             let all_caps =
@@ -926,6 +1047,30 @@ fn phonemize(
                             pt = b;
                             replaced = true;
                             break;
+                        }
+                    }
+                }
+                // Plural of a known word ("hedonists" when only "hedonist" is
+                // in a dictionary): pronounce the base and append the plural
+                // phone by ordinary phonology — /ɪz/ after sibilants, /s/
+                // after voiceless stops/fricatives, else /z/.
+                if !replaced {
+                    let lower = piece.to_lowercase();
+                    if lower.len() > 3 && lower.ends_with('s') && !lower.ends_with("ss") {
+                        let base = &lower[..lower.len() - 1];
+                        let mut b = phonemize_word(base)?;
+                        if !is_oov(&b) {
+                            let last = b.last().cloned().unwrap_or_default();
+                            match last.as_str() {
+                                "s" | "z" | "ʃ" | "ʒ" => {
+                                    b.push("ɪ".to_string());
+                                    b.push("z".to_string());
+                                }
+                                "p" | "t" | "k" | "f" | "θ" => b.push("s".to_string()),
+                                _ => b.push("z".to_string()),
+                            }
+                            pt = b;
+                            replaced = true;
                         }
                     }
                 }
@@ -1008,7 +1153,12 @@ fn phonemize(
             continue;
         }
 
-        if !first {
+        // Words are separated by spaces; punctuation ATTACHES to the previous
+        // word ("mˈiːn," not "mˈiːn ,") — that's the shape of the training
+        // streams. A space before the mark is out-of-distribution and renders
+        // as a faint stop-release ("ed") on some voices; measured on alba, the
+        // spaced form's tail is ~2x louder than the attached form's.
+        if !first && is_word {
             tokens.push(" ".to_string());
         }
         first = false;
@@ -1056,15 +1206,23 @@ pub fn split_for_pauses(text: &str) -> Vec<(String, usize)> {
         // around it: "death,4", "1,000", "3.14", "e.g.") is NOT a clause/sentence
         // break: splitting there would insert a wrong pause inside the token AND
         // make the backend word count diverge from the reader's \S+ tokens.
-        let is_break = match pause_of(ch) {
-            None => false,
-            Some(_) => {
-                ch == '\n'
-                    || chars
-                        .get(i + 1)
-                        .map_or(true, |&c| c.is_whitespace() || pause_of(c).is_some())
-            }
-        };
+        // A dot in a single-letter abbreviation ("i.e.", "e.g.", "U.S.") is
+        // not a break: the letter before it starts at a word boundary. A
+        // sentence pause there splits the abbreviation in half.
+        let abbrev_dot = ch == '.'
+            && i >= 1
+            && chars[i - 1].is_alphabetic()
+            && (i < 2 || !chars[i - 2].is_alphanumeric());
+        let is_break = !abbrev_dot
+            && match pause_of(ch) {
+                None => false,
+                Some(_) => {
+                    ch == '\n'
+                        || chars
+                            .get(i + 1)
+                            .map_or(true, |&c| c.is_whitespace() || pause_of(c).is_some())
+                }
+            };
         if !is_break {
             cur.push(ch);
             i += 1;
@@ -1571,6 +1729,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn quoted_words_are_spoken() {
+        // Regression (found by the round-trip harness): "'last" classified as
+        // punctuation because of its leading quote and was silently dropped.
+        let dict: HashMap<String, String> = serde_json::from_slice(CMUDICT_BYTES).unwrap();
+        let word_set: HashSet<String> = dict.keys().cloned().collect();
+        let ph = EnglishPhonemizer::new_with_hashmap(dict);
+        let quoted = phonemize(&ph, None, &word_set, "the 'last mile' stuff").unwrap();
+        let plain = phonemize(&ph, None, &word_set, "the last mile stuff").unwrap();
+        assert_eq!(quoted, plain);
+    }
+
+    #[test]
     fn cardinals() {
         assert_eq!(say_cardinal(0), "zero");
         assert_eq!(say_cardinal(7), "seven");
@@ -1591,7 +1761,17 @@ mod tests {
     #[test]
     fn normalize() {
         assert_eq!(normalize_numbers("I have 3 apples"), "I have three apples");
-        assert_eq!(normalize_numbers("in 2026."), "in two thousand twenty six.");
+        // Bare 4-digit numbers read as years.
+        assert_eq!(normalize_numbers("in 2026."), "in twenty twenty six.");
+        assert_eq!(normalize_numbers("since 1980"), "since nineteen eighty");
+        assert_eq!(normalize_numbers("in 1905"), "in nineteen oh five");
+        assert_eq!(normalize_numbers("in 2007"), "in two thousand seven");
+        // Magnitude suffixes.
+        assert_eq!(normalize_numbers("$10B fund"), "ten billion dollars fund");
+        assert_eq!(normalize_numbers("a $1.5M house"), "a one point five million dollars house");
+        assert_eq!(normalize_numbers("200k users"), "two hundred thousand users");
+        // A glued letter separates instead of fusing ("10x" -> "ten x").
+        assert_eq!(normalize_numbers("10x faster"), "ten x faster");
         assert_eq!(normalize_numbers("1,000 items"), "one thousand items");
         assert_eq!(normalize_numbers("$50"), "fifty dollars");
         assert_eq!(

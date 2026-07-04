@@ -17,6 +17,13 @@ fn main() {
     let grammar_bundled = grammar_files.iter().all(|f| grammar_dir.join(f).exists());
     if grammar_bundled {
         println!("cargo:rustc-cfg=grammar_neural_bundled");
+    } else {
+        println!(
+            "cargo:warning=grammar model files missing in data/grammar/ — grammar \
+             correction will be a NO-OP in this build (regenerate: python3 \
+             scripts/download_t5_grammar_onnx.py --output-dir src-tauri/data/grammar/ \
+             --version 0.0.1)"
+        );
     }
     for f in &grammar_files {
         println!("cargo:rerun-if-changed=data/grammar/{f}");
@@ -54,6 +61,19 @@ fn main() {
     if target_os != "android" && (target_os == "macos" || target_os == "linux") {
         cc::Build::new().file("abort_guard.c").compile("abort_guard");
         println!("cargo:rerun-if-changed=abort_guard.c");
+
+        // The host sherpa-onnx prebuilt references espeak symbols from its
+        // TTS path (which Verba never uses; our TTS is piper.rs + ort,
+        // espeak-free). Stub them so the library links on the host — this is
+        // what lets `cargo test --lib` and host bins run at all.
+        // The sherpa prebuilt uses the pre-cxx11 std::string ABI; the stub's
+        // mangled names must match or the linker keeps looking.
+        cc::Build::new()
+            .cpp(true)
+            .define("_GLIBCXX_USE_CXX11_ABI", "0")
+            .file("host_stubs.cpp")
+            .compile("host_stubs");
+        println!("cargo:rerun-if-changed=host_stubs.cpp");
     }
 
     if target_os == "android" {

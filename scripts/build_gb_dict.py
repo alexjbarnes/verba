@@ -13,13 +13,19 @@ Output: {"word": "kəmpjˈuːtə", ...} — final IPA strings in espeak style
 guaranteed to exist in the target model's phoneme_id_map.
 
 Usage:
-    build_gb_dict.py WIKIPRON.tsv MODEL.onnx.json CMUDICT.json OUT.json [FREQ.txt]
+    build_gb_dict.py WIKIPRON.tsv MODEL.onnx.json CMUDICT.json OUT.json [FREQ.txt] [PIPER_RS]
 
 With FREQ.txt (word-frequency list, "word count" per line) and espeak-ng on
 PATH, the most frequent entries are validated against espeak en-gb-x-rp:
 entries whose consonant skeleton disagrees are DROPPED (they fall through to
 the app's US+transform path). espeak output is never copied into the output —
 it is a dev-time oracle only, so nothing GPL-derived ships.
+
+With PIPER_RS (path to src-tauri/src/piper.rs), words that have a curated
+PRONUNCIATION_OVERRIDES entry are EXCLUDED from the output: Wiktionary often
+carries a colliding sense ("ai" the sloth, "eval" as ˈiːvəl) or default
+stress, and the curated override + RP transform is the intended source for
+those words.
 """
 
 import json
@@ -196,10 +202,17 @@ def apply_stress(tokens, word, cmudict):
     diphthong pair (aɪ, əʊ, iə...), not a new syllable — count units, not
     tokens, or stress alignment against CMU drifts on every diphthong word.
     """
-    vowel_idx = [
-        i for i, t in enumerate(tokens)
-        if t[0] in VOWELS and (i == 0 or tokens[i - 1][0] not in VOWELS)
-    ]
+    # A vowel token continues the previous unit ONLY as a diphthong tail
+    # (ɪ/ʊ/ə: aɪ, əʊ, iə...). Any other adjacent vowel is hiatus and starts a
+    # new syllable — "re.al.i.ty" (iː æ) must count as separate units or the
+    # CMU stress transfer lands on the wrong vowel.
+    vowel_idx = []
+    for i, t in enumerate(tokens):
+        if t[0] not in VOWELS:
+            continue
+        prev_vowel = i > 0 and tokens[i - 1][0] in VOWELS
+        if not prev_vowel or t not in ("ɪ", "ʊ", "ə"):
+            vowel_idx.append(i)
     if not vowel_idx:
         return tokens
     marks = {}
@@ -229,17 +242,41 @@ def main():
     id_map = set(json.load(open(model_json))["phoneme_id_map"].keys())
     cmudict = {k.lower(): v for k, v in json.load(open(cmu_path)).items()}
 
+    # Curated override words: exclude from the GB dict (the override + RP
+    # transform is the intended pronunciation) and use their ARPAbet for
+    # stress transfer elsewhere.
+    override_words = set()
+    piper_rs = sys.argv[6] if len(sys.argv) > 6 else None
+    if piper_rs:
+        src = open(piper_rs, encoding="utf-8").read()
+        block = re.search(r"const PRONUNCIATION_OVERRIDES.*?\n\];", src, re.S).group(0)
+        for w, arpa in re.findall(r'\("([a-z0-9\']+)",\s*"([A-Z0-9 ]+)"\)', block):
+            override_words.add(w)
+            cmudict.setdefault(w, arpa)
+        print(f"excluding {len(override_words)} curated override words")
+
+    # Group case-aware: a capitalized Wiktionary entry is usually a proper
+    # noun homograph ("Said" the name, "Side" the Turkish city) — when the
+    # exact-lowercase spelling has its own entries, those win outright;
+    # capitalized entries are used only for words Wiktionary capitalizes
+    # (place names etc. with no lowercase entry).
     variants = defaultdict(list)
+    cap_variants = defaultdict(list)
     for line in open(wik_path, encoding="utf-8"):
         parts = line.rstrip("\n").split("\t")
         if len(parts) != 2:
             continue
-        word = parts[0].lower()
-        if not WORD_RE.match(word) or word in FUNCTION_WORDS:
+        raw = parts[0]
+        word = raw.lower()
+        if not WORD_RE.match(word) or word in FUNCTION_WORDS or word in override_words:
             continue
         tokens = normalize_tokens(parts[1].split(" "))
-        if tokens:
-            variants[word].append(tokens)
+        if not tokens:
+            continue
+        (variants if raw == word else cap_variants)[word].append(tokens)
+    for word, cands in cap_variants.items():
+        if word not in variants:
+            variants[word] = cands
 
     out = {}
     dropped_symbols = defaultdict(int)
@@ -260,30 +297,75 @@ def main():
             stressed_from_cmu += 1
         out[word] = final
 
-    # Optional espeak sweep: drop frequent entries whose consonant skeleton
-    # disagrees with espeak en-gb-x-rp (single-entry landmines have no variant
-    # to out-score). Drop-only — nothing from espeak is written to the output.
+    # espeak validation sweep over every frequency-list word in the dict:
+    # compare FULL phones (stress stripped, benign notation normalized), not
+    # just consonants — the consonant-only version was blind to homograph
+    # junk like "side"=siːdeɪ (the Turkish city) whose consonants match. For
+    # a mismatched word, re-pick the wikipron variant closest to espeak; if
+    # even the best variant is far off, drop the entry (the US+transform path
+    # takes it). Selection/dropping only — espeak strings never ship.
     freq_path = sys.argv[5] if len(sys.argv) > 5 else None
     if freq_path and shutil.which("espeak-ng"):
+        def comparable(s):
+            s = s.replace("ˈ", "").replace("ˌ", "")
+            s = s.replace("̩", "ə").replace("ɐ", "ə").replace("ʌ", "ə")
+            s = s.replace("ɪ", "i").replace("iː", "i").replace("ː", "")
+            return s
+
+        def dist(a, b):
+            a, b = comparable(a), comparable(b)
+            if a == b:
+                return 0
+            m, n = len(a), len(b)
+            row = list(range(n + 1))
+            for i2 in range(1, m + 1):
+                prev, row[0] = row[0], i2
+                for j in range(1, n + 1):
+                    cur = min(
+                        row[j] + 1, row[j - 1] + 1,
+                        prev + (a[i2 - 1] != b[j - 1]),
+                    )
+                    prev, row[j] = row[j], cur
+            return row[n]
+
         frequent = []
         with open(freq_path, encoding="utf-8") as f:
             for line in f:
                 w = line.split(" ")[0]
                 if w in out:
                     frequent.append(w)
-                if len(frequent) >= 5000:
-                    break
         proc = subprocess.run(
             ["espeak-ng", "-v", "en-gb-x-rp", "--ipa", "-q"],
             input="\n".join(frequent), capture_output=True, text=True,
         )
         esp = [l.strip().replace(" ", "") for l in proc.stdout.strip().split("\n")]
-        swept = 0
-        for w, e in zip(frequent, esp):
-            if cons_skeleton_ipa(out[w]) != cons_skeleton_ipa(e):
-                del out[w]
-                swept += 1
-        print(f"espeak sweep: dropped {swept} of {len(frequent)} frequent entries")
+        repicked = swept = 0
+        if len(esp) != len(frequent):
+            print(f"espeak sweep SKIPPED: line mismatch ({len(esp)} vs {len(frequent)})")
+        else:
+            for w, e in zip(frequent, esp):
+                # Always pick the variant closest to espeak — a slightly-off
+                # variant can sit under the drop threshold while a better one
+                # exists ("produce" pɹədˈus vs the also-listed pɹədjˈuːs).
+                best, best_d = out[w], dist(out[w], e)
+                if len(variants[w]) > 1:
+                    for cand in variants[w]:
+                        final = "".join(apply_stress(list(cand), w, cmudict))
+                        if final == out[w] or any(ch not in id_map for ch in final):
+                            continue
+                        dc = dist(final, e)
+                        if dc < best_d:
+                            best, best_d = final, dc
+                    if best != out[w]:
+                        out[w] = best
+                        repicked += 1
+                # Strict drop threshold: one phone in a short word is a
+                # different word ("work" wøːk vs wɜːk). Benign notation deltas
+                # are collapsed by comparable(), so surviving distance is real.
+                if best_d > len(comparable(e)) // 5:
+                    del out[w]
+                    swept += 1
+            print(f"espeak sweep over {len(frequent)} words: re-picked {repicked}, dropped {swept}")
 
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(out, f, ensure_ascii=False, separators=(",", ":"))

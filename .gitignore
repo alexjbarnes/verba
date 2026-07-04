@@ -65,3 +65,4 @@ sym_shape_infer_temp.onnx
 # Local agent tooling (machine-specific, never committed)
 .claude/
 .graphene/
+__pycache__/

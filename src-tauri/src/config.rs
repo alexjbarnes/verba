@@ -118,6 +118,7 @@ mod tests {
             haptic_feedback: false,
             tts_favourite_sids: vec![3, 7],
             tts_voice: "7".into(),
+            tts_model: "tts-piper-alba".into(),
             tts_voice_speeds: HashMap::from([("7".to_string(), 0.75f32)]),
         };
 

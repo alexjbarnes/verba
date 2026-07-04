@@ -544,7 +544,21 @@ pub(crate) fn split_sentences(text: &str) -> Vec<String> {
         }
 
         current.push(ch);
-        let is_end = matches!(ch, '.' | '!' | '?') && chars.peek().map_or(true, |c| c.is_whitespace());
+        // Dots inside single-letter abbreviations ("i.e.", "e.g.", "U.S.")
+        // don't end a sentence (same guard as piper::split_for_pauses).
+        let abbrev_dot = ch == '.' && {
+            let mut it = current.chars().rev();
+            it.next();
+            match it.next() {
+                Some(prev) if prev.is_alphabetic() => {
+                    it.next().map_or(true, |b| !b.is_alphanumeric())
+                }
+                _ => false,
+            }
+        };
+        let is_end = !abbrev_dot
+            && matches!(ch, '.' | '!' | '?')
+            && chars.peek().map_or(true, |c| c.is_whitespace());
         if is_end {
             let trimmed = current.trim().to_string();
             if !trimmed.is_empty() {

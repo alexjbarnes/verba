@@ -12,7 +12,9 @@ mod mispronunciations;
 mod models;
 #[cfg(desktop)]
 mod paste;
-mod piper;
+// Public for host-side tooling (src/bin/tts_roundtrip.rs drives the real
+// synthesis pipeline for the pronunciation regression harness).
+pub mod piper;
 mod player;
 pub mod postprocess;
 #[cfg(desktop)]
