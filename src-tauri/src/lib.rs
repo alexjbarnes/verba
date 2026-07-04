@@ -728,6 +728,7 @@ fn library_add(
     url: Option<String>,
     feed_id: Option<String>,
     guid: Option<String>,
+    published: Option<String>,
 ) -> Result<library::LibraryItem, String> {
     let body = body.trim().to_string();
     if body.is_empty() {
@@ -739,6 +740,7 @@ fn library_add(
         url.unwrap_or_default(),
         feed_id.unwrap_or_default(),
         guid.unwrap_or_default(),
+        published.unwrap_or_default(),
     ))
 }
 

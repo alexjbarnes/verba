@@ -37,6 +37,10 @@ pub struct LibraryItem {
     /// Feed entry key, for exact provenance.
     #[serde(default)]
     pub guid: String,
+    /// Article publication date as given by the source (feed pubDate or the
+    /// page's published-time metadata), "" when unknown. Display only.
+    #[serde(default)]
+    pub published: String,
 }
 
 pub struct Library {
@@ -81,6 +85,7 @@ impl Library {
         url: String,
         feed_id: String,
         guid: String,
+        published: String,
     ) -> LibraryItem {
         let title = if title.trim().is_empty() {
             Self::derive_title(&body)
@@ -99,6 +104,7 @@ impl Library {
             url,
             feed_id,
             guid,
+            published,
         };
         let mut items = self.items.lock().unwrap();
         items.push(item.clone());
@@ -196,9 +202,9 @@ mod tests {
     #[test]
     fn add_uses_explicit_title_then_derives() {
         let lib = Library { items: Mutex::new(vec![]) };
-        let a = lib.add("My Title".into(), "some body".into(), String::new(), String::new(), String::new());
+        let a = lib.add("My Title".into(), "some body".into(), String::new(), String::new(), String::new(), String::new());
         assert_eq!(a.title, "My Title");
-        let b = lib.add("  ".into(), "First line\nsecond".into(), String::new(), String::new(), String::new());
+        let b = lib.add("  ".into(), "First line\nsecond".into(), String::new(), String::new(), String::new(), String::new());
         assert_eq!(b.title, "First line");
         assert_ne!(a.id, b.id);
         assert_eq!(lib.items.lock().unwrap().len(), 2);
@@ -207,8 +213,8 @@ mod tests {
     #[test]
     fn delete_removes_by_id() {
         let lib = Library { items: Mutex::new(vec![]) };
-        let a = lib.add("t".into(), "one".into(), String::new(), String::new(), String::new());
-        lib.add("t".into(), "two".into(), String::new(), String::new(), String::new());
+        let a = lib.add("t".into(), "one".into(), String::new(), String::new(), String::new(), String::new());
+        lib.add("t".into(), "two".into(), String::new(), String::new(), String::new(), String::new());
         lib.delete(&a.id);
         let items = lib.items.lock().unwrap();
         assert_eq!(items.len(), 1);
@@ -218,7 +224,7 @@ mod tests {
     #[test]
     fn set_progress_updates_item() {
         let lib = Library { items: Mutex::new(vec![]) };
-        let a = lib.add("t".into(), "body".into(), String::new(), String::new(), String::new());
+        let a = lib.add("t".into(), "body".into(), String::new(), String::new(), String::new(), String::new());
         lib.set_progress(&a.id, 42);
         assert_eq!(lib.items.lock().unwrap()[0].progress, 42);
     }

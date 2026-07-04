@@ -39,6 +39,14 @@ const GB_PRONUNCIATION_OVERRIDES: &[(&str, &str)] = &[
     ("scheduled", "ʃˈɛdjuːld"),
     ("scheduling", "ʃˈɛdjuːlɪŋ"),
     ("z", "zˈɛd"),
+    // GB dictionary entries that shadow the US path with a bad variant or a
+    // mis-transferred stress (the GB lookup wins, so these must be fixed here,
+    // not in PRONUNCIATION_OVERRIDES). espeak-en-gb-x-rp-verified forms.
+    ("dig", "dˈɪɡ"),
+    ("microsoft", "mˈaɪkɹəsˌɒft"),
+    ("weaponization", "wˌɛpənaɪzˈeɪʃən"),
+    ("recursive", "ɹɪkˈɜːsɪv"),
+    ("recursively", "ɹɪkˈɜːsɪvlɪ"),
 ];
 
 /// Piper `.onnx.json` sidecar: audio params, speaker count, phoneme id map and
@@ -126,7 +134,7 @@ pub fn model_fingerprint(model_path: &str) -> String {
 /// Bump when data/gb_dict.json (or the RP transform) changes pronunciations:
 /// GB models' cached audio embeds the old phoneme stream, so their cache keys
 /// must roll without invalidating US models' caches.
-const GB_DICT_VERSION: u32 = 2;
+const GB_DICT_VERSION: u32 = 3;
 
 /// True when the sidecar declares a GB espeak voice (same check as engine load).
 fn config_is_gb(config_path: &str) -> bool {
@@ -515,6 +523,37 @@ const PRONUNCIATION_OVERRIDES: &[(&str, &str)] = &[
     ("trillionaire", "T R IH2 L Y AH0 N EH1 R"),
     ("unquenchable", "AH0 N K W EH1 N CH AH0 B AH0 L"),
     ("vexation", "V EH0 K S EY1 SH AH0 N"),
+    // Reported 2026-07-04. OOV proper nouns/tech terms, plus two words CMUdict
+    // stresses oddly (microsoft on -soft, mythos absent entirely).
+    ("gvisor", "JH IY1 V AY2 Z ER0"),
+    ("microvm", "M AY1 K R OW0 V IY2 EH1 M"),
+    ("microvms", "M AY1 K R OW0 V IY2 EH1 M Z"),
+    ("mythos", "M IH1 TH AA2 S"),
+    ("microsoft", "M AY1 K R OW0 S AO2 F T"),
+    ("weaponization", "W EH2 P AH0 N AH0 Z EY1 SH AH0 N"),
+    ("weaponize", "W EH1 P AH0 N AY2 Z"),
+    ("weaponized", "W EH1 P AH0 N AY2 Z D"),
+    ("colocate", "K OW1 L OW0 K EY2 T"),
+    ("colocated", "K OW1 L OW0 K EY2 T IH0 D"),
+    ("colocating", "K OW1 L OW0 K EY2 T IH0 NG"),
+    ("colocation", "K OW2 L OW0 K EY1 SH AH0 N"),
+    ("tabular", "T AE1 B Y AH0 L ER0"),
+    ("currant", "K AH1 R AH0 N T"),
+    ("currants", "K AH1 R AH0 N T S"),
+    ("redcurrant", "R EH1 D K AH2 R AH0 N T"),
+    ("redcurrants", "R EH1 D K AH2 R AH0 N T S"),
+    ("blackcurrant", "B L AE1 K K AH2 R AH0 N T"),
+    ("blackcurrants", "B L AE1 K K AH2 R AH0 N T S"),
+    ("recursive", "R IH0 K ER1 S IH0 V"),
+    ("recursively", "R IH0 K ER1 S IH0 V L IY0"),
+    ("recursion", "R IH0 K ER1 ZH AH0 N"),
+    ("rationalist", "R AE1 SH AH0 N AH0 L IH2 S T"),
+    ("rationalists", "R AE1 SH AH0 N AH0 L IH2 S T S"),
+    ("totalize", "T OW1 T AH0 L AY2 Z"),
+    ("totalizing", "T OW1 T AH0 L AY2 Z IH0 NG"),
+    ("commoditize", "K AH0 M AA1 D AH0 T AY2 Z"),
+    ("commoditized", "K AH0 M AA1 D AH0 T AY2 Z D"),
+    ("commoditizing", "K AH0 M AA1 D AH0 T AY2 Z IH0 NG"),
 ];
 
 /// Expand each (possibly multi-codepoint, like "ɑː" or "iː") token into
@@ -682,6 +721,11 @@ fn normalize_numbers(text: &str) -> String {
         if percent {
             out.push_str(" percent");
         }
+        // A letter glued to the number ("10x", "1990s") would fuse with the
+        // spelled-out form ("tenx") and turn OOV; separate it.
+        if chars.get(i).is_some_and(|c| c.is_ascii_alphabetic()) {
+            out.push(' ');
+        }
     }
     out
 }
@@ -722,6 +766,45 @@ fn split_tokens(text: &str) -> Vec<String> {
     }
     if !cur.is_empty() {
         out.push(cur);
+    }
+    out
+}
+
+/// All-caps initialisms that collide with ordinary dictionary words: "US"
+/// would otherwise read as the pronoun "us", "IT" as "it". Case is the only
+/// signal, so these are spelled letter-by-letter before the dict lookup.
+const SPELLED_ACRONYMS: &[&str] = &[
+    "us", "uk", "eu", "un", "tv", "id", "os", "ip", "ui", "ux", "pr", "hr",
+];
+
+/// Prefixes tried against an OOV word ("unpatched" -> un + patched). The
+/// compound splitter requires both halves >= 3 chars, which two-letter
+/// prefixes fail. Each is pronounced via its own dictionary entry, so only
+/// prefixes whose standalone word sounds like the prefix qualify ("re" is in
+/// the dict as the musical "ray" — excluded). Longest first so "under" wins
+/// over "un".
+const OOV_PREFIXES: &[&str] = &[
+    "under", "over", "multi", "anti", "non", "pre", "mis", "sub", "un", "co",
+];
+
+/// Respell British forms the dictionary only has in US spelling (-ise/-our):
+/// candidates to retry before falling back to splitting/spelling. Only OOV
+/// words reach this, so common words ("hour", "course") are never touched.
+fn british_respellings(word: &str) -> Vec<String> {
+    let w = word.to_lowercase();
+    let mut out = Vec::new();
+    for (suf, rep) in [
+        ("isation", "ization"), ("isations", "izations"),
+        ("ising", "izing"), ("ised", "ized"), ("ises", "izes"),
+        ("iser", "izer"), ("isers", "izers"), ("ise", "ize"),
+        ("ysing", "yzing"), ("ysed", "yzed"), ("yses", "yzes"), ("yse", "yze"),
+    ] {
+        if let Some(stem) = w.strip_suffix(suf) {
+            out.push(format!("{stem}{rep}"));
+        }
+    }
+    if let Some(i) = w.find("our") {
+        out.push(format!("{}or{}", &w[..i], &w[i + 3..]));
     }
     out
 }
@@ -767,6 +850,17 @@ fn phonemize(
         Ok(pt)
     };
 
+    // Letter-by-letter spelling, RP-adjusted for GB models (letter names like
+    // R carry rhotic vowels otherwise).
+    let spell = |w: &str| -> Vec<String> {
+        let t = spell_word(w);
+        if gb.is_some() {
+            crate::gb_english::us_to_rp(t)
+        } else {
+            t
+        }
+    };
+
     let pieces = split_tokens(text);
     let mut tokens: Vec<String> = Vec::new();
     let mut first = true;
@@ -775,7 +869,15 @@ fn phonemize(
         let is_word = piece.chars().next().map(|c| c.is_alphanumeric()).unwrap_or(false);
 
         let mut p_tokens: Vec<String> = if is_word {
-            let mut pt = phonemize_word(piece)?;
+            let all_caps =
+                piece.chars().count() >= 2 && piece.chars().all(|c| c.is_ascii_uppercase());
+            let mut pt = if all_caps
+                && SPELLED_ACRONYMS.contains(&piece.to_ascii_lowercase().as_str())
+            {
+                spell(piece)
+            } else {
+                phonemize_word(piece)?
+            };
             if is_oov(&pt) {
                 let mut replaced = false;
                 // Possessive of an OOV word ("Claude's", "Anthropic's"): the base
@@ -806,13 +908,51 @@ fn phonemize(
                         let base: String = ch[..n - 1].iter().collect();
                         let mut b = phonemize_word(&base)?;
                         if is_oov(&b) {
-                            b = spell_word(&base);
+                            b = spell(&base);
                         }
                         if !b.is_empty() {
                             b.push("z".to_string());
                             pt = b;
                             replaced = true;
                         }
+                    }
+                }
+                // British spelling the dict only has in US form ("sterilised",
+                // "neighbour"): respell and retry before splitting/spelling.
+                if !replaced {
+                    for cand in british_respellings(piece) {
+                        let b = phonemize_word(&cand)?;
+                        if !is_oov(&b) {
+                            pt = b;
+                            replaced = true;
+                            break;
+                        }
+                    }
+                }
+                // Common prefix + dictionary word ("unpatched", "colocating").
+                // Keep the base word's stress primary and demote the prefix's,
+                // so it reads as one word stressed on the stem.
+                if !replaced {
+                    let lower = piece.to_lowercase();
+                    for prefix in OOV_PREFIXES {
+                        let Some(rest) = lower.strip_prefix(prefix) else { continue };
+                        if rest.chars().count() < 3 {
+                            continue;
+                        }
+                        let mut p = phonemize_word(prefix)?;
+                        let r = phonemize_word(rest)?;
+                        if is_oov(&p) || is_oov(&r) {
+                            continue;
+                        }
+                        for t in p.iter_mut() {
+                            if t == "\u{02C8}" {
+                                *t = "\u{02CC}".to_string();
+                            }
+                        }
+                        p.extend(r);
+                        pt = p;
+                        replaced = true;
+                        break;
                     }
                 }
                 // Else split a glued compound into two dictionary words and
@@ -846,7 +986,7 @@ fn phonemize(
                     }
                 }
                 if !replaced {
-                    let spelled = spell_word(piece);
+                    let spelled = spell(piece);
                     if !spelled.is_empty() {
                         pt = spelled;
                     }

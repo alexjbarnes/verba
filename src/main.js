@@ -2273,6 +2273,9 @@ async function loadLibrary() {
     let meta = pct >= 100 ? 'Finished'
       : pct > 0 ? `${pct}% · ${fmtMins(leftMs)} left`
       : fmtMins(totalMs);
+    // Publication date, when the source provided one.
+    const pub = fmtPubDate(it.published);
+    if (pub) meta += ` · ${pub}`;
     // Feed provenance: source badge (feed title, else hostname once the feed
     // is deleted) and a NEW chip until the article is first listened to.
     if (it.feed_id) {
@@ -2337,9 +2340,24 @@ function extractArticle(html, baseUrl) {
     ? new Readability(doc).parse()
     : null;
   if (article && article.textContent && article.textContent.trim().length > 50) {
-    return { title: (article.title || '').trim(), body: article.textContent.trim() };
+    return {
+      title: (article.title || '').trim(),
+      body: article.textContent.trim(),
+      published: (article.publishedTime || '').trim(),
+    };
   }
   return null;
+}
+
+// Short display form of an article's publication date: "12 Jun", with the
+// year added once it isn't the current one. '' for unknown/unparseable.
+function fmtPubDate(s) {
+  if (!s) return '';
+  const d = new Date(s);
+  if (isNaN(d.getTime())) return '';
+  const opts = { day: 'numeric', month: 'short' };
+  if (d.getFullYear() !== new Date().getFullYear()) opts.year = 'numeric';
+  return d.toLocaleDateString(undefined, opts);
 }
 
 // Handle text shared to the app from elsewhere. If it contains a URL, fetch the
@@ -2356,6 +2374,7 @@ async function importSharedText(text) {
   try {
     let title = null;
     let body = raw;
+    let published = null;
     if (url) {
       showToast('Fetching article…');
       let html;
@@ -2370,6 +2389,7 @@ async function importSharedText(text) {
         if (article) {
           title = article.title || url;
           body = article.body;
+          published = article.published || null;
         } else {
           showToast('No readable article found');
           return;
@@ -2381,7 +2401,7 @@ async function importSharedText(text) {
     }
     let item;
     try {
-      item = await invoke('library_add', { title, body, url: url || null });
+      item = await invoke('library_add', { title, body, url: url || null, published });
     } catch (err) {
       showToast('Save failed: ' + err);
       return;
@@ -2576,6 +2596,10 @@ let pollingFeeds = false;
 let browsingFeed = null;
 // Entries parsed this session, per feed id, backing the browse view.
 const sessionEntries = {};
+// Browse-view pagination state per feed id: {page, nextUrl, exhausted}.
+// Historical pages are display + manual-add only — they never touch
+// seen-tracking or auto-import (those work on the feed's first page).
+const feedPaging = {};
 
 // Cloudflare-style browser checks 403 the app's HTTP client outright (the TLS
 // fingerprint gives it away, headers don't help). Fall back to a hidden
@@ -2673,11 +2697,22 @@ function parseFeedXml(xml, feedUrl) {
     return { key, title, link, date, dateMs, contentHtml };
   };
 
+  // RFC 5005-style pagination: a feed-level link rel="next" pointing at the
+  // next (older) page. Resolved against the feed URL.
+  const nextLink = () => {
+    for (const l of doc.querySelectorAll('link[rel="next"][href]')) {
+      if (!l.closest('item') && !l.closest('entry')) {
+        return resolveLink(l.getAttribute('href'));
+      }
+    }
+    return '';
+  };
   const rssItems = Array.from(doc.querySelectorAll('channel > item'));
   if (rssItems.length || doc.querySelector('channel > title')) {
     return {
       title: text(doc, 'channel > title'),
       entries: rssItems.map(el => entryOf(el, false)).filter(e => e.key),
+      next: nextLink(),
     };
   }
   const atomEntries = Array.from(doc.querySelectorAll('entry'));
@@ -2685,6 +2720,7 @@ function parseFeedXml(xml, feedUrl) {
     return {
       title: text(doc, 'feed > title'),
       entries: atomEntries.map(el => entryOf(el, true)).filter(e => e.key),
+      next: nextLink(),
     };
   }
   return null;
@@ -2748,6 +2784,38 @@ async function discoverFeed(pageUrl, pageHtml) {
   return null;
 }
 
+// Fetch the next (older) page of a feed for the browse view. Strategy: the
+// feed's declared rel="next" archive link when present, else WordPress's
+// ?paged=N convention. A backend that supports neither either 404s or
+// returns the same entries again — both read as "no older articles".
+async function loadMoreEntries(feed) {
+  const paging = feedPaging[feed.id] || { page: 1, nextUrl: '', exhausted: false };
+  feedPaging[feed.id] = paging;
+  const known = new Set((sessionEntries[feed.id] || []).map(e => e.key));
+  let url = paging.nextUrl;
+  if (!url) {
+    const sep = feed.url.includes('?') ? '&' : '?';
+    url = `${feed.url}${sep}paged=${paging.page + 1}`;
+  }
+  try {
+    const r = await fetchFeedBody(url, '', '');
+    const parsed = parseFeedXml(r.body, url);
+    const fresh = parsed ? parsed.entries.filter(e => !known.has(e.key)) : [];
+    if (!fresh.length) {
+      paging.exhausted = true;
+      showToast('No older articles available');
+      return;
+    }
+    sessionEntries[feed.id] = (sessionEntries[feed.id] || []).concat(fresh);
+    paging.page += 1;
+    paging.nextUrl = (parsed && parsed.next) || '';
+  } catch (_) {
+    // Out of pages (WordPress 404s past the end) or the site can't paginate.
+    paging.exhausted = true;
+    showToast('No older articles available');
+  }
+}
+
 // Import one feed entry into the library. Prefers the feed's embedded HTML
 // when it's substantial (full-content feeds like Substack); otherwise fetches
 // the article page. Throws when nothing readable can be extracted.
@@ -2776,6 +2844,8 @@ async function importFeedEntry(feed, entry) {
     url: entry.link || null,
     feedId: feed.id,
     guid: entry.key,
+    // Feed entry date first (authoritative); page metadata as fallback.
+    published: entry.date || article.published || null,
   });
 }
 
@@ -2809,6 +2879,7 @@ async function checkFeed(feed, libUrls, opts) {
   const parsed = parseFeedXml(r.body, feed.url);
   if (!parsed) throw 'not a valid feed';
   sessionEntries[feed.id] = parsed.entries;
+  feedPaging[feed.id] = { page: 1, nextUrl: parsed.next || '', exhausted: false };
   const seen = new Set(feed.seen || []);
   const fresh = parsed.entries.filter(en => !seen.has(en.key));
   let imported = 0;
@@ -2953,7 +3024,10 @@ async function openFeedEntries(id) {
       try {
         const r = await fetchFeedBody(feed.url, '', '');
         const parsed = parseFeedXml(r.body, feed.url);
-        if (parsed) sessionEntries[feed.id] = parsed.entries;
+        if (parsed) {
+          sessionEntries[feed.id] = parsed.entries;
+          feedPaging[feed.id] = { page: 1, nextUrl: parsed.next || '', exhausted: false };
+        }
       } catch (_) {}
     }
   }
@@ -2978,9 +3052,13 @@ async function renderFeedEntries(feed) {
       if (u) byUrl[u] = it.id;
     });
   } catch (_) {}
+  const paging = feedPaging[feed.id];
+  const canLoadMore = !!paging && !paging.exhausted;
   listEl.innerHTML = entries.map((e, i) => {
     const itemId = byGuid[e.key] || (e.link ? byUrl[normArticleUrl(e.link)] : '') || '';
-    const date = e.date ? formatTimestamp(e.date) : '';
+    // Date-only, with the year once it isn't current — a 2011 archive post
+    // must not read like this week's.
+    const date = e.date ? (fmtPubDate(e.date) || formatTimestamp(e.date)) : '';
     const right = itemId
       ? '<span class="text-[11px] font-semibold text-primary shrink-0">Added</span>'
       : `<button class="feed-entry-add shrink-0 text-on-surface-variant hover:text-primary transition-colors p-1 cursor-pointer" data-i="${i}">
@@ -2994,7 +3072,18 @@ async function renderFeedEntries(feed) {
       </div>
       ${right}
     </div>`;
-  }).join('');
+  }).join('') + (canLoadMore
+    ? '<button id="feed-load-more" class="w-full text-xs font-semibold text-on-surface-variant hover:text-primary transition-colors px-4 py-3 rounded-xl bg-surface-container-low hover:bg-surface-container-high cursor-pointer">Load older articles</button>'
+    : '');
+  const moreBtn = document.getElementById('feed-load-more');
+  if (moreBtn) {
+    moreBtn.addEventListener('click', async () => {
+      moreBtn.disabled = true;
+      moreBtn.textContent = 'Loading…';
+      await loadMoreEntries(feed);
+      renderFeedEntries(feed);
+    });
+  }
   listEl.querySelectorAll('.feed-entry').forEach(el => {
     el.addEventListener('click', (e) => {
       if (e.target.closest('.feed-entry-add')) return;
@@ -3068,6 +3157,7 @@ document.getElementById('feed-add-save').addEventListener('click', async () => {
       seen: parsed.entries.map(e => e.key),
     });
     sessionEntries[feed.id] = parsed.entries;
+    feedPaging[feed.id] = { page: 1, nextUrl: parsed.next || '', exhausted: false };
     closeFeedAddModal();
     loadFeeds();
   } catch (err) {

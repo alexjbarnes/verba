@@ -13,11 +13,19 @@ Output: {"word": "kəmpjˈuːtə", ...} — final IPA strings in espeak style
 guaranteed to exist in the target model's phoneme_id_map.
 
 Usage:
-    build_gb_dict.py WIKIPRON.tsv MODEL.onnx.json CMUDICT.json OUT.json
+    build_gb_dict.py WIKIPRON.tsv MODEL.onnx.json CMUDICT.json OUT.json [FREQ.txt]
+
+With FREQ.txt (word-frequency list, "word count" per line) and espeak-ng on
+PATH, the most frequent entries are validated against espeak en-gb-x-rp:
+entries whose consonant skeleton disagrees are DROPPED (they fall through to
+the app's US+transform path). espeak output is never copied into the output —
+it is a dev-time oracle only, so nothing GPL-derived ships.
 """
 
 import json
 import re
+import shutil
+import subprocess
 import sys
 import unicodedata
 from collections import defaultdict
@@ -118,10 +126,34 @@ def normalize_tokens(tokens):
     return out
 
 
-def variant_score(tokens):
+# ARPAbet consonants -> IPA, for comparing consonant skeletons across dicts.
+ARPA_CONS = {
+    "B": "b", "CH": "tʃ", "D": "d", "DH": "ð", "F": "f", "G": "ɡ", "HH": "h",
+    "JH": "dʒ", "K": "k", "L": "l", "M": "m", "N": "n", "NG": "ŋ", "P": "p",
+    "R": "ɹ", "S": "s", "SH": "ʃ", "T": "t", "TH": "θ", "V": "v", "W": "w",
+    "Y": "j", "Z": "z", "ZH": "ʒ",
+}
+IPA_CONS = set("".join(ARPA_CONS.values()))
+
+
+def cons_skeleton_ipa(s):
+    return "".join(ch for ch in s if ch in IPA_CONS)
+
+
+def cons_skeleton_cmu(arpabet):
+    return "".join(ARPA_CONS.get(re.sub(r"[0-2]$", "", t), "") for t in arpabet.split())
+
+
+def variant_score(tokens, cmu_entry=None):
     """Lower is better: prefer plainly-RP transcriptions over dialect variants."""
     joined = "".join(tokens)
     score = 0
+    # Variants whose consonants disagree with the US dictionary are usually
+    # scrape noise or an obscure regionalism (wikipron's first "dig" entry is
+    # d ɪ d͡ʒ). Consonants rarely differ between the dialects, so agreement
+    # with CMU is a strong signal when the word has one.
+    if cmu_entry and cons_skeleton_ipa(joined) != cons_skeleton_cmu(cmu_entry):
+        score += 15
     for bad in ("ɚ", "ɝ", "ɹ̩", "ᵻ"):
         score += joined.count(bad) * 10
     # Narrow-transcription variants (aspiration, dental marks) are noise the
@@ -214,7 +246,7 @@ def main():
     dropped_words = 0
     stressed_from_cmu = 0
     for word, cands in variants.items():
-        cands.sort(key=variant_score)
+        cands.sort(key=lambda t: variant_score(t, cmudict.get(word)))
         tokens = cands[0]
         tokens = apply_stress(tokens, word, cmudict)
         final = "".join(tokens)
@@ -227,6 +259,31 @@ def main():
         if word in cmudict:
             stressed_from_cmu += 1
         out[word] = final
+
+    # Optional espeak sweep: drop frequent entries whose consonant skeleton
+    # disagrees with espeak en-gb-x-rp (single-entry landmines have no variant
+    # to out-score). Drop-only — nothing from espeak is written to the output.
+    freq_path = sys.argv[5] if len(sys.argv) > 5 else None
+    if freq_path and shutil.which("espeak-ng"):
+        frequent = []
+        with open(freq_path, encoding="utf-8") as f:
+            for line in f:
+                w = line.split(" ")[0]
+                if w in out:
+                    frequent.append(w)
+                if len(frequent) >= 5000:
+                    break
+        proc = subprocess.run(
+            ["espeak-ng", "-v", "en-gb-x-rp", "--ipa", "-q"],
+            input="\n".join(frequent), capture_output=True, text=True,
+        )
+        esp = [l.strip().replace(" ", "") for l in proc.stdout.strip().split("\n")]
+        swept = 0
+        for w, e in zip(frequent, esp):
+            if cons_skeleton_ipa(out[w]) != cons_skeleton_ipa(e):
+                del out[w]
+                swept += 1
+        print(f"espeak sweep: dropped {swept} of {len(frequent)} frequent entries")
 
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(out, f, ensure_ascii=False, separators=(",", ":"))
