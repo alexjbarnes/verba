@@ -54,6 +54,9 @@ const GB_PRONUNCIATION_OVERRIDES: &[(&str, &str)] = &[
     ("ridiculously", "ɹɪdˈɪkjʊləslɪ"),
     ("rubberneck", "ɹˈʌbənˌɛk"),
     ("rubbernecking", "ɹˈʌbənˌɛkɪŋ"),
+    // Reported 2026-07-05: the GB dict's "we're" is a bad wikipron entry (wˈɐ,
+    // ~"wuh"). Fix to the NEAR vowel like here/near/fear (hˈiə/nˈiə/fˈiə).
+    ("we're", "wˈiə"),
 ];
 
 /// Piper `.onnx.json` sidecar: audio params, speaker count, phoneme id map and
@@ -151,7 +154,7 @@ pub fn model_fingerprint(model_path: &str) -> String {
 /// Bump when data/gb_dict.json (or the RP transform) changes pronunciations:
 /// GB models' cached audio embeds the old phoneme stream, so their cache keys
 /// must roll without invalidating US models' caches.
-const GB_DICT_VERSION: u32 = 7;
+const GB_DICT_VERSION: u32 = 8;
 
 /// True when the sidecar declares a GB espeak voice (same check as engine load).
 fn config_is_gb(config_path: &str) -> bool {
@@ -175,7 +178,7 @@ fn config_is_gb(config_path: &str) -> bool {
 /// this so they can never disagree.
 /// Bump when pronunciation logic changes for ALL locales (heteronym rules,
 /// tokenizer fixes) so cached audio regenerates with the new readings.
-const PRON_VERSION: u32 = 4;
+const PRON_VERSION: u32 = 5;
 
 pub fn cache_fingerprint(model_path: &str, config_path: &str) -> String {
     let fp = model_fingerprint(model_path);
@@ -584,6 +587,36 @@ const PRONUNCIATION_OVERRIDES: &[(&str, &str)] = &[
     // Found by the round-trip harness 2026-07-04 ("elon" was being spelled
     // out letter-by-letter — heard as "yellow in").
     ("elon", "IY1 L AA2 N"),
+    // Reported 2026-07-05 (alba + jenny). All OOV -> the phonemizer was spelling
+    // them letter-by-letter ("R-E-Q-U-E-U-I-N-G"). Built from morphemes (queue,
+    // monetary/monetize) or pinned proper/brand forms. The generated/trickery/
+    // separate reports were a separate us_to_rp linking-r bug (fixed there), not
+    // OOV — not listed here. layoff(s)/Claude/monetize/utils were CHECKED and are
+    // already correct on GB (not touched).
+    ("requeue", "R IY0 K Y UW1"),
+    ("requeued", "R IY0 K Y UW1 D"),
+    ("requeues", "R IY0 K Y UW1 Z"),
+    ("requeuing", "R IY0 K Y UW1 IH0 NG"),
+    ("homunculus", "HH OW0 M AH1 NG K Y AH0 L AH0 S"),
+    ("homunculi", "HH OW0 M AH1 NG K Y AH0 L AY0"),
+    ("computability", "K AH0 M P Y UW2 T AH0 B IH1 L AH0 T IY0"),
+    ("monetize", "M AA1 N AH0 T AY2 Z"),
+    ("monetized", "M AA1 N AH0 T AY2 Z D"),
+    ("monetizes", "M AA1 N AH0 T AY2 Z IH0 Z"),
+    ("monetizing", "M AA1 N AH0 T AY2 Z IH0 NG"),
+    ("monetization", "M AA2 N AH0 T AH0 Z EY1 SH AH0 N"),
+    ("unmonetized", "AH0 N M AA1 N AH0 T AY2 Z D"),
+    // Tech terms mixing a word with letters, or dev tools CMUdict predates.
+    ("async", "EY1 S IH0 NG K"),
+    ("vscode", "V IY1 EH1 S K OW1 D"),
+    ("synthid", "S IH1 N TH AY2 D IY2"),
+    ("sqlite", "EH1 S K Y UW1 EH1 L AY2 T"),
+    // Plural of the acronym "ID": the generic acronym-plural rule found the dict
+    // word "id" (Freudian /ɪd/) for the base and produced "idz". Pin the plural.
+    ("ids", "AY1 D IY1 Z"),
+    // Expansion target for "Ms." (normalize_text). The GB dict has "mizz" (mˈɪz)
+    // but US would spell it out, so pin the US reading too.
+    ("mizz", "M IH1 Z"),
 ];
 
 /// Expand each (possibly multi-codepoint, like "ɑː" or "iː") token into
@@ -863,6 +896,18 @@ fn normalize_text(text: &str) -> String {
         .replace("I.e.", "i e")
         .replace("e.g.", "e g")
         .replace("E.g.", "e g");
+    // Honorific abbreviations: the dict stores "Dr" as "drive" ("Dr. Hinton" ->
+    // "Drive Hinton") and spells the rest letter-by-letter. Expand the
+    // unambiguous ones to words. TRADEOFF: a street "Dr." (Drive) also becomes
+    // "Doctor", but that's vanishingly rare in the article prose this reads.
+    // "Mrs." before "Mr." isn't required (the dot makes them non-overlapping)
+    // but keeps intent obvious.
+    let text = text
+        .replace("Dr.", "Doctor")
+        .replace("Mrs.", "Missus")
+        .replace("Mr.", "Mister")
+        .replace("Ms.", "Mizz")
+        .replace("Prof.", "Professor");
     text.chars()
         .map(|c| match c {
             '\u{2019}' | '\u{2018}' | '\u{02BC}' => '\'',
@@ -1785,6 +1830,73 @@ mod tests {
         }
         let word_set: HashSet<String> = dict.keys().cloned().collect();
         (EnglishPhonemizer::new_with_hashmap(dict), word_set)
+    }
+
+    // Build the GB engine path exactly as load() does: US dict + overrides +
+    // heteronyms feed the phonemizer; the separate GB dict + GB overrides win on
+    // lookup, with the US->RP transform behind them. Returns the pieces phonemize
+    // needs for the gb=Some(...) path.
+    fn gb_engine() -> (EnglishPhonemizer, HashSet<String>, HashMap<String, String>) {
+        let mut dict: HashMap<String, String> = serde_json::from_slice(CMUDICT_BYTES).unwrap();
+        for (w, p) in PRONUNCIATION_OVERRIDES { dict.insert(w.to_string(), p.to_string()); }
+        for (k, p) in crate::heteronyms::PRONS { dict.insert(crate::heteronyms::dict_key(k), p.to_string()); }
+        let mut word_set: HashSet<String> = dict.keys().cloned().collect();
+        let ph = EnglishPhonemizer::new_with_hashmap(dict);
+        let mut gb: HashMap<String, String> = serde_json::from_slice(GB_DICT_BYTES).unwrap();
+        for (w, ipa) in GB_PRONUNCIATION_OVERRIDES { gb.insert(w.to_string(), ipa.to_string()); }
+        word_set.extend(gb.keys().cloned());
+        (ph, word_set, gb)
+    }
+
+    // Diagnostic for triaging a batch of reported mispronunciations: prints the
+    // GB + US phonemes each word resolves to so OOV-spelling vs bad-dict-entry vs
+    // transform bugs can be told apart. Kept (ignored) for the next batch.
+    #[test]
+    #[ignore = "diagnostic probe; run with --ignored --nocapture"]
+    fn probe_reported_words() {
+        let (ph, ws, gb) = gb_engine();
+        for w in std::env::var("PROBE_WORDS").unwrap_or_default().split(',') {
+            if w.is_empty() { continue; }
+            let norm = normalize_text(w);
+            let gbp = phonemize(&ph, Some(&gb), &ws, &norm).unwrap().join("");
+            let usp = phonemize(&ph, None, &ws, &norm).unwrap().join("");
+            eprintln!("{w:<16} gb={gbp:<30} us={usp}");
+        }
+    }
+
+    // Honorific abbreviations expand to words (the dict reads "Dr" as "drive").
+    #[test]
+    fn honorific_expansion() {
+        assert_eq!(normalize_text("Dr. Hinton wrote"), "Doctor Hinton wrote");
+        assert_eq!(normalize_text("Mr. and Mrs. Jones"), "Mister and Missus Jones");
+        assert_eq!(normalize_text("Ms. Chen"), "Mizz Chen");
+        assert_eq!(normalize_text("Prof. Lee"), "Professor Lee");
+    }
+
+    // Regression for the 2026-07-05 report batch: each word must reach real
+    // phonemes on the GB voices (alba/jenny), not a letter-by-letter spelling or
+    // a bad dict entry. Exact GB IPA pinned so a dict/override/transform change
+    // that reverts one fails here. (The linking-r transform fix has its own unit
+    // test in gb_english; this checks it through the full engine path.)
+    #[test]
+    fn reported_words_reach_phonemes_gb() {
+        let (ph, ws, gb) = gb_engine();
+        let say = |t: &str| phonemize(&ph, Some(&gb), &ws, &normalize_text(t)).unwrap().join("");
+        // OOV words that used to spell out letter-by-letter.
+        assert_eq!(say("requeuing"), "ɹiːkjˈuːɪŋ");
+        assert_eq!(say("homunculi"), "həʊmˈʌŋkjəlaɪ");
+        assert_eq!(say("async"), "ˈeɪsɪŋk");
+        assert_eq!(say("VSCode"), "vˈiːˈɛskˈəʊd");
+        assert_eq!(say("IDs"), "ˈaɪdˈiːz");
+        // Bad GB dict entry, fixed via GB override.
+        assert_eq!(say("We're"), "wˈiə");
+        // Honorific expansion reaches "Doctor", not "Drive".
+        assert_eq!(say("Dr. Hinton"), "dˈɒktɐ hˈɪntən");
+        // Linking-r class fix, through the engine (was dʒˈɛnəˌeɪtəd / sˈɛpəət).
+        assert_eq!(say("generated"), "dʒˈɛnəɹˌeɪtəd");
+        assert_eq!(say("separate"), "sˈɛpəɹət");
+        // Heteronym disambiguation for "separate" still holds after the r fix.
+        assert_eq!(say("to separate the files"), "tuː sˈɛpəɹˌeɪt ðɐ fˈaɪlz");
     }
 
     #[test]

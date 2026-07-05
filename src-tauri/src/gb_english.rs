@@ -91,6 +91,15 @@ pub fn us_to_rp(tokens: Vec<String>) -> Vec<String> {
             continue;
         }
         match c {
+            // R-coloured schwa. Before a vowel RP keeps a linking /r/
+            // ("generated" dʒˈɛnɚˌeɪtəd -> dʒˈɛnəɹˌeɪtəd, "trickery" -> tɹˈɪkəɹɪ);
+            // word-finally or before a consonant the r folds away ("letter" ->
+            // lˈɛtə). The standalone-ɹ rules above already gate on prevocalic;
+            // this arm was dropping the r unconditionally.
+            'ɚ' if prevocalic(i) => {
+                out.push('ə');
+                out.push('ɹ');
+            }
             'ɚ' => out.push('ə'),
             'o' if i + 1 < n && chars[i + 1] == 'ʊ' => {
                 out.push('ə');
@@ -158,5 +167,17 @@ mod tests {
     #[test]
     fn final_schwa_not_after_vowel() {
         assert_eq!(rp("faɪɚ"), "faɪə"); // fire: diphthong tail stays ə
+    }
+
+    #[test]
+    fn linking_r_in_rhotic_schwa() {
+        // ɚ before a vowel keeps the RP linking /r/ (was dropped, giving
+        // "gen-uh-ated", "trick-uh-ee", "sep-uh-ate").
+        assert_eq!(rp("dʒˈɛnɚˌeɪtəd"), "dʒˈɛnəɹˌeɪtəd"); // generated
+        assert_eq!(rp("tɹˈɪkɚiː"), "tɹˈɪkəɹɪ"); // trickery (+ happY tensing)
+        assert_eq!(rp("sˈɛpɚət"), "sˈɛpəɹət"); // separate (adjective)
+        // Word-final / preconsonantal ɚ still folds to a plain schwa.
+        assert_eq!(rp("lˈɛtɚ"), "lˈɛtɐ"); // letter
+        assert_eq!(rp("fˈɑːðɚz"), "fˈɑːðəz"); // fathers: ɚ before consonant
     }
 }
