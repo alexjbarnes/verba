@@ -48,6 +48,12 @@
                 android:resource="@xml/accessibility_service_config" />
         </service>
 
+        <!-- Reader-notification action buttons (play/pause, seek, exit). Not
+             exported: only this app's own PendingIntents target it. -->
+        <receiver
+            android:name=".MediaActionReceiver"
+            android:exported="false" />
+
         <provider
           android:name="androidx.core.content.FileProvider"
           android:authorities="${applicationId}.fileprovider"

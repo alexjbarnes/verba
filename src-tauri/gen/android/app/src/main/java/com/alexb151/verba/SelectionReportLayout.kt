@@ -49,6 +49,7 @@ class SelectionReportLayout(context: Context) : FrameLayout(context) {
                 // (floating) toolbar only, and de-dup in case the menu was not cleared.
                 if (mode.type == ActionMode.TYPE_FLOATING) {
                     menu.removeItem(REPORT_MENU_ID)
+                    if (!VerbaApp.reportMenuEnabled) return changed
                     menu.add(Menu.NONE, REPORT_MENU_ID, Menu.CATEGORY_SECONDARY, "Report mispronunciation")
                         // Handle the click on the item itself. Routing through the wrapped
                         // callback's onActionItemClicked fired for the smart-selection menu

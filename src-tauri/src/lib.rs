@@ -100,6 +100,17 @@ fn report_mispronunciation(word: String) {
     mispronunciations::Mispronunciations::global().add(word);
 }
 
+/// Show/hide "Report mispronunciation" in Android's text-selection toolbar.
+/// Off by default; the frontend enables it only while the reading panel is
+/// showing so the item doesn't appear when selecting text elsewhere.
+#[tauri::command]
+fn set_report_menu_enabled(enabled: bool) {
+    #[cfg(target_os = "android")]
+    android_set_report_menu_enabled(enabled);
+    #[cfg(not(target_os = "android"))]
+    let _ = enabled;
+}
+
 /// Android ACTION_PROCESS_TEXT bridge: ProcessTextActivity forwards the word the
 /// user selected + tapped "Report mispronunciation" on. Mirrors the VerbaApp TTS
 /// JNI exports.
@@ -218,6 +229,33 @@ fn android_copy_to_clipboard(text: &str) {
     );
 }
 
+/// Push the real reader title to VerbaApp for the notification + lock-screen
+/// metadata. Needs its own JString (unlike the primitive-only args
+/// android_call_static below takes), so it attaches and builds the call the
+/// same way android_copy_to_clipboard does.
+#[cfg(target_os = "android")]
+fn android_set_media_title(title: &str) {
+    use jni::objects::JValue;
+    let vm = match GLOBAL_JVM.get() {
+        Some(v) => v,
+        None => return,
+    };
+    let class_ref = match VERBA_APP_CLASS.get() {
+        Some(c) => c,
+        None => return,
+    };
+    let mut env = match vm.attach_current_thread_permanently() {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    let Ok(title_str) = env.new_string(title) else { return };
+    let class = unsafe { jni::objects::JClass::from_raw(class_ref.as_raw()) };
+    let _ = env.call_static_method(
+        class, "setMediaTitle", "(Ljava/lang/String;)V",
+        &[JValue::Object(&*title_str)],
+    );
+}
+
 #[cfg(target_os = "android")]
 fn android_call_static(method: &str, sig: &str, args: &[jni::objects::JValue]) {
     let vm = match GLOBAL_JVM.get() {
@@ -254,6 +292,12 @@ pub fn android_start_media_session() {
 #[cfg(target_os = "android")]
 pub fn android_stop_media_session() {
     android_call_static("stopMediaSession", "()V", &[]);
+}
+
+#[cfg(target_os = "android")]
+fn android_set_report_menu_enabled(enabled: bool) {
+    use jni::objects::JValue;
+    android_call_static("setReportMenuEnabled", "(Z)V", &[JValue::Bool(enabled as u8)]);
 }
 
 /// Ask Kotlin to load a URL in a hidden WebView (challenge-passing fallback
@@ -663,6 +707,17 @@ fn tts_resume() {
 #[tauri::command]
 fn tts_seek(position_ms: u64) {
     tts::seek_ms(position_ms);
+}
+
+/// Set the title shown in the Android media notification + lock-screen
+/// metadata (e.g. the article/chapter title). No-op on desktop, which has no
+/// media-session notification to label.
+#[tauri::command]
+fn media_set_title(title: String) {
+    #[cfg(target_os = "android")]
+    android_set_media_title(&title);
+    #[cfg(not(target_os = "android"))]
+    let _ = title;
 }
 
 #[tauri::command]
@@ -1311,6 +1366,7 @@ pub fn run() {
             export_mispronunciations,
             clear_mispronunciations,
             report_mispronunciation,
+            set_report_menu_enabled,
             copy_to_clipboard,
             get_vocab_entries,
             add_vocab_entry,
@@ -1335,6 +1391,7 @@ pub fn run() {
             tts_pause,
             tts_resume,
             tts_seek,
+            media_set_title,
             tts_list_custom_voices,
             tts_model_speakers,
             tts_cache_status,

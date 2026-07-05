@@ -172,11 +172,35 @@ pub fn pause() {
     if let Some(player) = lock_player().as_ref() {
         player.pause();
     }
+    #[cfg(target_os = "android")]
+    push_media_session_update();
 }
 
 pub fn resume() {
     if let Some(player) = lock_player().as_ref() {
         player.resume();
+    }
+    #[cfg(target_os = "android")]
+    push_media_session_update();
+}
+
+/// Push an immediate media-session update on a pause/resume transition, rather
+/// than waiting for the generator thread's next ~250ms position tick (see
+/// build_position_callback). Without this, the system's cached
+/// PlaybackStateCompat can briefly disagree with the real state; a headphone
+/// button pressed in that window decodes against the stale state and can
+/// re-fire the action already in effect (e.g. pause again) instead of toggling
+/// it, which is felt as "resume doesn't restart playback."
+#[cfg(target_os = "android")]
+fn push_media_session_update() {
+    let sr = (sample_rate() as u64).max(1);
+    if let Some(player) = lock_player().as_ref() {
+        let pos = player.position();
+        let position_ms = (pos.cursor as u64 * 1000) / sr;
+        let buffered_ms = (pos.buffered as u64 * 1000) / sr;
+        let estimated_ms = (pos.estimated as u64 * 1000) / sr;
+        let duration_ms = if pos.gen_done { buffered_ms } else { estimated_ms.max(buffered_ms) };
+        crate::android_update_media_session(position_ms as i64, duration_ms as i64, pos.paused);
     }
 }
 
