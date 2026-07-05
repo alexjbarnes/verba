@@ -62,6 +62,52 @@ pub const PRONS: &[(&str, &str)] = &[
     ("appropriate1", "AH0 P R OW1 P R IY0 AH0 T"), ("appropriate2", "AH0 P R OW1 P R IY0 EY2 T"),
     ("approximate1", "AH0 P R AA1 K S AH0 M AH0 T"), ("approximate2", "AH0 P R AA1 K S AH0 M EY2 T"),
     ("coordinate1", "K OW0 AO1 R D AH0 N AH0 T"), ("coordinate2", "K OW0 AO1 R D AH0 N EY2 T"),
+    ("intimate1", "IH1 N T AH0 M AH0 T"), ("intimate2", "IH1 N T AH0 M EY2 T"),
+    ("animate1", "AE1 N AH0 M AH0 T"), ("animate2", "AE1 N AH0 M EY2 T"),
+    ("articulate1", "AA0 R T IH1 K Y AH0 L AH0 T"), ("articulate2", "AA0 R T IH1 K Y AH0 L EY2 T"),
+    ("subordinate1", "S AH0 B AO1 R D AH0 N AH0 T"), ("subordinate2", "S AH0 B AO1 R D AH0 N EY2 T"),
+    // Noun/adj (key1, first-syllable stress) vs verb (key2, second-syllable
+    // stress). Default is the noun/adj; verb fires on a to/modal/pronoun signal.
+    ("object1", "AA1 B JH EH0 K T"), ("object2", "AH0 B JH EH1 K T"),
+    ("subject1", "S AH1 B JH IH0 K T"), ("subject2", "S AH0 B JH EH1 K T"),
+    ("project1", "P R AA1 JH EH0 K T"), ("project2", "P R AH0 JH EH1 K T"),
+    ("projects1", "P R AA1 JH EH0 K T S"), ("projects2", "P R AH0 JH EH1 K T S"),
+    ("contract1", "K AA1 N T R AE2 K T"), ("contract2", "K AH0 N T R AE1 K T"),
+    ("conduct1", "K AA1 N D AH0 K T"), ("conduct2", "K AH0 N D AH1 K T"),
+    ("conflict1", "K AA1 N F L IH0 K T"), ("conflict2", "K AH0 N F L IH1 K T"),
+    ("contrast1", "K AA1 N T R AE0 S T"), ("contrast2", "K AH0 N T R AE1 S T"),
+    ("increase1", "IH1 N K R IY0 S"), ("increase2", "IH0 N K R IY1 S"),
+    ("decrease1", "D IY1 K R IY0 S"), ("decrease2", "D IH0 K R IY1 S"),
+    ("permit1", "P ER1 M IH0 T"), ("permit2", "P ER0 M IH1 T"),
+    ("progress1", "P R AA1 G R EH2 S"), ("progress2", "P R AH0 G R EH1 S"),
+    ("protest1", "P R OW1 T EH2 S T"), ("protest2", "P R AH0 T EH1 S T"),
+    ("rebel1", "R EH1 B AH0 L"), ("rebel2", "R IH0 B EH1 L"),
+    ("refund1", "R IY1 F AH0 N D"), ("refund2", "R IH0 F AH1 N D"),
+    ("contest1", "K AA1 N T EH0 S T"), ("contest2", "K AH0 N T EH1 S T"),
+    ("convert1", "K AA1 N V ER0 T"), ("convert2", "K AH0 N V ER1 T"),
+    ("export1", "EH1 K S P AO0 R T"), ("export2", "IH0 K S P AO1 R T"),
+    ("exports1", "EH1 K S P AO0 R T S"), ("exports2", "IH0 K S P AO1 R T S"),
+    ("insult1", "IH1 N S AH0 L T"), ("insult2", "IH0 N S AH1 L T"),
+    ("suspect1", "S AH1 S P EH0 K T"), ("suspect2", "S AH0 S P EH1 K T"),
+    ("survey1", "S ER1 V EY0"), ("survey2", "S ER0 V EY1"),
+    ("transport1", "T R AE1 N S P AO0 R T"), ("transport2", "T R AE0 N S P AO1 R T"),
+    ("console1", "K AA1 N S OW0 L"), ("console2", "K AH0 N S OW1 L"),
+    ("compound1", "K AA1 M P AW0 N D"), ("compound2", "K AH0 M P AW1 N D"),
+    ("torment1", "T AO1 R M EH2 N T"), ("torment2", "T AO0 R M EH1 N T"),
+    ("convict1", "K AA1 N V IH0 K T"), ("convict2", "K AH0 N V IH1 K T"),
+    ("discount1", "D IH1 S K AW0 N T"), ("discount2", "D IH0 S K AW1 N T"),
+    ("desert1", "D EH1 Z ER0 T"), ("desert2", "D IH0 Z ER1 T"),
+    ("attribute1", "AE1 T R AH0 B Y UW2 T"), ("attribute2", "AH0 T R IH1 B Y UW0 T"),
+    // Special defaults (see wants_alt for the flip condition):
+    ("content1", "K AA1 N T EH0 N T"), ("content2", "K AH0 N T EH1 N T"),
+    ("perfect1", "P ER1 F IH0 K T"), ("perfect2", "P ER0 F EH1 K T"),
+    ("invalid1", "IH0 N V AE1 L AH0 D"), ("invalid2", "IH1 N V AH0 L AH0 D"),
+    ("combine1", "K AH0 M B AY1 N"), ("combine2", "K AA1 M B AY0 N"),
+    ("resume1", "R IH0 Z UW1 M"), ("resume2", "R EH1 Z AH0 M EY2"),
+    // Voicing pairs: noun /s/ (key1) vs verb /z/ (key2).
+    ("house1", "HH AW1 S"), ("house2", "HH AW1 Z"),
+    ("abuse1", "AH0 B Y UW1 S"), ("abuse2", "AH0 B Y UW1 Z"),
+    ("excuse1", "IH0 K S K Y UW1 S"), ("excuse2", "IH0 K S K Y UW1 Z"),
 ];
 
 /// Words whose noun/adjective form (default) flips to a verb reading after a
@@ -70,7 +116,30 @@ const ATE_FAMILY: &[&str] = &[
     "separate", "estimate", "estimates", "graduate", "graduates", "duplicate",
     "advocate", "advocates", "associate", "delegate", "moderate", "deliberate",
     "elaborate", "aggregate", "alternate", "appropriate", "approximate",
-    "coordinate",
+    "coordinate", "intimate", "animate", "articulate", "subordinate",
+];
+
+// Noun/adj (first-syllable stress) vs verb (second-syllable stress) pairs, all
+// defaulting to the noun/adj and flipping to the verb on a to/modal/pronoun
+// signal. (Words with a non-verb_signal rule are handled explicitly below.)
+const STRESS_NV: &[&str] = &[
+    "object", "subject", "project", "projects", "contract", "conduct",
+    "conflict", "contrast", "increase", "decrease", "permit", "progress",
+    "protest", "rebel", "refund", "contest", "convert", "export", "exports",
+    "insult", "suspect", "survey", "transport", "console", "compound",
+    "torment", "convict", "discount", "desert", "attribute",
+];
+// Content-adjective ("I'm content", "content with") signals.
+const CONTENT_ADJ: &[&str] = &[
+    "am", "is", "are", "was", "were", "be", "been", "feel", "feels", "felt",
+    "seem", "seems", "seemed", "perfectly", "quite", "so", "very", "really",
+    "not", "remain", "remains", "stay",
+];
+// Résumé (CV) signals before "resume".
+const RESUME_CV: &[&str] = &[
+    "a", "your", "my", "his", "her", "their", "our", "update", "updated",
+    "submit", "attach", "attached", "send", "review", "strong", "impressive",
+    "polished", "one-page",
 ];
 
 const NOM_PRONOUN: &[&str] = &["i", "we", "you", "they", "he", "she", "it", "who"];
@@ -185,6 +254,23 @@ fn wants_alt(word: &str, prev: &[&str], next: &[&str]) -> bool {
         "minute" => has(MINUTE_TINY_NOUNS, n1),
         // Past of dive: "he dove into".
         "dove" => has(NOM_PRONOUN, p1) || has(&["and", "then"], p1),
+        // Noun/adj -> verb on a to/modal/pronoun signal (stress shift).
+        w if STRESS_NV.contains(&w) => verb_signal(p1),
+        // "content": default noun /ˈkɒntɛnt/; adjective /kənˈtɛnt/ after a
+        // copula/degree word or before "with".
+        "content" => has(CONTENT_ADJ, p1) || n1 == Some("with"),
+        // "perfect": default adjective; verb /pərˈfɛkt/ on a verb signal.
+        "perfect" => verb_signal(p1),
+        // "invalid": always the adjective /ɪnˈvælɪd/ ("invalid input"). The
+        // noun (a sick person) is archaic; not worth the false-positive risk.
+        "invalid" => false,
+        // "combine": default verb; noun (the farm machine) before "harvester".
+        "combine" => n1 == Some("harvester"),
+        // "resume": default verb (continue); résumé (CV) after a CV signal.
+        "resume" => has(RESUME_CV, p1),
+        // Voicing pairs: default noun /s/; verb /z/ on a verb signal.
+        "house" | "abuse" => verb_signal(p1),
+        "excuse" => verb_signal(p1) || n1 == Some("me") || n1 == Some("my"),
         w if ATE_FAMILY.contains(&w) => verb_signal(p1),
         _ => false,
     }
@@ -194,8 +280,11 @@ fn is_heteronym(word: &str) -> bool {
     matches!(word,
         "read" | "live" | "lives" | "lived" | "lead" | "record" | "records"
         | "present" | "presents" | "use" | "used" | "wound" | "tear" | "tears"
-        | "wind" | "winds" | "close" | "minute" | "dove")
+        | "wind" | "winds" | "close" | "minute" | "dove"
+        | "content" | "perfect" | "invalid" | "combine" | "resume"
+        | "house" | "abuse" | "excuse")
         || ATE_FAMILY.contains(&word)
+        || STRESS_NV.contains(&word)
 }
 
 /// Map piece index -> pseudo dictionary key for every heteronym occurrence
@@ -271,6 +360,48 @@ const KEYS: &[(&str, &str, &str)] = &[
     ("appropriate", "appropriate1", "appropriate2"),
     ("approximate", "approximate1", "approximate2"),
     ("coordinate", "coordinate1", "coordinate2"),
+    ("intimate", "intimate1", "intimate2"),
+    ("animate", "animate1", "animate2"),
+    ("articulate", "articulate1", "articulate2"),
+    ("subordinate", "subordinate1", "subordinate2"),
+    ("object", "object1", "object2"),
+    ("subject", "subject1", "subject2"),
+    ("project", "project1", "project2"),
+    ("projects", "projects1", "projects2"),
+    ("contract", "contract1", "contract2"),
+    ("conduct", "conduct1", "conduct2"),
+    ("conflict", "conflict1", "conflict2"),
+    ("contrast", "contrast1", "contrast2"),
+    ("increase", "increase1", "increase2"),
+    ("decrease", "decrease1", "decrease2"),
+    ("permit", "permit1", "permit2"),
+    ("progress", "progress1", "progress2"),
+    ("protest", "protest1", "protest2"),
+    ("rebel", "rebel1", "rebel2"),
+    ("refund", "refund1", "refund2"),
+    ("contest", "contest1", "contest2"),
+    ("convert", "convert1", "convert2"),
+    ("export", "export1", "export2"),
+    ("exports", "exports1", "exports2"),
+    ("insult", "insult1", "insult2"),
+    ("suspect", "suspect1", "suspect2"),
+    ("survey", "survey1", "survey2"),
+    ("transport", "transport1", "transport2"),
+    ("console", "console1", "console2"),
+    ("compound", "compound1", "compound2"),
+    ("torment", "torment1", "torment2"),
+    ("convict", "convict1", "convict2"),
+    ("discount", "discount1", "discount2"),
+    ("desert", "desert1", "desert2"),
+    ("attribute", "attribute1", "attribute2"),
+    ("content", "content1", "content2"),
+    ("perfect", "perfect1", "perfect2"),
+    ("invalid", "invalid1", "invalid2"),
+    ("combine", "combine1", "combine2"),
+    ("resume", "resume1", "resume2"),
+    ("house", "house1", "house2"),
+    ("abuse", "abuse1", "abuse2"),
+    ("excuse", "excuse1", "excuse2"),
 ];
 
 #[cfg(test)]
@@ -350,6 +481,48 @@ mod tests {
     }
 
     #[test]
+    fn stress_noun_verb_pairs() {
+        // Default = noun (first-stress); verb (second-stress) on a verb signal.
+        assert_eq!(keys_for("a survey of readers"), vec!["survey1"]);
+        assert_eq!(keys_for("we survey the field"), vec!["survey2"]);
+        assert_eq!(keys_for("the suspect fled"), vec!["suspect1"]);
+        assert_eq!(keys_for("I suspect not"), vec!["suspect2"]);
+        assert_eq!(keys_for("a big discount"), vec!["discount1"]);
+        assert_eq!(keys_for("they discount the risk"), vec!["discount2"]);
+        assert_eq!(keys_for("the object on the table"), vec!["object1"]);
+        assert_eq!(keys_for("I object to that"), vec!["object2"]);
+        assert_eq!(keys_for("a permit is required"), vec!["permit1"]);
+        assert_eq!(keys_for("to permit access"), vec!["permit2"]);
+        assert_eq!(keys_for("a modest increase"), vec!["increase1"]);
+        assert_eq!(keys_for("we increase output"), vec!["increase2"]);
+        assert_eq!(keys_for("the subject of the email"), vec!["subject1"]);
+    }
+
+    #[test]
+    fn special_default_heteronyms() {
+        // perfect: adjective by default, verb on a signal.
+        assert_eq!(keys_for("a perfect day"), vec!["perfect1"]);
+        assert_eq!(keys_for("to perfect the craft"), vec!["perfect2"]);
+        // invalid: always the adjective.
+        assert_eq!(keys_for("an invalid argument"), vec!["invalid1"]);
+        assert_eq!(keys_for("the invalid input"), vec!["invalid1"]);
+        // content: noun by default, adjective after a copula / before "with".
+        assert_eq!(keys_for("the content of the page"), vec!["content1"]);
+        assert_eq!(keys_for("I am content with this"), vec!["content2"]);
+        // combine: verb by default; noun before "harvester".
+        assert_eq!(keys_for("combine the ingredients"), vec!["combine1"]);
+        assert_eq!(keys_for("a combine harvester"), vec!["combine2"]);
+        // resume: continue by default; CV after a signal.
+        assert_eq!(keys_for("resume the meeting"), vec!["resume1"]);
+        assert_eq!(keys_for("attach your resume"), vec!["resume2"]);
+        // excuse / house voicing.
+        assert_eq!(keys_for("excuse me"), vec!["excuse2"]);
+        assert_eq!(keys_for("a poor excuse"), vec!["excuse1"]);
+        assert_eq!(keys_for("to house refugees"), vec!["house2"]);
+        assert_eq!(keys_for("the house on the hill"), vec!["house1"]);
+    }
+
+    #[test]
     fn ate_family() {
         assert_eq!(keys_for("a rough estimate of cost"), vec!["estimate1"]);
         assert_eq!(keys_for("we estimate the cost"), vec!["estimate2"]);
@@ -361,7 +534,7 @@ mod tests {
     #[test]
     fn wind_tear_wound_close_minute() {
         assert_eq!(keys_for("the wind was cold"), vec!["wind1"]);
-        assert_eq!(keys_for("wind down the project"), vec!["wind2"]);
+        assert_eq!(keys_for("wind down the road"), vec!["wind2"]);
         assert_eq!(keys_for("tear it down"), vec!["tear1"]);
         assert_eq!(keys_for("tear gas filled the square"), vec!["tear2"]);
         assert_eq!(keys_for("in tears after the match"), vec!["tears2"]);
@@ -384,10 +557,12 @@ mod tests {
 
     #[test]
     fn prons_table_covers_all_keys() {
-        for (_, k1, k2) in KEYS {
-            for k in [k1, k2] {
-                assert!(PRONS.iter().any(|(w, _)| w == k), "missing PRONS for {k}");
-            }
+        let prons: std::collections::HashMap<&str, &str> = PRONS.iter().copied().collect();
+        for (word, k1, k2) in KEYS {
+            let a = prons.get(k1).unwrap_or_else(|| panic!("missing PRONS for {k1}"));
+            let b = prons.get(k2).unwrap_or_else(|| panic!("missing PRONS for {k2}"));
+            // The two readings must actually differ, or the override is a no-op.
+            assert_ne!(a, b, "'{word}': {k1} and {k2} have identical ARPAbet");
         }
         for (_, p) in PRONS {
             for tok in p.split_whitespace() {
