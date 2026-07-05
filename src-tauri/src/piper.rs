@@ -297,6 +297,40 @@ pub fn cache_coverage(
     cov
 }
 
+/// Delete the cached audio for every segment `text` needs, engine-free (same
+/// segmentation as `cache_coverage`, so it targets exactly what `synth_chunk`
+/// would have stored). Used to trim a chapter's audio once playback has moved
+/// past it. Returns the number of entries actually removed — 0 on an
+/// already-cold cache, which is the normal case, not an error. Cache keys
+/// carry no chapter identity (voice, speed, segment text only), so this can
+/// also remove a sentence that's cached for another item; it simply
+/// regenerates there on next play.
+pub fn forget_cached_segments(
+    model_path: &str,
+    config_path: &str,
+    sid: i32,
+    speed: f32,
+    text: &str,
+) -> u32 {
+    let Some((_sample_rate, num_speakers)) = read_piper_meta(config_path) else { return 0 };
+    let model_fp = cache_fingerprint(model_path, config_path);
+    let speed_milli = (speed.max(0.0) * 1000.0).round() as u32;
+    let speaker = clamp_speaker(sid, num_speakers);
+
+    // Same prologue as cache_coverage: replicate synth_chunk's segmentation
+    // exactly so these are the same keys it wrote.
+    let clean = text.replace('\u{0}', " ");
+    let chunks = crate::tts::batch_sentences(crate::tts::split_sentences(&clean), 15, 45);
+    let mut forgotten = 0u32;
+    for (segment, _pause_ms) in chunks.iter().flat_map(|c| split_for_pauses(c)) {
+        let key = crate::tts_cache::key(&model_fp, speaker, speed_milli, &segment);
+        if crate::tts_cache::remove(&key) {
+            forgotten += 1;
+        }
+    }
+    forgotten
+}
+
 /// Build one chunk's PCM + timing straight from the persistent cache, touching
 /// neither the ONNX session nor the phonemizer/encoder — this is what lets
 /// playback of a fully-cached article skip the (multi-second) engine load
@@ -2007,6 +2041,31 @@ mod tests {
         assert_ne!(alba, alan, "same basename+size in different dirs must differ");
         assert!(alba.contains("piper-alba"));
         assert!(alan.contains("piper-alan"));
+    }
+
+    // Regression: the trim path must walk the exact same segments
+    // cache_coverage counts, and must be a no-op (not a panic) when nothing was
+    // ever cached for this text.
+    #[test]
+    fn forget_cached_segments_misses_are_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("model_dur.onnx.json");
+        std::fs::write(&config_path, r#"{"audio":{"sample_rate":22050},"phoneme_id_map":{}}"#).unwrap();
+        let model_path = dir.path().join("piper-test/model_dur.onnx");
+        let model_path = model_path.to_str().unwrap();
+        let config_path = config_path.to_str().unwrap();
+        let text = "Hello, world. This is a cold cache test, with a clause too.";
+
+        let forgotten = forget_cached_segments(model_path, config_path, 0, 1.0, text);
+        assert_eq!(forgotten, 0, "nothing was ever cached, so nothing can be forgotten");
+
+        // Same split cache_coverage counts, so a real trim walks exactly the
+        // segments it reports as (un)cached.
+        let clean = text.replace('\u{0}', " ");
+        let chunks = crate::tts::batch_sentences(crate::tts::split_sentences(&clean), 15, 45);
+        let walked = chunks.iter().flat_map(|c| split_for_pauses(c)).count() as u32;
+        let cov = cache_coverage(model_path, config_path, 0, 1.0, text);
+        assert_eq!(walked, cov.total_segments);
     }
 
     // Regression: grammar_neural commits the ORT environment first (during

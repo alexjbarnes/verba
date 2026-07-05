@@ -1,3 +1,5 @@
+import { markdownToText, countWords, splitIntoParts, parseEpub, parsePdf } from './import.js';
+
 const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
 
@@ -48,7 +50,7 @@ let currentMode = 'speak';
 let activeTab = null;
 
 // Detail views hide the bottom nav (and drop the player bar to the screen edge).
-const DETAIL_PANELS = new Set(['reading', 'feed-entries']);
+const DETAIL_PANELS = new Set(['reading', 'feed-entries', 'book-chapters']);
 
 // Bottom-nav layout per mode. `center` is the prominent circular action button
 // (Listen's Add); `overflow` opens the More sheet.
@@ -1588,6 +1590,11 @@ let ttsVoiceSpeeds = {};
 // Reading view state (Listen library)
 let readingItem = null;
 let readingText = '';
+// Set while a book chapter is open: {id, chapters, current}. `chapters` is the
+// book's ChapterMeta list (word/char counts), `current` the open chapter's
+// index. Null for a plain article — that's the flag openReading/tts-finished
+// branch on to tell a book chapter apart from a whole-article read.
+let bookState = null;
 let readingWords = [];
 let wordTimes = {};
 let genBaseWord = 0;
@@ -1678,6 +1685,14 @@ function estDurationMsForText(text, speed) {
   const paragraphs = (text.match(/\n+/g) || []).length;
   const pauseMs = sentences * 300 + clauses * 150 + paragraphs * 500;
   return Math.round(spokenMs + pauseMs);
+}
+
+// Word-count-only variant of estDurationMsForText, for a book chapter row:
+// only ChapterMeta.words is available there (the chapter body isn't loaded
+// just to render the list), so there's no punctuation to estimate pauses from.
+function estMsForWords(words, speed) {
+  if (!words) return 0;
+  return Math.round(words / SPEAK_WPM * 60000 / (speed || 1));
 }
 
 // Real measured duration once the article has been generated (saved on the
@@ -1856,6 +1871,7 @@ listen('tts-position', (event) => {
 // length next time instead of the estimate. Only a play from the top (genBaseWord
 // 0) measures the whole article; resumes generate just the remainder.
 function maybeSaveMeasuredDuration(p) {
+  if (bookState) return; // duration_ms is whole-item semantics; books use word estimates
   if (!p.gen_done || genBaseWord !== 0 || !readingItem) return;
   if (measuredGenId === genId) return;
   const dur = p.buffered_ms;
@@ -1944,8 +1960,35 @@ function anchorTiming(words, cursor) {
   return cursor;
 }
 
-listen('tts-finished', (event) => {
+listen('tts-finished', async (event) => {
   if (event.payload && event.payload.gen !== genId) return;
+  // A chapter's tts-finished always means chapter end (every startSpeak
+  // slices to the end of readingText) — auto-advance into the next chapter,
+  // or mark the book done on its last one.
+  if (bookState) {
+    const next = bookState.current + 1;
+    if (next < bookState.chapters.length) {
+      // readingItem is still the book's item (openBookChapter set it), so its
+      // title carries over; only current_chapter/progress need to reflect the
+      // chapter that just finished.
+      const item = {
+        id: bookState.id,
+        title: readingItem ? readingItem.title : '',
+        chapters: bookState.chapters,
+        current_chapter: bookState.current,
+        progress: 0,
+      };
+      await openBookChapter(item, next, { autoplay: true });
+    } else {
+      if (readingItem) {
+        readingItem.progress = readingText.length;
+        readingItem.current_chapter = bookState.current;
+      }
+      invoke('book_set_position', { id: bookState.id, chapter: bookState.current, offset: readingText.length }).catch(() => {});
+      resetTtsUI();
+    }
+    return;
+  }
   // Mark the item fully read (100%) and clear the resume point.
   if (readingItem) {
     readingItem.progress = readingText.length;
@@ -2430,7 +2473,25 @@ function saveProgress(force) {
   lastProgressSaveMs = now;
   const offset = currentReadingChar();
   readingItem.progress = offset;
-  invoke('library_set_progress', { id: readingItem.id, progress: offset }).catch(() => {});
+  if (bookState) {
+    invoke('book_set_position', { id: bookState.id, chapter: bookState.current, offset }).catch(() => {});
+  } else {
+    invoke('library_set_progress', { id: readingItem.id, progress: offset }).catch(() => {});
+  }
+}
+
+// A book's overall read fraction, word-weighted across chapters (chapter
+// bodies aren't loaded in the list view, only their ChapterMeta word/char
+// counts): chapters before the current one count fully, the current one
+// counts by its character-offset progress within itself.
+function bookProgress(it) {
+  const totalWords = it.chapters.reduce((sum, c) => sum + c.words, 0);
+  const cur = Math.min(it.current_chapter, it.chapters.length - 1);
+  const wordsBefore = it.chapters.slice(0, cur).reduce((sum, c) => sum + c.words, 0);
+  const curChapter = it.chapters[cur];
+  const progressFrac = curChapter && curChapter.chars ? Math.min(1, it.progress / curChapter.chars) : 0;
+  const wordsRead = wordsBefore + progressFrac * (curChapter ? curChapter.words : 0);
+  return { totalWords, wordsRead, pct: totalWords ? Math.round(wordsRead / totalWords * 100) : 0 };
 }
 
 async function loadLibrary() {
@@ -2444,6 +2505,23 @@ async function loadLibrary() {
   const empty = document.getElementById('lib-empty');
   empty.classList.toggle('hidden', items.length > 0);
   list.innerHTML = items.slice().reverse().map(it => {
+    if (it.chapters && it.chapters.length) {
+      const { totalWords, wordsRead, pct } = bookProgress(it);
+      const chaptersLabel = `${it.chapters.length} chapter${it.chapters.length === 1 ? '' : 's'}`;
+      const meta = pct >= 100 ? `${chaptersLabel} · Finished`
+        : pct > 0 ? `${chaptersLabel} · ${pct}% · ${fmtMins(estMsForWords(totalWords - wordsRead, ttsSpeed))} left`
+        : `${chaptersLabel} · ${fmtMins(estMsForWords(totalWords, ttsSpeed))}`;
+      return `
+      <div class="lib-item flex items-center justify-between gap-3 bg-surface-container-low rounded-xl px-4 py-3 cursor-pointer hover:bg-surface-container-high transition-colors" data-id="${escapeHtml(it.id)}">
+        <div class="min-w-0 flex-1">
+          <div class="text-sm font-medium text-on-surface truncate"><span class="material-symbols-outlined text-sm align-middle mr-1 text-on-surface-variant/70">menu_book</span>${escapeHtml(it.title)}</div>
+          <div class="text-[11px] ${pct >= 100 ? 'text-primary' : 'text-on-surface-variant'} tabular-nums mt-1">${meta}</div>
+        </div>
+        <button class="lib-del shrink-0 text-on-surface-variant/50 hover:text-error transition-colors p-1 cursor-pointer" data-id="${escapeHtml(it.id)}">
+          <span class="material-symbols-outlined text-lg">delete</span>
+        </button>
+      </div>`;
+    }
     const len = (it.body || '').length || 1;
     const prog = Math.max(0, Math.min(len, it.progress || 0));
     const pct = Math.round(prog / len * 100);
@@ -2481,16 +2559,26 @@ async function loadLibrary() {
       </button>
     </div>`;
   }).join('');
+  const bookIds = new Set(items.filter(it => it.chapters && it.chapters.length).map(it => it.id));
   list.querySelectorAll('.lib-item').forEach(el => {
     el.addEventListener('click', (e) => {
       if (e.target.closest('.lib-del')) return;
-      openReading(el.dataset.id);
+      const id = el.dataset.id;
+      if (bookIds.has(id)) openBook(id); else openReading(id);
     });
   });
   list.querySelectorAll('.lib-del').forEach(btn => {
     btn.addEventListener('click', async (e) => {
       e.stopPropagation();
-      await invoke('library_delete', { id: btn.dataset.id });
+      const id = btn.dataset.id;
+      // A book's audio is keyed off its chapter bodies, which library_delete
+      // also removes (books/<id>.json) — forget the cache first or it leaks.
+      if (bookIds.has(id) && ttsModelId) {
+        const voiceVal = ttsVoice || '0';
+        const sid = voiceVal.startsWith('custom:') ? 0 : (parseInt(voiceVal) || 0);
+        await invoke('book_forget_audio', { id, modelId: ttsModelId, sid, speed: ttsSpeed }).catch(() => {});
+      }
+      await invoke('library_delete', { id });
       loadLibrary();
     });
   });
@@ -2598,6 +2686,7 @@ async function importSharedText(text) {
 }
 
 async function openReading(id) {
+  bookState = null; // opening a plain article, not continuing a book chapter
   let item;
   try { item = await invoke('library_get', { id }); }
   catch (err) { showToast('Open failed: ' + err); return; }
@@ -2640,11 +2729,107 @@ async function openReading(id) {
   loadCacheStatus();
 }
 
+// Open a book's chapter list (from a Library row tap).
+async function openBook(id) {
+  let item;
+  try { item = await invoke('library_get', { id }); }
+  catch (err) { showToast('Open failed: ' + err); return; }
+  if (!item) { showToast('Book not found'); return; }
+  document.getElementById('book-chapters-title').textContent = item.title;
+  showPanel('book-chapters');
+  setBottomNavVisible(false); // detail view
+
+  const listEl = document.getElementById('book-chapters-list');
+  listEl.innerHTML = item.chapters.map((ch, idx) => {
+    const done = idx < item.current_chapter;
+    const current = idx === item.current_chapter;
+    const currentChip = current
+      ? '<span class="text-[10px] font-semibold text-primary bg-primary/10 rounded px-1.5 py-0.5 mr-1.5">CURRENT</span>'
+      : '';
+    const doneIcon = done
+      ? '<span class="material-symbols-outlined text-lg text-primary shrink-0">check_circle</span>'
+      : '';
+    return `
+    <div class="lib-item book-chapter-row flex items-center justify-between gap-3 bg-surface-container-low rounded-xl px-4 py-3 cursor-pointer hover:bg-surface-container-high transition-colors" data-idx="${idx}">
+      <div class="min-w-0 flex-1">
+        <div class="text-sm font-medium text-on-surface truncate">${currentChip}${idx + 1}. ${escapeHtml(ch.title || `Chapter ${idx + 1}`)}</div>
+        <div class="text-[11px] text-on-surface-variant tabular-nums mt-1">${fmtMins(estMsForWords(ch.words, ttsSpeed))}</div>
+      </div>
+      ${doneIcon}
+    </div>`;
+  }).join('');
+  listEl.querySelectorAll('.book-chapter-row').forEach(el => {
+    el.addEventListener('click', () => openBookChapter(item, Number(el.dataset.idx)));
+  });
+}
+
+document.getElementById('book-chapters-back').addEventListener('click', () => {
+  navigateTo('library');
+});
+
+// Open one chapter of a book: fetch its body and wire up the reading view
+// (mirrors openReading). `item` is the book's LibraryItem (chapters + the
+// current_chapter/progress it had BEFORE this pick); `idx` the chapter to
+// open. A forward pick (idx > current_chapter) records the new position and
+// trims audio for chapters now more than one behind; a backward pick only
+// records the position (never trims — see book_trim_audio's cache-key note).
+async function openBookChapter(item, idx, { autoplay = false } = {}) {
+  let body;
+  try { body = await invoke('book_chapter', { id: item.id, idx }); }
+  catch (err) { showToast('Could not open chapter: ' + err); return; }
+
+  const forward = idx > item.current_chapter;
+  const changedChapter = idx !== item.current_chapter;
+  bookState = { id: item.id, chapters: item.chapters, current: idx };
+  readingItem = item;
+  readingText = body;
+  activeWord = -1; genBaseWord = 0; timingCursor = 0; wordTimes = {};
+  const chapterTitle = item.chapters[idx].title || `Chapter ${idx + 1}`;
+  document.getElementById('reading-title').textContent = `${item.title} — ${chapterTitle}`;
+  renderReading(readingText);
+  showPanel('reading');
+  setBottomNavVisible(false); // detail view: hide the tab bar, player bar to edge
+
+  // Resume point: only the chapter the book was actually left on carries a
+  // saved offset; any other pick (forward or backward) starts at its top.
+  const prog = changedChapter ? 0 : (item.progress || 0);
+  resumeWord = (prog > 0 && prog < readingText.length) ? wordIndexAtChar(prog) : 0;
+  autoFollow = true;
+  if (resumeWord > 0) setActiveWord(resumeWord);
+
+  ttsStarted = false;
+  setTtsLoading(false);
+  genId++;
+  articleEstMs = estDurationMsForText(readingText, ttsSpeed);
+  const frac = readingText.length ? Math.min(1, prog / readingText.length) : 0;
+  timelineBaseMs = articleEstMs > 0 ? frac * articleEstMs : 0;
+  showPlayerBar();
+  updatePlayerBar({ position_ms: 0, buffered_ms: 0, gen_done: false, paused: true, finished: false });
+
+  await updateTtsPanel();
+  loadCacheStatus();
+
+  if (changedChapter) {
+    invoke('book_set_position', { id: item.id, chapter: idx, offset: 0 }).catch(() => {});
+    if (forward && ttsModelId) {
+      const voiceVal = ttsVoice || '0';
+      const sid = voiceVal.startsWith('custom:') ? 0 : (parseInt(voiceVal) || 0);
+      invoke('book_trim_audio', { id: item.id, modelId: ttsModelId, current: idx, sid, speed: ttsSpeed }).catch(() => {});
+    }
+  }
+
+  if (autoplay) startSpeak(readingText, 0, 0);
+}
+
 document.getElementById('reading-back').addEventListener('click', () => {
   saveProgress(true);
   invoke('tts_stop');
   hidePlayerBar();
-  navigateTo('library');
+  if (bookState) {
+    openBook(bookState.id);
+  } else {
+    navigateTo('library');
+  }
 });
 
 // Tap a word to jump playback there. Ignore taps that finish a text selection
@@ -2833,8 +3018,7 @@ function openModal(el) { el.classList.remove('hidden'); el.classList.add('flex')
 function closeModal(el) { el.classList.add('hidden'); el.classList.remove('flex'); }
 
 // The bottom-nav + button and the Library page button open a source chooser
-// (Text, URL, File, eBook). Text and URL are wired; File/eBook are stubbed
-// until import support lands.
+// (Text, URL, File, eBook).
 function openAddModal() { openModal(addChooserModal); }
 
 function openTextModal() {
@@ -2859,7 +3043,7 @@ addChooserModal.addEventListener('click', (e) => {
   const src = btn.dataset.source;
   if (src === 'text') { closeModal(addChooserModal); openTextModal(); }
   else if (src === 'url') { closeModal(addChooserModal); openUrlModal(); }
-  else { showToast('Coming soon'); } // file, ebook — stubbed
+  else if (src === 'file' || src === 'ebook') { closeModal(addChooserModal); pickImportFile(src); }
 });
 
 document.getElementById('lib-add-cancel').addEventListener('click', closeAddModal);
@@ -2884,6 +3068,89 @@ document.getElementById('add-url-save').addEventListener('click', () => {
   // adds to the library, switches to Listen and opens the reader.
   importSharedText(url);
 });
+
+// ── File / eBook import ──
+
+const importFileInput = document.getElementById('import-file-input');
+
+// Open the OS file/document picker for File (.txt/.md/.pdf) or eBook (.epub).
+// Both extensions AND MIME types are listed in `accept`: on some devices a
+// bare extension whose MIME can't be resolved gets silently dropped by
+// RustWebChromeClient's getValidTypes, narrowing the picker to nothing.
+function pickImportFile(kind) {
+  importFileInput.accept = kind === 'ebook'
+    ? '.epub,application/epub+zip'
+    : '.txt,.md,.markdown,.pdf,text/plain,text/markdown,application/pdf,application/octet-stream';
+  importFileInput.dataset.kind = kind;
+  importFileInput.click();
+}
+
+importFileInput.addEventListener('change', () => {
+  const file = importFileInput.files && importFileInput.files[0];
+  const kind = importFileInput.dataset.kind;
+  importFileInput.value = ''; // let picking the same file again still fire 'change'
+  if (file) importFile(file, kind);
+});
+
+// Import a picked File/eBook. SAF's reported MIME type is unreliable, so
+// parsing is routed by the filename's own extension, not file.type; `kind`
+// (which button was pressed) is only a fallback for an extensionless name.
+// A short result becomes one article like importFeedEntry's shape; a long
+// one (or any EPUB, even a single chapter) becomes a book.
+async function importFile(file, kind) {
+  const name = file.name || 'Untitled';
+  const extMatch = name.match(/\.([^.]+)$/);
+  const ext = extMatch ? extMatch[1].toLowerCase() : (kind === 'ebook' ? 'epub' : 'txt');
+  const titleFromName = name.replace(/\.[^.]+$/, '') || 'Untitled';
+  showToast('Importing…');
+  try {
+    if (ext === 'epub') {
+      const buf = await file.arrayBuffer();
+      let book;
+      try {
+        book = await parseEpub(buf);
+      } catch (err) {
+        showToast('Could not read EPUB: ' + err);
+        return;
+      }
+      const item = await invoke('book_add', { title: book.title || titleFromName, chapters: book.chapters });
+      await loadLibrary();
+      openBook(item.id);
+      showToast('Book added');
+      return;
+    }
+
+    let text;
+    if (ext === 'pdf') {
+      const buf = await file.arrayBuffer();
+      try {
+        text = (await parsePdf(buf)).text;
+      } catch (err) {
+        showToast('Could not read PDF: ' + err);
+        return;
+      }
+    } else {
+      const raw = (await file.text()).replace(/\r\n/g, '\n');
+      text = (ext === 'md' || ext === 'markdown') ? markdownToText(raw) : raw;
+    }
+    if (!text.trim()) { showToast('No text found in file'); return; }
+
+    if (countWords(text) <= 2500) {
+      const item = await invoke('library_add', { title: titleFromName, body: text });
+      await loadLibrary();
+      openReading(item.id);
+      showToast('Text added');
+    } else {
+      const chapters = splitIntoParts(text).map((body, i) => ({ title: `Part ${i + 1}`, body }));
+      const item = await invoke('book_add', { title: titleFromName, chapters });
+      await loadLibrary();
+      openBook(item.id);
+      showToast('Book added');
+    }
+  } catch (err) {
+    showToast('Import failed: ' + err);
+  }
+}
 
 // ── Feeds (RSS subscriptions) ──
 

@@ -321,6 +321,19 @@
     <div id="reading-text" class="flex-1 min-h-0 overflow-y-auto text-base leading-relaxed text-on-surface-variant whitespace-pre-wrap"></div>
   </div>
 
+  <!-- Book chapter list (opened from Library for a book; not a nav item) -->
+  <div id="book-chapters" class="tab-panel hidden flex-1 flex flex-col px-5 py-6 min-h-0">
+    <div class="flex items-center gap-2 mb-3">
+      <button id="book-chapters-back" class="text-on-surface-variant hover:text-on-surface p-1 -ml-1 rounded-lg hover:bg-surface-container-highest transition-colors cursor-pointer">
+        <span class="material-symbols-outlined">arrow_back</span>
+      </button>
+      <h2 id="book-chapters-title" class="text-base font-bold tracking-tight text-on-surface truncate flex-1">Book</h2>
+    </div>
+    <div id="book-chapters-scroll" class="flex-1 min-h-0 overflow-y-auto">
+      <div id="book-chapters-list" class="space-y-2"></div>
+    </div>
+  </div>
+
   <!-- Add source chooser: how to bring text into the library -->
   <div id="add-chooser-modal" class="fixed inset-0 z-50 hidden items-center justify-center bg-black/50 backdrop-blur-sm">
     <div class="bg-surface-container-high rounded-2xl p-5 mx-4 max-w-sm w-full shadow-xl border border-outline-variant/20">
@@ -348,20 +361,20 @@
           <span class="material-symbols-outlined text-[20px] text-on-surface-variant/50">chevron_right</span>
         </button>
         <button class="add-source w-full flex items-center gap-3 p-3 rounded-xl text-left hover:bg-surface-container-highest transition-colors cursor-pointer" data-source="file">
-          <span class="w-10 h-10 shrink-0 flex items-center justify-center rounded-lg bg-surface-container-highest text-on-surface-variant"><span class="material-symbols-outlined text-[22px]">description</span></span>
+          <span class="w-10 h-10 shrink-0 flex items-center justify-center rounded-lg bg-primary/15 text-primary"><span class="material-symbols-outlined text-[22px]">description</span></span>
           <span class="min-w-0 flex-1">
             <span class="block text-sm font-medium text-on-surface">File</span>
-            <span class="block text-xs text-on-surface-variant">Import a text file</span>
+            <span class="block text-xs text-on-surface-variant">Text, Markdown or PDF</span>
           </span>
-          <span class="text-[10px] font-semibold uppercase tracking-wide text-on-surface-variant/70 bg-surface-container-highest px-2 py-0.5 rounded-full">Soon</span>
+          <span class="material-symbols-outlined text-[20px] text-on-surface-variant/50">chevron_right</span>
         </button>
         <button class="add-source w-full flex items-center gap-3 p-3 rounded-xl text-left hover:bg-surface-container-highest transition-colors cursor-pointer" data-source="ebook">
-          <span class="w-10 h-10 shrink-0 flex items-center justify-center rounded-lg bg-surface-container-highest text-on-surface-variant"><span class="material-symbols-outlined text-[22px]">menu_book</span></span>
+          <span class="w-10 h-10 shrink-0 flex items-center justify-center rounded-lg bg-primary/15 text-primary"><span class="material-symbols-outlined text-[22px]">menu_book</span></span>
           <span class="min-w-0 flex-1">
             <span class="block text-sm font-medium text-on-surface">eBook</span>
             <span class="block text-xs text-on-surface-variant">Import an EPUB</span>
           </span>
-          <span class="text-[10px] font-semibold uppercase tracking-wide text-on-surface-variant/70 bg-surface-container-highest px-2 py-0.5 rounded-full">Soon</span>
+          <span class="material-symbols-outlined text-[20px] text-on-surface-variant/50">chevron_right</span>
         </button>
       </div>
     </div>
@@ -392,6 +405,11 @@
       </div>
     </div>
   </div>
+
+  <!-- Hidden picker for File/eBook import; accept + routing set per kind in
+       main.js (pickImportFile). Not shown directly — its click is triggered
+       programmatically from the chooser modal. -->
+  <input id="import-file-input" type="file" class="hidden" />
 
   <!-- Feeds tab (RSS subscriptions) -->
   <div id="feeds" class="tab-panel hidden flex-1 flex flex-col px-5 py-6 min-h-0">

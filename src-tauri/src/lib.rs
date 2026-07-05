@@ -767,6 +767,79 @@ fn library_set_duration(id: String, duration_ms: u64, speed: f32) {
     library::Library::global().set_duration(&id, duration_ms, speed);
 }
 
+// ── Books (chapter-bounded library items) ──
+
+#[tauri::command]
+fn book_add(
+    title: String,
+    chapters: Vec<library::ChapterIn>,
+    url: Option<String>,
+) -> Result<library::LibraryItem, String> {
+    // `all()` is vacuously true on an empty Vec, so this also rejects no chapters.
+    if chapters.iter().all(|c| c.body.trim().is_empty()) {
+        return Err("Empty book".into());
+    }
+    const MAX_BOOK_BYTES: usize = 15 * 1024 * 1024;
+    let total_bytes: usize = chapters.iter().map(|c| c.body.len()).sum();
+    if total_bytes > MAX_BOOK_BYTES {
+        return Err("Book is too large (max 15 MB)".into());
+    }
+    library::Library::global().add_book(title, chapters, url.unwrap_or_default())
+}
+
+#[tauri::command]
+fn book_chapter(id: String, idx: u32) -> Result<String, String> {
+    library::Library::global().chapter(&id, idx)
+}
+
+#[tauri::command]
+fn book_set_position(id: String, chapter: u32, offset: u64) {
+    library::Library::global().set_book_position(&id, chapter, offset);
+}
+
+/// Forward chapter transition: forget cached audio for chapters more than one
+/// behind `current` (keep current + previous). Sync like `tts_cache_status`
+/// (hash + unlink, no ONNX session touched). Cache keys carry no chapter
+/// identity, so this can also remove an identical sentence cached for another
+/// item — it simply regenerates there on next play.
+#[tauri::command]
+fn book_trim_audio(id: String, model_id: String, current: u32, sid: i32, speed: f32) -> u32 {
+    let Some(crate::tts::TtsModelConfig::PiperOrt { model, config }) =
+        models::ModelManager::global().tts_model_config(&model_id)
+    else {
+        return 0;
+    };
+    let lib = library::Library::global();
+    let mut forgotten = 0;
+    for idx in library::chapters_to_forget(current) {
+        if let Ok(body) = lib.chapter(&id, idx) {
+            forgotten += piper::forget_cached_segments(&model, &config, sid, speed, &body);
+        }
+    }
+    forgotten
+}
+
+/// Forget every chapter's cached audio. The frontend calls this BEFORE
+/// `library_delete` — deleting the item also removes the book file `chapter`
+/// reads from.
+#[tauri::command]
+fn book_forget_audio(id: String, model_id: String, sid: i32, speed: f32) -> u32 {
+    let Some(item) = library::Library::global().get(&id) else { return 0 };
+    let Some(crate::tts::TtsModelConfig::PiperOrt { model, config }) =
+        models::ModelManager::global().tts_model_config(&model_id)
+    else {
+        return 0;
+    };
+    let lib = library::Library::global();
+    let mut forgotten = 0;
+    for idx in 0..item.chapters.len() as u32 {
+        if let Ok(body) = lib.chapter(&id, idx) {
+            forgotten += piper::forget_cached_segments(&model, &config, sid, speed, &body);
+        }
+    }
+    forgotten
+}
+
 // ── RSS feeds (Listen reader subscriptions) ──
 
 #[tauri::command]
@@ -1270,6 +1343,11 @@ pub fn run() {
             library_delete,
             library_set_progress,
             library_set_duration,
+            book_add,
+            book_chapter,
+            book_set_position,
+            book_trim_audio,
+            book_forget_audio,
             feeds_list,
             feed_add,
             feed_delete,

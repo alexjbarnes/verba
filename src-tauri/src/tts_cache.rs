@@ -299,6 +299,14 @@ pub fn size_bytes() -> u64 {
     total
 }
 
+/// Delete one cached segment (used by the book trim path to forget specific
+/// chapters' audio). Best effort, like the rest of this module: returns
+/// whether a file was actually removed, never an error.
+pub fn remove(key: &str) -> bool {
+    let Some(dir) = cache_dir() else { return false };
+    std::fs::remove_file(entry_path(dir, key)).is_ok()
+}
+
 /// Delete the whole cache.
 pub fn clear() -> Result<(), String> {
     let Some(dir) = cache_dir() else { return Ok(()) };
@@ -307,4 +315,15 @@ pub fn clear() -> Result<(), String> {
     }
     BYTES_SINCE_SCAN.store(u64::MAX, Ordering::Relaxed);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remove_missing_is_false() {
+        // No entry was ever written for this key, so there's nothing to delete.
+        assert!(!remove("deadbeefdeadbeef"));
+    }
 }

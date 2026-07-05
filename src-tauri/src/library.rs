@@ -1,9 +1,33 @@
-use std::path::PathBuf;
+use std::ops::Range;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
 
 static LIBRARY: OnceLock<Library> = OnceLock::new();
+
+/// One chapter's metadata as stored on `LibraryItem`; the body itself lives in
+/// `books/<id>.json` (see `Library::add_book`), never inline here.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChapterMeta {
+    pub title: String,
+    /// Drives duration estimates.
+    pub words: u32,
+    /// Drives the library list's read percentage only. A Unicode scalar count
+    /// (Rust `chars`), not a JS UTF-16 length, so it can drift slightly from
+    /// the frontend's own char offsets on text with surrogate-pair characters.
+    /// Harmless: resume always goes through the reader's `wordIndexAtChar` over
+    /// the real chapter text, never through this count.
+    pub chars: u32,
+}
+
+/// One chapter as submitted from the frontend. Tauri invoke args only — never
+/// persisted as-is (see `ChapterMeta`).
+#[derive(Deserialize)]
+pub struct ChapterIn {
+    pub title: String,
+    pub body: String,
+}
 
 /// A saved text the user can play back in the Listen reader. Persisted locally
 /// as JSON, mirroring history.rs / snippets.rs.
@@ -16,6 +40,8 @@ pub struct LibraryItem {
     /// Reading progress as a character offset into `body`; 0 until the reader
     /// records progress. Used for resume-where-you-left-off and the library
     /// percentage. A char offset (not ms) so it's stable across speed/voice.
+    /// For a book (`chapters` non-empty), `body` is "" and this is instead an
+    /// offset into `chapters[current_chapter]`'s text (see `set_book_position`).
     #[serde(default, alias = "position_ms")]
     pub progress: u64,
     /// Real measured playback duration (ms) of the whole article, captured once
@@ -41,6 +67,15 @@ pub struct LibraryItem {
     /// page's published-time metadata), "" when unknown. Display only.
     #[serde(default)]
     pub published: String,
+    /// Chapter list for a book; empty for a plain article (whose full text is
+    /// in `body`, which stays "" for a book). Legacy JSON predating this field
+    /// loads as an empty Vec, i.e. a plain article.
+    #[serde(default)]
+    pub chapters: Vec<ChapterMeta>,
+    /// Index into `chapters` of the chapter currently open; meaningless while
+    /// `chapters` is empty.
+    #[serde(default)]
+    pub current_chapter: u32,
 }
 
 pub struct Library {
@@ -105,6 +140,8 @@ impl Library {
             feed_id,
             guid,
             published,
+            chapters: Vec::new(),
+            current_chapter: 0,
         };
         let mut items = self.items.lock().unwrap();
         items.push(item.clone());
@@ -112,6 +149,94 @@ impl Library {
             log::error!("Failed to save library: {e}");
         }
         item
+    }
+
+    /// Create a book: one library entry whose chapters are stored in
+    /// `books/<id>.json` (never inline — `library.json` is fully rewritten on
+    /// every progress save, so an inline multi-chapter body would multiply
+    /// that write). The book file is written FIRST, so a crash between the two
+    /// writes leaves only an orphan file, never a library entry pointing at
+    /// nothing.
+    pub fn add_book(
+        &self,
+        title: String,
+        chapters: Vec<ChapterIn>,
+        url: String,
+    ) -> Result<LibraryItem, String> {
+        let title = if title.trim().is_empty() {
+            chapters
+                .first()
+                .map(|c| {
+                    if c.title.trim().is_empty() {
+                        Self::derive_title(&c.body)
+                    } else {
+                        c.title.trim().to_string()
+                    }
+                })
+                .unwrap_or_else(|| "Untitled".to_string())
+        } else {
+            title.trim().to_string()
+        };
+        let meta: Vec<ChapterMeta> = chapters
+            .iter()
+            .map(|c| ChapterMeta {
+                title: c.title.trim().to_string(),
+                words: c.body.split_whitespace().count() as u32,
+                chars: c.body.chars().count() as u32,
+            })
+            .collect();
+
+        let now = chrono::Utc::now();
+        let id = format!("{:x}", now.timestamp_micros());
+        let bodies: Vec<String> = chapters.into_iter().map(|c| c.body).collect();
+        let path = Self::book_path(&id).ok_or("no data dir")?;
+        Self::write_book_file(&path, &bodies)?;
+
+        let item = LibraryItem {
+            id,
+            title,
+            body: String::new(),
+            created: now.to_rfc3339(),
+            progress: 0,
+            duration_ms: 0,
+            duration_speed: 0.0,
+            url,
+            feed_id: String::new(),
+            guid: String::new(),
+            published: String::new(),
+            chapters: meta,
+            current_chapter: 0,
+        };
+        let mut items = self.items.lock().unwrap();
+        items.push(item.clone());
+        if let Err(e) = Self::save_to_disk(&items) {
+            log::error!("Failed to save library: {e}");
+        }
+        Ok(item)
+    }
+
+    /// Text of one chapter, read straight from the book's on-disk file (never
+    /// held in memory as part of the item).
+    pub fn chapter(&self, id: &str, idx: u32) -> Result<String, String> {
+        let path = Self::book_path(id).ok_or("no data dir")?;
+        let bodies = Self::read_book_file(&path).ok_or("book file missing or unreadable")?;
+        bodies
+            .into_iter()
+            .nth(idx as usize)
+            .ok_or_else(|| "chapter index out of range".to_string())
+    }
+
+    /// Record which chapter (and character offset within it) the reader is
+    /// on — the book equivalent of `set_progress`, in one save.
+    pub fn set_book_position(&self, id: &str, chapter: u32, offset: u64) {
+        let mut items = self.items.lock().unwrap();
+        if let Some(item) = items.iter_mut().find(|i| i.id == id) {
+            item.current_chapter = chapter;
+            item.progress = offset;
+            if let Err(e) = Self::save_to_disk(&items) {
+                log::error!("Failed to save library: {e}");
+            }
+        }
     }
 
     pub fn list(&self) -> Vec<LibraryItem> {
@@ -128,9 +253,16 @@ impl Library {
 
     pub fn delete(&self, id: &str) {
         let mut items = self.items.lock().unwrap();
+        let had_chapters = items.iter().any(|i| i.id == id && !i.chapters.is_empty());
         items.retain(|i| i.id != id);
         if let Err(e) = Self::save_to_disk(&items) {
             log::error!("Failed to save library: {e}");
+        }
+        if had_chapters {
+            // Best effort: an orphaned book file just wastes a little disk.
+            if let Some(path) = Self::book_path(id) {
+                let _ = std::fs::remove_file(path);
+            }
         }
     }
 
@@ -166,6 +298,21 @@ impl Library {
         }
     }
 
+    fn books_dir() -> Option<PathBuf> {
+        #[cfg(target_os = "android")]
+        {
+            std::env::var_os("VERBA_DATA_DIR").map(|d| PathBuf::from(d).join("books"))
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            dirs::config_dir().map(|d| d.join("verba").join("books"))
+        }
+    }
+
+    fn book_path(id: &str) -> Option<PathBuf> {
+        Self::books_dir().map(|d| d.join(format!("{id}.json")))
+    }
+
     fn load_from_disk() -> Option<Vec<LibraryItem>> {
         let path = Self::library_path()?;
         let data = std::fs::read_to_string(&path).ok()?;
@@ -181,6 +328,31 @@ impl Library {
         std::fs::write(&path, data).map_err(|e| format!("write: {e}"))?;
         Ok(())
     }
+
+    /// Write a book's chapter bodies, tmp + rename so a kill mid-write can't
+    /// leave `chapter()` reading a torn file (mirrors tts_cache.rs's writer).
+    fn write_book_file(path: &Path, chapters: &[String]) -> Result<(), String> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("create dir: {e}"))?;
+        }
+        let data = serde_json::to_string(chapters).map_err(|e| format!("serialize: {e}"))?;
+        let tmp = path.with_extension("tmp");
+        std::fs::write(&tmp, &data).map_err(|e| format!("write: {e}"))?;
+        std::fs::rename(&tmp, path).map_err(|e| format!("rename: {e}"))?;
+        Ok(())
+    }
+
+    fn read_book_file(path: &Path) -> Option<Vec<String>> {
+        let data = std::fs::read_to_string(path).ok()?;
+        serde_json::from_str(&data).ok()
+    }
+}
+
+/// Chapters more than one behind `current` — forgotten on a forward chapter
+/// transition (trim keeps current + previous; backward navigation never
+/// trims). Empty for `current` 0 or 1 (nothing two-behind yet).
+pub fn chapters_to_forget(current: u32) -> Range<u32> {
+    0..current.saturating_sub(1)
 }
 
 #[cfg(test)]
@@ -239,5 +411,70 @@ mod tests {
         assert_eq!(items[0].url, "");
         assert_eq!(items[0].feed_id, "");
         assert_eq!(items[0].guid, "");
+    }
+
+    #[test]
+    fn book_file_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("books").join("abc123.json");
+        let chapters = vec!["Chapter one.".to_string(), "Chapter two.".to_string()];
+        Library::write_book_file(&path, &chapters).unwrap();
+        assert_eq!(Library::read_book_file(&path).unwrap(), chapters);
+    }
+
+    #[test]
+    fn legacy_library_json_still_loads() {
+        // Pre-chapters library.json has neither field.
+        let json = r#"[{"id":"1","title":"t","body":"b","created":"now"}]"#;
+        let items: Vec<LibraryItem> = serde_json::from_str(json).unwrap();
+        assert!(items[0].chapters.is_empty());
+        assert_eq!(items[0].current_chapter, 0);
+
+        // A book item's chapter fields round-trip through serialize/deserialize.
+        let book = LibraryItem {
+            id: "2".into(),
+            title: "Book".into(),
+            body: String::new(),
+            created: "now".into(),
+            progress: 5,
+            duration_ms: 0,
+            duration_speed: 0.0,
+            url: String::new(),
+            feed_id: String::new(),
+            guid: String::new(),
+            published: String::new(),
+            chapters: vec![ChapterMeta { title: "Ch1".into(), words: 10, chars: 50 }],
+            current_chapter: 1,
+        };
+        let round: LibraryItem = serde_json::from_str(&serde_json::to_string(&book).unwrap()).unwrap();
+        assert_eq!(round.chapters.len(), 1);
+        assert_eq!(round.chapters[0].words, 10);
+        assert_eq!(round.current_chapter, 1);
+    }
+
+    #[test]
+    fn add_book_computes_meta() {
+        let lib = Library { items: Mutex::new(vec![]) };
+        let chapters = vec![
+            ChapterIn { title: String::new(), body: "one two three".into() },
+            ChapterIn { title: "Second".into(), body: String::new() },
+        ];
+        let item = lib.add_book(String::new(), chapters, String::new()).unwrap();
+        assert_eq!(item.title, "one two three"); // derived: no title, no first-chapter title
+        assert_eq!(item.body, "");
+        assert_eq!(item.current_chapter, 0);
+        assert_eq!(item.chapters.len(), 2);
+        assert_eq!(item.chapters[0].words, 3);
+        assert_eq!(item.chapters[0].chars, 13);
+        assert_eq!(item.chapters[1].words, 0);
+        assert_eq!(item.chapters[1].chars, 0);
+    }
+
+    #[test]
+    fn chapters_to_forget_range() {
+        assert_eq!(chapters_to_forget(0), 0..0);
+        assert_eq!(chapters_to_forget(1), 0..0);
+        assert_eq!(chapters_to_forget(2), 0..1);
+        assert_eq!(chapters_to_forget(5), 0..4);
     }
 }
