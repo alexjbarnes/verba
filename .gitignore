@@ -63,9 +63,12 @@ sym_shape_infer_temp.onnx
 .env.*
 
 # Local agent tooling (machine-specific, never committed)
-.claude/
 .graphene/
 __pycache__/
+
+# Claude Code: skills are checked in (shared project knowledge); transient
+# per-session state (worktree scratch) stays local.
+.claude/worktrees/
 
 # Local R2 upload staging (models live on R2, not in git)
 r2-staging/
