@@ -153,7 +153,9 @@ fn config_is_gb(config_path: &str) -> bool {
     std::fs::read_to_string(config_path)
         .ok()
         .and_then(|s| serde_json::from_str::<OnlyEspeak>(&s).ok())
-        .map(|c| c.espeak.voice.starts_with("en-gb"))
+        // espeak's bare "en" IS the British base voice (cori trained on it),
+        // so it takes the GB dictionary path too.
+        .map(|c| c.espeak.voice.starts_with("en-gb") || c.espeak.voice == "en")
         .unwrap_or(false)
 }
 
@@ -161,12 +163,16 @@ fn config_is_gb(config_path: &str) -> bool {
 /// GB-locale models, the bundled dictionary version. All cache producers and
 /// consumers (engine load, cache coverage, cache-only playback) go through
 /// this so they can never disagree.
+/// Bump when pronunciation logic changes for ALL locales (heteronym rules,
+/// tokenizer fixes) so cached audio regenerates with the new readings.
+const PRON_VERSION: u32 = 1;
+
 pub fn cache_fingerprint(model_path: &str, config_path: &str) -> String {
     let fp = model_fingerprint(model_path);
     if config_is_gb(config_path) {
-        format!("{fp}+gb{GB_DICT_VERSION}")
+        format!("{fp}+p{PRON_VERSION}+gb{GB_DICT_VERSION}")
     } else {
-        fp
+        format!("{fp}+p{PRON_VERSION}")
     }
 }
 
@@ -973,10 +979,12 @@ fn phonemize(
     };
 
     let pieces = split_tokens(text);
+    // Context-resolved heteronyms: piece index -> pseudo dictionary key.
+    let het = crate::heteronyms::resolve(&pieces);
     let mut tokens: Vec<String> = Vec::new();
     let mut first = true;
 
-    for piece in &pieces {
+    for (piece_idx, piece) in pieces.iter().enumerate() {
         // A piece is a word if it contains ANY alphanumeric — judging by the
         // first character silently dropped quote-wrapped words ("'last" in
         // «the 'last mile' stuff» classified as punctuation and was never
@@ -992,7 +1000,11 @@ fn phonemize(
         let mut p_tokens: Vec<String> = if is_word {
             let all_caps =
                 piece.chars().count() >= 2 && piece.chars().all(|c| c.is_ascii_uppercase());
-            let mut pt = if all_caps
+            let mut pt = if let Some(key) = het.get(&piece_idx) {
+                // Context-resolved heteronym: the pseudo-key rides the normal
+                // dictionary path (and US->RP transform on GB models).
+                phonemize_word(key)?
+            } else if all_caps
                 && SPELLED_ACRONYMS.contains(&piece.to_ascii_lowercase().as_str())
             {
                 spell(piece)
@@ -1375,11 +1387,13 @@ static ORT_INIT: OnceLock<Result<(), String>> = OnceLock::new();
 fn ensure_ort_init() -> Result<(), String> {
     ORT_INIT
         .get_or_init(|| {
-            if ort::init().commit() {
-                Ok(())
-            } else {
-                Err("ort init failed".to_string())
-            }
+            // commit() returns false when an ORT environment was already
+            // configured by another subsystem (grammar_neural also inits ORT).
+            // That's not a failure — both share the one global environment, and
+            // each session sets its own execution provider anyway. Only the
+            // first caller's env config wins; the rest are benign no-ops.
+            ort::init().commit();
+            Ok(())
         })
         .as_ref()
         .map(|_| ())
@@ -1436,6 +1450,12 @@ impl PiperEngine {
         // normal phonemizer instead.
         for (word, phonemes) in PRONUNCIATION_OVERRIDES {
             dict.insert(word.to_string(), phonemes.to_string());
+        }
+        // Heteronym pseudo-keys ("read1"/"read2"). Absent from the GB dict by
+        // construction, so both readings take the US->RP path and the locales
+        // agree on whichever variant the context resolver picks.
+        for (key, phonemes) in crate::heteronyms::PRONS {
+            dict.insert(key.to_string(), phonemes.to_string());
         }
         // Snapshot the keys (dict is moved into the phonemizer next) for the
         // OOV compound splitter. CMUdict keys are already lowercase, as are the
@@ -1817,6 +1837,29 @@ mod tests {
         assert_eq!(segment_compound(&ws, "buffed"), None);
         // Non-alphabetic content is never segmented.
         assert_eq!(segment_compound(&ws, "push2buffer"), None);
+    }
+
+    // Regression: grammar_neural commits the ORT environment first (during
+    // warm_up), so by the time TTS plays, ort::init().commit() returns false
+    // ("already configured"). ensure_ort_init must NOT treat that as an error,
+    // and a real session must still build against the shared environment.
+    #[test]
+    fn ort_init_survives_prior_commit() {
+        // Simulate another subsystem winning the commit race.
+        let _ = ort::init().commit();
+        // Our init must succeed even though the env was already configured.
+        ensure_ort_init().expect("ensure_ort_init after prior commit");
+        // And a session must still be creatable in the shared environment.
+        let onnx = concat!(env!("CARGO_MANIFEST_DIR"), "/data/grammar/encoder_model_quantized.0.0.1.onnx");
+        if std::path::Path::new(onnx).exists() {
+            let cpu = vec![ort::ep::CPUExecutionProvider::default().build()];
+            Session::builder()
+                .unwrap()
+                .with_execution_providers(&cpu)
+                .unwrap()
+                .commit_from_file(onnx)
+                .expect("session build in shared ORT env");
+        }
     }
 }
 

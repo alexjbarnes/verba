@@ -134,11 +134,12 @@ mod bundled {
     fn ensure_ort_init() -> Result<(), String> {
         ORT_INIT
             .get_or_init(|| {
-                if ort::init().commit() {
-                    Ok(())
-                } else {
-                    Err("ort init failed".to_string())
-                }
+                // commit() returns false when an ORT environment was already
+                // configured by another subsystem (piper also inits ORT). That's
+                // not a failure — both share the one global environment, and each
+                // session sets its own execution provider anyway.
+                ort::init().commit();
+                Ok(())
             })
             .as_ref()
             .map(|_| ())

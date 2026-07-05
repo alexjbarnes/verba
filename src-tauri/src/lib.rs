@@ -5,6 +5,7 @@ mod delivery;
 mod engine;
 mod feeds;
 mod gb_english;
+mod heteronyms;
 mod history;
 mod library;
 mod media;
