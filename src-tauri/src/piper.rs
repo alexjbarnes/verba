@@ -130,12 +130,22 @@ pub fn num_speakers_from_config(json_path: &std::path::Path) -> i32 {
 /// `PiperEngine::load` and the cache-coverage path so the two can never compute
 /// a different key for the same model (a mismatch would make every lookup miss).
 pub fn model_fingerprint(model_path: &str) -> String {
+    let path = std::path::Path::new(model_path);
     let len = std::fs::metadata(model_path).map(|m| m.len()).unwrap_or(0);
-    let name = std::path::Path::new(model_path)
-        .file_name()
+    let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("model");
+    // The file is always "model_dur.onnx" (every voice's rel_path basename),
+    // and many medium Piper models are byte-identical in size (alan, jenny,
+    // northern_english_male all == alba == 63201318). So {name}:{len} alone
+    // COLLIDES across those voices and they play each other's cached segments.
+    // The parent dir (piper-alba, piper-alan, ...) is the per-voice identity;
+    // fold it in. NOTE: changing this format orphans existing cache files —
+    // intended, since those were cross-contaminated.
+    let parent = path
+        .parent()
+        .and_then(|p| p.file_name())
         .and_then(|s| s.to_str())
-        .unwrap_or("model");
-    format!("{name}:{len}")
+        .unwrap_or("");
+    format!("{parent}/{name}:{len}")
 }
 
 /// Bump when data/gb_dict.json (or the RP transform) changes pronunciations:
@@ -1837,6 +1847,20 @@ mod tests {
         assert_eq!(segment_compound(&ws, "buffed"), None);
         // Non-alphabetic content is never segmented.
         assert_eq!(segment_compound(&ws, "push2buffer"), None);
+    }
+
+    // Regression: every voice's model file is named "model_dur.onnx" and many
+    // are byte-identical in size, so the fingerprint MUST fold in the per-voice
+    // parent dir — otherwise their TTS caches collide and voices play each
+    // other's cached segments. (Paths need not exist; missing size is 0 for
+    // both, isolating the dir as the distinguishing factor.)
+    #[test]
+    fn fingerprint_distinguishes_voices_in_different_dirs() {
+        let alba = model_fingerprint("/m/tts/piper-alba/model_dur.onnx");
+        let alan = model_fingerprint("/m/tts/piper-alan/model_dur.onnx");
+        assert_ne!(alba, alan, "same basename+size in different dirs must differ");
+        assert!(alba.contains("piper-alba"));
+        assert!(alan.contains("piper-alan"));
     }
 
     // Regression: grammar_neural commits the ORT environment first (during
