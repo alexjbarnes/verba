@@ -28,6 +28,7 @@ pub const PRONS: &[(&str, &str)] = &[
     ("read1", "R IY1 D"), ("read2", "R EH1 D"),
     ("live1", "L IH1 V"), ("live2", "L AY1 V"),
     ("lives1", "L IH1 V Z"), ("lives2", "L AY1 V Z"),
+    ("lived1", "L IH1 V D"), ("lived2", "L AY1 V D"),
     ("lead1", "L IY1 D"), ("lead2", "L EH1 D"),
     ("record1", "R EH1 K ER0 D"), ("record2", "R IH0 K AO1 R D"),
     ("records1", "R EH1 K ER0 D Z"), ("records2", "R IH0 K AO1 R D Z"),
@@ -153,6 +154,9 @@ fn wants_alt(word: &str, prev: &[&str], next: &[&str]) -> bool {
         "lives" => has(DET, p1)
             || has(LIVES_NOUN_SIGNALS, p1)
             || p1.map(|w| w.ends_with("'s") || w.ends_with("s'")).unwrap_or(false),
+        // Adjective /laɪvd/ only in compounds ("long-lived", "short-lived");
+        // otherwise the past-tense verb /lɪvd/ ("he lived there").
+        "lived" => has(&["long", "short", "high", "well", "shortest", "longest"], p1),
         // The metal: "lead paint", "lead poisoning".
         "lead" => has(LEAD_METAL_NOUNS, n1),
         // Verb stress: "to record", "we record", "they present it".
@@ -188,9 +192,9 @@ fn wants_alt(word: &str, prev: &[&str], next: &[&str]) -> bool {
 
 fn is_heteronym(word: &str) -> bool {
     matches!(word,
-        "read" | "live" | "lives" | "lead" | "record" | "records" | "present"
-        | "presents" | "use" | "used" | "wound" | "tear" | "tears" | "wind"
-        | "winds" | "close" | "minute" | "dove")
+        "read" | "live" | "lives" | "lived" | "lead" | "record" | "records"
+        | "present" | "presents" | "use" | "used" | "wound" | "tear" | "tears"
+        | "wind" | "winds" | "close" | "minute" | "dove")
         || ATE_FAMILY.contains(&word)
 }
 
@@ -233,6 +237,7 @@ const KEYS: &[(&str, &str, &str)] = &[
     ("read", "read1", "read2"),
     ("live", "live1", "live2"),
     ("lives", "lives1", "lives2"),
+    ("lived", "lived1", "lived2"),
     ("lead", "lead1", "lead2"),
     ("record", "record1", "record2"),
     ("records", "records1", "records2"),
@@ -285,6 +290,15 @@ mod tests {
         // "where Storybook lives" — verb (/lɪvz/), no determiner/possessive.
         assert_eq!(keys_for("and where Storybook lives"), vec!["lives1"]);
         assert_eq!(keys_for("the town where she lives"), vec!["lives1"]);
+    }
+
+    #[test]
+    fn lived_past_tense_vs_compound() {
+        // Past tense /lɪvd/ by default; /laɪvd/ only in long-/short-lived.
+        assert_eq!(keys_for("he lived life to its fullest"), vec!["lived1"]);
+        assert_eq!(keys_for("and lived happily ever after"), vec!["lived1"]);
+        assert_eq!(keys_for("a long lived tradition"), vec!["lived2"]);
+        assert_eq!(keys_for("short lived fame"), vec!["lived2"]);
     }
 
     #[test]
