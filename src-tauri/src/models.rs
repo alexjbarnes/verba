@@ -87,6 +87,12 @@ impl ModelManager {
             String::new()
         };
 
+        // Voices dropped from the catalogue; reclaim their disk on installs
+        // that had downloaded them.
+        for stale in ["tts/piper-libritts", "tts/piper-vctk"] {
+            let _ = std::fs::remove_dir_all(base_dir.join(stale));
+        }
+
         Ok(Self {
             base_dir,
             alt_dirs,
@@ -510,11 +516,11 @@ const HF_NEMO_CTC_SMALL: &str =
     "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-ctc-en-conformer-small/resolve/main";
 const HF_NEMO_CTC_MEDIUM: &str =
     "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-ctc-en-conformer-medium/resolve/main";
-// Patched Piper libritts model: the rhasspy libritts_r medium with the VITS
-// duration output (`/Ceil_output_0`) exposed for exact word timing — see
+// Patched Piper voice models: rhasspy exports with the VITS duration output
+// (`/Ceil_output_0`) exposed for exact word timing — see
 // scripts/patch_piper_durations.py. Hosted on our R2; the S3 API endpoint needs
 // signed auth, so the app downloads from the bucket's public r2.dev URL.
-const R2_PIPER_LIBRITTS: &str =
+const R2_PIPER_TTS: &str =
     "https://pub-c88baaac61224fbba973b547f1d947ca.r2.dev/models/TTS";
 const HF_NEMO_CTC_LARGE: &str =
     "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-ctc-en-conformer-large/resolve/main";
@@ -704,31 +710,110 @@ fn builtin_registry() -> Vec<ModelDef> {
             ],
         },
         // ── TTS Models ──
-        ModelDef {
-            id: "tts-piper-libritts".into(),
-            name: "Piper (fast)".into(),
-            desc: "Text-to-speech \u{2014} fastest (~10x real-time on CPU), many voices, ~79 MB".into(),
-            engine: "tts_piper_ort".into(),
-            size: "~79 MB".into(),
-            files: vec![
-                // rel_path bumped to model_dur.onnx so existing installs fetch the
-                // duration-exposing model instead of using the cached unpatched one.
-                ModelFile { url: format!("{R2_PIPER_LIBRITTS}/en_US-libritts_r-medium-dur.onnx"), rel_path: "tts/piper-libritts/model_dur.onnx".into(), bytes: 78_580_938, role: "model".into() },
-                ModelFile { url: format!("{R2_PIPER_LIBRITTS}/en_US-libritts_r-medium.onnx.json"), rel_path: "tts/piper-libritts/model.onnx.json".into(), bytes: 20_123, role: "config".into() },
-            ],
-        },
+        // (LibriTTS was removed from the catalogue — 904 speakers of mostly
+        // low quality drowned out the good voices. Installs that still have
+        // it on disk get the directory cleaned up in `new()`.)
         ModelDef {
             id: "tts-piper-alba".into(),
             name: "Alba (UK)".into(),
-            desc: "British English voice \u{2014} single speaker, RP accent, ~63 MB".into(),
+            desc: "British English voice \u{2014} female, Scottish accent, ~63 MB".into(),
             engine: "tts_piper_ort".into(),
             size: "~63 MB".into(),
             files: vec![
-                // Duration-patched (same /Ceil_output_0 surgery as libritts) so
+                // Duration-patched (/Ceil_output_0 exposed as a graph output) so
                 // exact word timing works; the sidecar's espeak.voice ("en-gb-x-rp")
                 // routes phonemization through the GB dictionary.
-                ModelFile { url: format!("{R2_PIPER_LIBRITTS}/en_GB-alba-medium-dur.onnx"), rel_path: "tts/piper-alba/model_dur.onnx".into(), bytes: 63_201_318, role: "model".into() },
-                ModelFile { url: format!("{R2_PIPER_LIBRITTS}/en_GB-alba-medium.onnx.json"), rel_path: "tts/piper-alba/model.onnx.json".into(), bytes: 4_888, role: "config".into() },
+                ModelFile { url: format!("{R2_PIPER_TTS}/en_GB-alba-medium-dur.onnx"), rel_path: "tts/piper-alba/model_dur.onnx".into(), bytes: 63_201_318, role: "model".into() },
+                ModelFile { url: format!("{R2_PIPER_TTS}/en_GB-alba-medium.onnx.json"), rel_path: "tts/piper-alba/model.onnx.json".into(), bytes: 4_888, role: "config".into() },
+            ],
+        },
+        // Remaining en_GB Piper voices, all duration-patched like alba.
+        ModelDef {
+            id: "tts-piper-alan".into(),
+            name: "Alan (UK)".into(),
+            desc: "British English voice \u{2014} male, ~63 MB".into(),
+            engine: "tts_piper_ort".into(),
+            size: "~63 MB".into(),
+            files: vec![
+                ModelFile { url: format!("{R2_PIPER_TTS}/en_GB-alan-medium-dur.onnx"), rel_path: "tts/piper-alan/model_dur.onnx".into(), bytes: 63_201_318, role: "model".into() },
+                ModelFile { url: format!("{R2_PIPER_TTS}/en_GB-alan-medium.onnx.json"), rel_path: "tts/piper-alan/model.onnx.json".into(), bytes: 4_888, role: "config".into() },
+            ],
+        },
+        ModelDef {
+            id: "tts-piper-aru".into(),
+            name: "Aru (UK)".into(),
+            desc: "British English \u{2014} 12 voices, ~77 MB".into(),
+            engine: "tts_piper_ort".into(),
+            size: "~77 MB".into(),
+            files: vec![
+                ModelFile { url: format!("{R2_PIPER_TTS}/en_GB-aru-medium-dur.onnx"), rel_path: "tts/piper-aru/model_dur.onnx".into(), bytes: 76_754_121, role: "model".into() },
+                ModelFile { url: format!("{R2_PIPER_TTS}/en_GB-aru-medium.onnx.json"), rel_path: "tts/piper-aru/model.onnx.json".into(), bytes: 5_048, role: "config".into() },
+            ],
+        },
+        ModelDef {
+            id: "tts-piper-cori".into(),
+            name: "Cori (UK)".into(),
+            desc: "British English voice \u{2014} female, ~64 MB".into(),
+            engine: "tts_piper_ort".into(),
+            size: "~64 MB".into(),
+            files: vec![
+                ModelFile { url: format!("{R2_PIPER_TTS}/en_GB-cori-medium-dur.onnx"), rel_path: "tts/piper-cori/model_dur.onnx".into(), bytes: 63_531_403, role: "model".into() },
+                ModelFile { url: format!("{R2_PIPER_TTS}/en_GB-cori-medium.onnx.json"), rel_path: "tts/piper-cori/model.onnx.json".into(), bytes: 4_966, role: "config".into() },
+            ],
+        },
+        ModelDef {
+            id: "tts-piper-cori-high".into(),
+            name: "Cori HQ (UK)".into(),
+            desc: "British English voice \u{2014} female, highest quality, ~114 MB".into(),
+            engine: "tts_piper_ort".into(),
+            size: "~114 MB".into(),
+            files: vec![
+                ModelFile { url: format!("{R2_PIPER_TTS}/en_GB-cori-high-dur.onnx"), rel_path: "tts/piper-cori-high/model_dur.onnx".into(), bytes: 114_219_376, role: "model".into() },
+                ModelFile { url: format!("{R2_PIPER_TTS}/en_GB-cori-high.onnx.json"), rel_path: "tts/piper-cori-high/model.onnx.json".into(), bytes: 4_963, role: "config".into() },
+            ],
+        },
+        ModelDef {
+            id: "tts-piper-jenny".into(),
+            name: "Jenny (UK)".into(),
+            desc: "British English voice \u{2014} female, ~63 MB".into(),
+            engine: "tts_piper_ort".into(),
+            size: "~63 MB".into(),
+            files: vec![
+                ModelFile { url: format!("{R2_PIPER_TTS}/en_GB-jenny_dioco-medium-dur.onnx"), rel_path: "tts/piper-jenny/model_dur.onnx".into(), bytes: 63_201_318, role: "model".into() },
+                ModelFile { url: format!("{R2_PIPER_TTS}/en_GB-jenny_dioco-medium.onnx.json"), rel_path: "tts/piper-jenny/model.onnx.json".into(), bytes: 4_895, role: "config".into() },
+            ],
+        },
+        ModelDef {
+            id: "tts-piper-northern-male".into(),
+            name: "Northern English Male (UK)".into(),
+            desc: "British English voice \u{2014} male, northern accent, ~63 MB".into(),
+            engine: "tts_piper_ort".into(),
+            size: "~63 MB".into(),
+            files: vec![
+                ModelFile { url: format!("{R2_PIPER_TTS}/en_GB-northern_english_male-medium-dur.onnx"), rel_path: "tts/piper-northern-male/model_dur.onnx".into(), bytes: 63_201_318, role: "model".into() },
+                ModelFile { url: format!("{R2_PIPER_TTS}/en_GB-northern_english_male-medium.onnx.json"), rel_path: "tts/piper-northern-male/model.onnx.json".into(), bytes: 4_847, role: "config".into() },
+            ],
+        },
+        ModelDef {
+            id: "tts-piper-semaine".into(),
+            name: "Semaine (UK)".into(),
+            desc: "British English \u{2014} 4 expressive voices, ~77 MB".into(),
+            engine: "tts_piper_ort".into(),
+            size: "~77 MB".into(),
+            files: vec![
+                ModelFile { url: format!("{R2_PIPER_TTS}/en_GB-semaine-medium-dur.onnx"), rel_path: "tts/piper-semaine/model_dur.onnx".into(), bytes: 76_737_735, role: "model".into() },
+                ModelFile { url: format!("{R2_PIPER_TTS}/en_GB-semaine-medium.onnx.json"), rel_path: "tts/piper-semaine/model.onnx.json".into(), bytes: 5_076, role: "config".into() },
+            ],
+        },
+        ModelDef {
+            id: "tts-piper-southern-female".into(),
+            name: "Southern English Female (UK)".into(),
+            desc: "British English voice \u{2014} female, southern accent, ~63 MB".into(),
+            engine: "tts_piper_ort".into(),
+            size: "~63 MB".into(),
+            files: vec![
+                ModelFile { url: format!("{R2_PIPER_TTS}/en_GB-southern_english_female-low-dur.onnx"), rel_path: "tts/piper-southern-female/model_dur.onnx".into(), bytes: 63_104_550, role: "model".into() },
+                ModelFile { url: format!("{R2_PIPER_TTS}/en_GB-southern_english_female-low.onnx.json"), rel_path: "tts/piper-southern-female/model.onnx.json".into(), bytes: 4_189, role: "config".into() },
             ],
         },
     ]

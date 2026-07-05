@@ -41,11 +41,13 @@ changes). The upstream voices were trained using espeak-ng phonemisation;
 **espeak-ng (GPL-3.0) is not included in, linked by, or executed by this
 app** — phonemisation is done with the bundled dictionaries above.
 
-- **en_US-libritts_r-medium** — trained on
-  [LibriTTS-R](http://www.openslr.org/141/) (**CC BY 4.0**).
 - **en_GB-alba-medium** — trained on the Alba corpus,
   [Edinburgh DataShare](https://datashare.ed.ac.uk/handle/10283/3270)
   (**CC BY 4.0**); fine-tuned from the lessac voice.
+- **en_GB voices** (alan, aru, cori, jenny_dioco, northern_english_male,
+  semaine, southern_english_female) — from
+  [rhasspy/piper-voices](https://huggingface.co/rhasspy/piper-voices);
+  per-voice training-dataset attributions are in each model card.
 
 ## Downloadable speech-recognition models (ASR)
 

@@ -16,8 +16,13 @@ pub struct AppConfig {
     pub haptic_feedback: bool,
     /// Speaker ids the user has starred on the Voices page. The player voice
     /// picker shows only these (or all voices when empty).
+    /// Superseded by `tts_favourite_voices`; kept for migration of old configs.
     #[serde(default)]
     pub tts_favourite_sids: Vec<i32>,
+    /// Starred voices as "model-id:sid" keys, spanning every TTS model in the
+    /// catalogue (favourites survive switching models).
+    #[serde(default)]
+    pub tts_favourite_voices: Vec<String>,
     /// Last-selected TTS voice: either a speaker-id string ("37") or
     /// "custom:<name>" for a custom voice. Empty means default (speaker 0).
     #[serde(default)]
@@ -47,6 +52,7 @@ impl Default for AppConfig {
             active_model_id: String::new(),
             haptic_feedback: true,
             tts_favourite_sids: Vec::new(),
+            tts_favourite_voices: Vec::new(),
             tts_voice: String::new(),
             tts_model: String::new(),
             tts_voice_speeds: HashMap::new(),
@@ -117,6 +123,7 @@ mod tests {
             active_model_id: "parakeet-v3-int8".into(),
             haptic_feedback: false,
             tts_favourite_sids: vec![3, 7],
+            tts_favourite_voices: vec!["tts-piper-alba:0".into()],
             tts_voice: "7".into(),
             tts_model: "tts-piper-alba".into(),
             tts_voice_speeds: HashMap::from([("7".to_string(), 0.75f32)]),
