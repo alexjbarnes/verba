@@ -175,7 +175,7 @@ fn config_is_gb(config_path: &str) -> bool {
 /// this so they can never disagree.
 /// Bump when pronunciation logic changes for ALL locales (heteronym rules,
 /// tokenizer fixes) so cached audio regenerates with the new readings.
-const PRON_VERSION: u32 = 1;
+const PRON_VERSION: u32 = 2;
 
 pub fn cache_fingerprint(model_path: &str, config_path: &str) -> String {
     let fp = model_fingerprint(model_path);
@@ -1011,9 +1011,10 @@ fn phonemize(
             let all_caps =
                 piece.chars().count() >= 2 && piece.chars().all(|c| c.is_ascii_uppercase());
             let mut pt = if let Some(key) = het.get(&piece_idx) {
-                // Context-resolved heteronym: the pseudo-key rides the normal
-                // dictionary path (and US->RP transform on GB models).
-                phonemize_word(key)?
+                // Context-resolved heteronym: look up its dict_key() form (raw
+                // "read1" would be stripped to "read" by the tokenizer). Rides
+                // the normal dict path + US->RP transform on GB models.
+                phonemize_word(&crate::heteronyms::dict_key(key))?
             } else if all_caps
                 && SPELLED_ACRONYMS.contains(&piece.to_ascii_lowercase().as_str())
             {
@@ -1461,11 +1462,12 @@ impl PiperEngine {
         for (word, phonemes) in PRONUNCIATION_OVERRIDES {
             dict.insert(word.to_string(), phonemes.to_string());
         }
-        // Heteronym pseudo-keys ("read1"/"read2"). Absent from the GB dict by
-        // construction, so both readings take the US->RP path and the locales
-        // agree on whichever variant the context resolver picks.
+        // Heteronym pseudo-keys ("read1"/"read2"), stored under dict_key() so
+        // the tokenizer's digit-stripping doesn't collapse them to the base
+        // word. Absent from the GB dict by construction, so both readings take
+        // the US->RP path and the locales agree on the resolver's pick.
         for (key, phonemes) in crate::heteronyms::PRONS {
-            dict.insert(key.to_string(), phonemes.to_string());
+            dict.insert(crate::heteronyms::dict_key(key), phonemes.to_string());
         }
         // Snapshot the keys (dict is moved into the phonemizer next) for the
         // OOV compound splitter. CMUdict keys are already lowercase, as are the
@@ -1768,6 +1770,38 @@ mod tests {
         let quoted = phonemize(&ph, None, &word_set, "the 'last mile' stuff").unwrap();
         let plain = phonemize(&ph, None, &word_set, "the last mile stuff").unwrap();
         assert_eq!(quoted, plain);
+    }
+
+    // Build a phonemizer with the SAME dict the engine uses: CMUdict + overrides
+    // + heteronym pseudo-keys. Without the PRONS insertion, "lives1"/"lives2"
+    // would be OOV and the het path would silently no-op.
+    fn engine_phonemizer() -> (EnglishPhonemizer, HashSet<String>) {
+        let mut dict: HashMap<String, String> = serde_json::from_slice(CMUDICT_BYTES).unwrap();
+        for (w, p) in PRONUNCIATION_OVERRIDES {
+            dict.insert(w.to_string(), p.to_string());
+        }
+        for (k, p) in crate::heteronyms::PRONS {
+            dict.insert(crate::heteronyms::dict_key(k), p.to_string());
+        }
+        let word_set: HashSet<String> = dict.keys().cloned().collect();
+        (EnglishPhonemizer::new_with_hashmap(dict), word_set)
+    }
+
+    #[test]
+    fn heteronym_lives_verb_reaches_phonemes() {
+        let (ph, ws) = engine_phonemizer();
+        // Ground-truth readings via the dict_key() forms (raw "lives1" would be
+        // digit-stripped to "lives" by the tokenizer).
+        let verb = phonemize(&ph, None, &ws, &crate::heteronyms::dict_key("lives1")).unwrap();
+        let noun = phonemize(&ph, None, &ws, &crate::heteronyms::dict_key("lives2")).unwrap();
+        assert_ne!(verb, noun, "verb/noun pseudo-keys must phonemize differently");
+        assert!(!verb.contains(&"a".to_string()),
+                "verb 'lives' should be /lɪvz/ (no diphthong), got {verb:?}");
+        // The phrase ends in "lives"; its trailing tokens must be the VERB
+        // reading (Storybook resides), not the noun (plural of life).
+        let phrase = phonemize(&ph, None, &ws, "and where storybook lives").unwrap();
+        assert_eq!(&phrase[phrase.len() - verb.len()..], &verb[..],
+                   "'Storybook lives' must use the verb reading; got {phrase:?}");
     }
 
     #[test]

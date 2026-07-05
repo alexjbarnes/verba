@@ -13,7 +13,17 @@
 
 use std::collections::HashMap;
 
-/// Pseudo-key -> ARPAbet, merged into the phonemizer dictionary at load.
+/// The dictionary key a pseudo-key ("read1") is stored/looked-up under. The
+/// piper-plus-g2p tokenizer STRIPS digits from words, so "read1" would resolve
+/// to "read" (the dict default) and silently defeat the whole override. Map the
+/// trailing digit to letters the tokenizer keeps, giving a distinct pure-alpha
+/// key. MUST be used at BOTH dict insertion and lookup.
+pub fn dict_key(pseudo: &str) -> String {
+    pseudo.replace('1', "xaa").replace('2', "xbb")
+}
+
+/// Pseudo-key -> ARPAbet, merged into the phonemizer dictionary at load (under
+/// `dict_key(pseudo)`, not the raw pseudo-key).
 pub const PRONS: &[(&str, &str)] = &[
     ("read1", "R IY1 D"), ("read2", "R EH1 D"),
     ("live1", "L IH1 V"), ("live2", "L AY1 V"),
@@ -268,6 +278,13 @@ mod tests {
         let mut hits: Vec<(usize, &str)> = map.into_iter().collect();
         hits.sort();
         hits.into_iter().map(|(_, k)| k).collect()
+    }
+
+    #[test]
+    fn lives_verb_after_proper_noun() {
+        // "where Storybook lives" — verb (/lɪvz/), no determiner/possessive.
+        assert_eq!(keys_for("and where Storybook lives"), vec!["lives1"]);
+        assert_eq!(keys_for("the town where she lives"), vec!["lives1"]);
     }
 
     #[test]
