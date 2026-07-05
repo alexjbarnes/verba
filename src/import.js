@@ -177,19 +177,39 @@ function parseXhtml(str) {
 }
 
 const BLOCK_SELECTOR = 'p, h1, h2, h3, h4, h5, h6, li, blockquote, td, figcaption';
+// Calibre-style conversions wrap every paragraph in <div><span>..</span></div>
+// with no semantic block elements at all; a second pass with leaf divs as the
+// paragraph unit catches those.
+const DIV_BLOCK_SELECTOR = BLOCK_SELECTOR + ', div';
 
-function extractChapterText(doc) {
-  doc.querySelectorAll('script, style').forEach(n => n.remove());
+function collectBlocks(doc, selector) {
   const parts = [];
-  doc.querySelectorAll(BLOCK_SELECTOR).forEach(el => {
+  doc.querySelectorAll(selector).forEach(el => {
     // Skip a block that itself wraps another block from this list (e.g.
     // "<li><p>...</p></li>") so its text isn't captured twice: once via the
     // outer element, again via the inner one.
-    if (el.querySelector(BLOCK_SELECTOR)) return;
+    if (el.querySelector(selector)) return;
     const t = (el.textContent || '').replace(/\s+/g, ' ').trim();
     if (t) parts.push(t);
   });
   return parts.join('\n\n');
+}
+
+function extractChapterText(doc) {
+  doc.querySelectorAll('script, style').forEach(n => n.remove());
+  let text = collectBlocks(doc, BLOCK_SELECTOR);
+  if (text.length < 50) {
+    const divText = collectBlocks(doc, DIV_BLOCK_SELECTOR);
+    if (divText.length > text.length) text = divText;
+  }
+  // Last resort: flat body text. Loses paragraph breaks but keeps a book
+  // whose markup defeats both block walks readable.
+  if (text.length < 50) {
+    const root = doc.body || doc.documentElement;
+    const flat = root ? (root.textContent || '').replace(/\s+/g, ' ').trim() : '';
+    if (flat.length > text.length) text = flat;
+  }
+  return text;
 }
 
 function firstHeading(doc) {
@@ -237,9 +257,12 @@ export async function parseEpub(arrayBuffer) {
   const opfDir = dirOf(opfPath);
 
   // dc:title by local name, not a hardcoded "dc:" prefix — some producers use
-  // a different namespace prefix for the same Dublin Core element.
+  // a different namespace prefix for the same Dublin Core element. A title
+  // with no letters at all (Calibre placeholder ids like "540467868") is
+  // worse than the filename the caller falls back to, so report none.
   const titleEl = opfDoc.getElementsByTagNameNS('*', 'title')[0];
-  const bookTitle = titleEl ? titleEl.textContent.trim() : '';
+  const rawTitle = titleEl ? titleEl.textContent.trim() : '';
+  const bookTitle = /[a-zA-Z]/.test(rawTitle) ? rawTitle : '';
 
   const manifest = {}; // id -> { href, mediaType, properties }
   for (const item of opfDoc.getElementsByTagName('item')) {
@@ -329,8 +352,27 @@ export async function parseEpub(arrayBuffer) {
     throw new Error('No readable chapters found in this EPUB');
   }
 
+  // Calibre conversions split on print page breaks, producing hundreds of
+  // tiny untitled files. Merge an UNTITLED chapter into its predecessor while
+  // the combined size stays chapter-sane; a titled chapter always starts
+  // fresh, so real TOC structure is never buried. Properly-authored books
+  // (every spine item titled) pass through untouched.
+  const mergedChapters = [];
+  let prevWords = 0;
+  for (const ch of rawChapters) {
+    const chWords = countWords(ch.body);
+    const prev = mergedChapters[mergedChapters.length - 1];
+    if (prev && !ch.title && prevWords + chWords <= 3500) {
+      prev.body += '\n\n' + ch.body;
+      prevWords += chWords;
+    } else {
+      mergedChapters.push({ title: ch.title, body: ch.body });
+      prevWords = chWords;
+    }
+  }
+
   const chapters = [];
-  rawChapters.forEach((ch, i) => {
+  mergedChapters.forEach((ch, i) => {
     const title = ch.title || `Chapter ${i + 1}`;
     if (countWords(ch.body) > 3500) {
       const parts = splitIntoParts(ch.body, 2500, 3500);

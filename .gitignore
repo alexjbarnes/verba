@@ -48,6 +48,10 @@ src-tauri/data/grammar/*
 *.wav
 *.m4a
 
+# Local test ebooks/documents at repo root
+*.epub
+*.pdf
+
 # Stray icon drafts at repo root (real icons live in src-tauri/icons/)
 /icon*.png
 
