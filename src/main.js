@@ -3475,35 +3475,81 @@ document.getElementById('feed-auto-add').addEventListener('change', (e) => {
   invoke('feed_set_auto_add', { id: browsingFeed.id, autoAdd: e.target.checked }).catch(() => {});
 });
 
-// Pull-to-refresh on the Library and Feeds lists (Android; the Refresh button
-// covers desktop). Minimal gesture: touch starts with the scroller at the top
-// and drags down more than 70px.
-function attachPullToRefresh(el, onRefresh) {
-  if (!el) return;
-  let startY = 0;
-  let pulling = false;
-  el.addEventListener('touchstart', (e) => {
-    pulling = el.scrollTop === 0;
-    startY = pulling ? e.touches[0].clientY : 0;
+// Android-style pull-to-refresh, scoped to the Feeds list (the Refresh button
+// covers desktop). Dragging the list down from the top opens a gap holding an
+// indicator; past THRESHOLD it arms ("Release to refresh"), and on release it
+// spins while onRefresh() (a promise) runs. Only the Feeds page has it — other
+// lists don't fetch anything, so a pull there would surprise.
+function attachPullToRefresh(scrollEl, ptr, icon, text, onRefresh) {
+  if (!scrollEl || !ptr) return;
+  const H = 48; // indicator height (matches h-12)
+  const THRESHOLD = 64; // drag past this to arm
+  const MAX = 96; // rubber-band clamp
+  let startY = 0, dragging = false, armed = false, busy = false;
+
+  const anim = (on) => {
+    const v = on ? 'transform 0.2s ease' : 'none';
+    scrollEl.style.transition = v;
+    ptr.style.transition = v;
+  };
+  const place = (pull) => {
+    scrollEl.style.transform = `translateY(${pull}px)`;
+    ptr.style.transform = `translateY(${pull - H}px)`; // rides just above the list
+  };
+  const label = (on) => {
+    icon.style.transform = on ? 'rotate(180deg)' : 'rotate(0deg)';
+    text.textContent = on ? 'Release to refresh' : 'Pull to refresh';
+  };
+  const home = () => { anim(true); place(0); };
+
+  scrollEl.addEventListener('touchstart', (e) => {
+    if (busy) return;
+    dragging = scrollEl.scrollTop === 0;
+    startY = dragging ? e.touches[0].clientY : 0;
   }, { passive: true });
-  el.addEventListener('touchmove', () => {
-    if (pulling && el.scrollTop > 0) pulling = false;
-  }, { passive: true });
-  el.addEventListener('touchend', (e) => {
-    if (!pulling) return;
-    pulling = false;
-    const t = e.changedTouches && e.changedTouches[0];
-    if (t && t.clientY - startY > 70) onRefresh();
+
+  scrollEl.addEventListener('touchmove', (e) => {
+    if (busy || !dragging) return;
+    if (scrollEl.scrollTop > 0) { dragging = false; return; }
+    const dy = e.touches[0].clientY - startY;
+    if (dy <= 0) { // at/above the top: no pull, leave native scroll alone
+      anim(false); place(0);
+      if (armed) { armed = false; label(false); }
+      return;
+    }
+    e.preventDefault(); // own the downward pull (listener is non-passive)
+    const pull = Math.min(MAX, dy * 0.5); // damped
+    anim(false); place(pull);
+    const a = pull >= THRESHOLD;
+    if (a !== armed) { armed = a; label(a); }
+  }, { passive: false });
+
+  scrollEl.addEventListener('touchend', () => {
+    if (busy || !dragging) return;
+    dragging = false;
+    if (!armed) { home(); return; }
+    busy = true; armed = false;
+    anim(true); place(H); // hold the indicator open while refreshing
+    icon.textContent = 'progress_activity';
+    icon.style.transform = 'rotate(0deg)';
+    icon.classList.add('tts-spin');
+    text.textContent = 'Refreshing…';
+    Promise.resolve(onRefresh()).catch(() => {}).finally(() => {
+      icon.classList.remove('tts-spin');
+      icon.textContent = 'arrow_downward';
+      text.textContent = 'Pull to refresh';
+      home();
+      busy = false;
+    });
   }, { passive: true });
 }
-attachPullToRefresh(document.getElementById('lib-scroll'), () => {
-  showToast('Refreshing…');
-  pollFeeds({ interactive: true }).then(() => loadLibrary());
-});
-attachPullToRefresh(document.getElementById('feeds-scroll'), () => {
-  showToast('Refreshing…');
-  pollFeeds({ interactive: true });
-});
+attachPullToRefresh(
+  document.getElementById('feeds-scroll'),
+  document.getElementById('feeds-ptr'),
+  document.getElementById('feeds-ptr-icon'),
+  document.getElementById('feeds-ptr-text'),
+  () => pollFeeds({ interactive: true }),
+);
 
 // ── Debug tab ──
 
