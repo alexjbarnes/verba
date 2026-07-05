@@ -797,6 +797,11 @@ fn book_set_position(id: String, chapter: u32, offset: u64) {
     library::Library::global().set_book_position(&id, chapter, offset);
 }
 
+#[tauri::command]
+fn book_chapter_completed(id: String, chapter: u32) {
+    library::Library::global().mark_chapter_completed(&id, chapter);
+}
+
 /// Forward chapter transition: forget cached audio for chapters more than one
 /// behind `current` (keep current + previous). Sync like `tts_cache_status`
 /// (hash + unlink, no ONNX session touched). Cache keys carry no chapter
@@ -1346,6 +1351,7 @@ pub fn run() {
             book_add,
             book_chapter,
             book_set_position,
+            book_chapter_completed,
             book_trim_audio,
             book_forget_audio,
             feeds_list,

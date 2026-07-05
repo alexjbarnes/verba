@@ -76,6 +76,11 @@ pub struct LibraryItem {
     /// `chapters` is empty.
     #[serde(default)]
     pub current_chapter: u32,
+    /// Indices of chapters that have actually been listened to the end
+    /// (marked on tts-finished). Kept explicit rather than inferred from
+    /// `current_chapter`: jumping into chapter 8 must NOT mark 1-7 done.
+    #[serde(default)]
+    pub completed: Vec<u32>,
 }
 
 pub struct Library {
@@ -142,6 +147,7 @@ impl Library {
             published,
             chapters: Vec::new(),
             current_chapter: 0,
+            completed: Vec::new(),
         };
         let mut items = self.items.lock().unwrap();
         items.push(item.clone());
@@ -206,6 +212,7 @@ impl Library {
             published: String::new(),
             chapters: meta,
             current_chapter: 0,
+            completed: Vec::new(),
         };
         let mut items = self.items.lock().unwrap();
         items.push(item.clone());
@@ -235,6 +242,20 @@ impl Library {
             item.progress = offset;
             if let Err(e) = Self::save_to_disk(&items) {
                 log::error!("Failed to save library: {e}");
+            }
+        }
+    }
+
+    /// Record that a chapter was listened to the end. Idempotent; re-listening
+    /// a completed chapter never duplicates the entry.
+    pub fn mark_chapter_completed(&self, id: &str, chapter: u32) {
+        let mut items = self.items.lock().unwrap();
+        if let Some(item) = items.iter_mut().find(|i| i.id == id) {
+            if !item.completed.contains(&chapter) {
+                item.completed.push(chapter);
+                if let Err(e) = Self::save_to_disk(&items) {
+                    log::error!("Failed to save library: {e}");
+                }
             }
         }
     }
@@ -429,6 +450,7 @@ mod tests {
         let items: Vec<LibraryItem> = serde_json::from_str(json).unwrap();
         assert!(items[0].chapters.is_empty());
         assert_eq!(items[0].current_chapter, 0);
+        assert!(items[0].completed.is_empty());
 
         // A book item's chapter fields round-trip through serialize/deserialize.
         let book = LibraryItem {
@@ -445,10 +467,12 @@ mod tests {
             published: String::new(),
             chapters: vec![ChapterMeta { title: "Ch1".into(), words: 10, chars: 50 }],
             current_chapter: 1,
+            completed: vec![0],
         };
         let round: LibraryItem = serde_json::from_str(&serde_json::to_string(&book).unwrap()).unwrap();
         assert_eq!(round.chapters.len(), 1);
         assert_eq!(round.chapters[0].words, 10);
+        assert_eq!(round.completed, vec![0]);
         assert_eq!(round.current_chapter, 1);
     }
 
@@ -476,5 +500,26 @@ mod tests {
         assert_eq!(chapters_to_forget(1), 0..0);
         assert_eq!(chapters_to_forget(2), 0..1);
         assert_eq!(chapters_to_forget(5), 0..4);
+    }
+
+    #[test]
+    fn mark_chapter_completed_is_idempotent_and_unordered() {
+        let lib = Library { items: Mutex::new(vec![]) };
+        let item = lib
+            .add_book(
+                "B".into(),
+                vec![
+                    ChapterIn { title: "1".into(), body: "one one".into() },
+                    ChapterIn { title: "2".into(), body: "two two".into() },
+                ],
+                String::new(),
+            )
+            .unwrap();
+        // Finish chapter 1 first, then chapter 0 (a back-jump), then 1 again.
+        lib.mark_chapter_completed(&item.id, 1);
+        lib.mark_chapter_completed(&item.id, 0);
+        lib.mark_chapter_completed(&item.id, 1);
+        let got = lib.items.lock().unwrap()[0].completed.clone();
+        assert_eq!(got, vec![1, 0]);
     }
 }

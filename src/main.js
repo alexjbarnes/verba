@@ -1966,6 +1966,12 @@ listen('tts-finished', async (event) => {
   // slices to the end of readingText) — auto-advance into the next chapter,
   // or mark the book done on its last one.
   if (bookState) {
+    // The chapter actually played to its end — record it as completed. This
+    // is the ONLY place chapters get marked done; navigation never does.
+    invoke('book_chapter_completed', { id: bookState.id, chapter: bookState.current }).catch(() => {});
+    if (readingItem && Array.isArray(readingItem.completed) && !readingItem.completed.includes(bookState.current)) {
+      readingItem.completed.push(bookState.current);
+    }
     const next = bookState.current + 1;
     if (next < bookState.chapters.length) {
       // readingItem is still the book's item (openBookChapter set it), so its
@@ -2482,15 +2488,20 @@ function saveProgress(force) {
 
 // A book's overall read fraction, word-weighted across chapters (chapter
 // bodies aren't loaded in the list view, only their ChapterMeta word/char
-// counts): chapters before the current one count fully, the current one
-// counts by its character-offset progress within itself.
+// counts): chapters that actually played to the end (it.completed) count
+// fully, the current one by its character-offset progress within itself.
+// Chapters merely jumped past count nothing — navigation must not fabricate
+// listening history.
 function bookProgress(it) {
   const totalWords = it.chapters.reduce((sum, c) => sum + c.words, 0);
+  const done = new Set(it.completed || []);
+  let wordsRead = 0;
+  it.chapters.forEach((c, i) => { if (done.has(i)) wordsRead += c.words; });
   const cur = Math.min(it.current_chapter, it.chapters.length - 1);
-  const wordsBefore = it.chapters.slice(0, cur).reduce((sum, c) => sum + c.words, 0);
   const curChapter = it.chapters[cur];
-  const progressFrac = curChapter && curChapter.chars ? Math.min(1, it.progress / curChapter.chars) : 0;
-  const wordsRead = wordsBefore + progressFrac * (curChapter ? curChapter.words : 0);
+  if (curChapter && !done.has(cur) && curChapter.chars) {
+    wordsRead += Math.min(1, it.progress / curChapter.chars) * curChapter.words;
+  }
   return { totalWords, wordsRead, pct: totalWords ? Math.round(wordsRead / totalWords * 100) : 0 };
 }
 
@@ -2504,7 +2515,7 @@ async function loadLibrary() {
   const list = document.getElementById('lib-list');
   const empty = document.getElementById('lib-empty');
   empty.classList.toggle('hidden', items.length > 0);
-  list.innerHTML = items.slice().reverse().map(it => {
+  const renderRow = (it) => {
     if (it.chapters && it.chapters.length) {
       const { totalWords, wordsRead, pct } = bookProgress(it);
       const chaptersLabel = `${it.chapters.length} chapter${it.chapters.length === 1 ? '' : 's'}`;
@@ -2558,7 +2569,18 @@ async function loadLibrary() {
         <span class="material-symbols-outlined text-lg">delete</span>
       </button>
     </div>`;
-  }).join('');
+  };
+  const rev = items.slice().reverse();
+  const isBook = (it) => !!(it.chapters && it.chapters.length);
+  const books = rev.filter(isBook);
+  const articles = rev.filter(it => !isBook(it));
+  const header = (label) =>
+    `<div class="pt-2 px-1 text-[11px] font-semibold uppercase tracking-wider text-on-surface-variant/70">${label}</div>`;
+  // Books and Articles render as separate sections; headers only earn their
+  // space when both kinds are present (a single-kind library stays a plain list).
+  list.innerHTML = books.length && articles.length
+    ? header('Books') + books.map(renderRow).join('') + header('Articles') + articles.map(renderRow).join('')
+    : rev.map(renderRow).join('');
   const bookIds = new Set(items.filter(it => it.chapters && it.chapters.length).map(it => it.id));
   list.querySelectorAll('.lib-item').forEach(el => {
     el.addEventListener('click', (e) => {
@@ -2740,8 +2762,11 @@ async function openBook(id) {
   setBottomNavVisible(false); // detail view
 
   const listEl = document.getElementById('book-chapters-list');
+  const completed = new Set(item.completed || []);
   listEl.innerHTML = item.chapters.map((ch, idx) => {
-    const done = idx < item.current_chapter;
+    // Done = actually played to the end, never inferred from position:
+    // jumping into chapter 8 must not tick off 1-7.
+    const done = completed.has(idx);
     const current = idx === item.current_chapter;
     const currentChip = current
       ? '<span class="text-[10px] font-semibold text-primary bg-primary/10 rounded px-1.5 py-0.5 mr-1.5">CURRENT</span>'
