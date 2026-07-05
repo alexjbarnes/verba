@@ -57,6 +57,12 @@ const GB_PRONUNCIATION_OVERRIDES: &[(&str, &str)] = &[
     // Reported 2026-07-05: the GB dict's "we're" is a bad wikipron entry (wˈɐ,
     // ~"wuh"). Fix to the NEAR vowel like here/near/fear (hˈiə/nˈiə/fˈiə).
     ("we're", "wˈiə"),
+    // Reported 2026-07-05 (alba), second batch: gb_dict's "un" is the wikipron
+    // entry for the abbreviation "U.N." (jˈuːɛn), which broke hyphen-split
+    // prefixes like "un-iterated" ("U-N iterated"). No trade-off: uppercase
+    // "UN" never reaches this lookup — the all-caps branch spells it via
+    // SPELLED_ACRONYMS (which already lists "un") before the dict is checked.
+    ("un", "ʌn"),
 ];
 
 /// Piper `.onnx.json` sidecar: audio params, speaker count, phoneme id map and
@@ -154,7 +160,7 @@ pub fn model_fingerprint(model_path: &str) -> String {
 /// Bump when data/gb_dict.json (or the RP transform) changes pronunciations:
 /// GB models' cached audio embeds the old phoneme stream, so their cache keys
 /// must roll without invalidating US models' caches.
-const GB_DICT_VERSION: u32 = 8;
+const GB_DICT_VERSION: u32 = 9;
 
 /// True when the sidecar declares a GB espeak voice (same check as engine load).
 fn config_is_gb(config_path: &str) -> bool {
@@ -178,7 +184,7 @@ fn config_is_gb(config_path: &str) -> bool {
 /// this so they can never disagree.
 /// Bump when pronunciation logic changes for ALL locales (heteronym rules,
 /// tokenizer fixes) so cached audio regenerates with the new readings.
-const PRON_VERSION: u32 = 5;
+const PRON_VERSION: u32 = 6;
 
 pub fn cache_fingerprint(model_path: &str, config_path: &str) -> String {
     let fp = model_fingerprint(model_path);
@@ -511,7 +517,8 @@ const PRONUNCIATION_OVERRIDES: &[(&str, &str)] = &[
     ("cuda", "K UW1 D AH0"),
     ("runtime", "R AH1 N T AY2 M"),
     ("runtimes", "R AH1 N T AY2 M Z"),
-    // Reported 2026-07-01. "lazily" was already correct in the dict (not added).
+    // Reported 2026-07-01. "lazily" sounded fine in that batch's voice but the
+    // dict vowel is wrong (L AE1...) — overridden in the 2026-07-05 batch below.
     // "upload(s)" can't reach the compound splitter (its "up" prefix is 2 chars,
     // below SEGMENT_MIN_PIECE); "pushbuffer" and "mispronunciation(s)" are left
     // to the splitter (push+buffer, mis+pronunciation) rather than pinned here.
@@ -651,6 +658,29 @@ const PRONUNCIATION_OVERRIDES: &[(&str, &str)] = &[
     // Expansion target for "Ms." (normalize_text). The GB dict has "mizz" (mˈɪz)
     // but US would spell it out, so pin the US reading too.
     ("mizz", "M IH1 Z"),
+    // Reported 2026-07-05 (alba), second batch. Brand/tech proper nouns and an
+    // OOV suffix family: iPhone/xhigh/sql are letter-name-heavy OOV terms (sql
+    // mirrors the existing sqlite override's stressed letter names); github
+    // pins the US reading and lets the possessive fallback resolve "GitHub's"
+    // through it on every locale, alongside GB's own git+hub compound path.
+    // upsert/iterate are missing from both dicts and the g2p LTS mangles them
+    // ("EYE-ter-ot-or"); "iterate" itself is already pinned above, so only its
+    // unlisted derived forms are added here. lazily corrects a wrong vowel in
+    // cmudict_data (L AE1 Z AH0 L IY0; lazy is L EY1 Z IY0).
+    ("iphone", "AY1 F OW2 N"),
+    ("github", "G IH1 T HH AH2 B"),
+    ("xhigh", "EH1 K S HH AY2"),
+    ("sql", "EH1 S K Y UW1 EH1 L"),
+    ("upsert", "AH1 P S ER2 T"),
+    ("upserts", "AH1 P S ER2 T S"),
+    ("upserted", "AH1 P S ER2 T IH0 D"),
+    ("upserting", "AH1 P S ER2 T IH0 NG"),
+    ("lazily", "L EY1 Z AH0 L IY0"),
+    ("iterates", "IH1 T ER0 EY2 T S"),
+    ("iterated", "IH1 T ER0 EY2 T IH0 D"),
+    ("iterating", "IH1 T ER0 EY2 T IH0 NG"),
+    ("iterator", "IH1 T ER0 EY2 T ER0"),
+    ("iterators", "IH1 T ER0 EY2 T ER0 Z"),
 ];
 
 /// Expand each (possibly multi-codepoint, like "ɑː" or "iː") token into
@@ -781,21 +811,37 @@ fn normalize_numbers(text: &str) -> String {
     while i < chars.len() {
         let c = chars[i];
         let currency = c == '$' && chars.get(i + 1).is_some_and(|d| d.is_ascii_digit());
-        if !currency && !c.is_ascii_digit() {
+        // Leading sign ('+', '-', or the U+2212 minus) immediately before a
+        // digit, at a left boundary (start of text, after whitespace, or
+        // after '('): consumes the sign and speaks "plus"/"minus" before the
+        // number. Boundary-gated so mid-token hyphens pass through untouched:
+        // in "2019-2021" the '-' is preceded by '9' (alphanumeric, not a
+        // boundary), so it falls to the plain passthrough branch below.
+        let sign = if matches!(c, '+' | '-' | '\u{2212}')
+            && chars.get(i + 1).is_some_and(|d| d.is_ascii_digit())
+            && (out.is_empty() || out.ends_with(|b: char| b.is_whitespace() || b == '('))
+        {
+            Some(if c == '+' { "plus" } else { "minus" })
+        } else {
+            None
+        };
+        if !currency && sign.is_none() && !c.is_ascii_digit() {
             out.push(c);
             i += 1;
             continue;
         }
-        if currency {
+        if currency || sign.is_some() {
             i += 1;
         }
         let mut int_str = String::new();
+        let mut had_sep = false;
         while i < chars.len() {
             let d = chars[i];
             if d.is_ascii_digit() {
                 int_str.push(d);
                 i += 1;
             } else if d == ',' && chars.get(i + 1).is_some_and(|x| x.is_ascii_digit()) {
+                had_sep = true;
                 i += 1; // thousands separator
             } else {
                 break;
@@ -851,12 +897,45 @@ fn normalize_numbers(text: &str) -> String {
                 }
             }
         }
+        // Pre-release version suffix ("4.0a1" -> "... alpha one", "1.0rc2" ->
+        // "... release candidate two"): only after a dotted version (frac
+        // non-empty), when a/b/rc is immediately followed by 1+ digits and
+        // then a non-alphanumeric boundary. Only the tag letters are consumed
+        // here; the trailing digits are left for the next loop pass so they
+        // still render as their own number ("3.5ab", "2.0abc1", "4.0a" all
+        // fail one of these conditions and fall through unchanged).
+        let mut prerelease = "";
+        if !frac.is_empty() {
+            for (tag, word) in [("a", "alpha"), ("b", "beta"), ("rc", "release candidate")] {
+                let tag_chars: Vec<char> = tag.chars().collect();
+                let matches_tag = tag_chars.iter().enumerate().all(|(k, &tc)| {
+                    chars.get(i + k).is_some_and(|c| c.to_ascii_lowercase() == tc)
+                });
+                if !matches_tag {
+                    continue;
+                }
+                let after = i + tag_chars.len();
+                let digits = chars[after..].iter().take_while(|c| c.is_ascii_digit()).count();
+                let boundary = chars.get(after + digits).map_or(true, |c| !c.is_alphanumeric());
+                if digits > 0 && boundary {
+                    prerelease = word;
+                    i = after;
+                    break;
+                }
+            }
+        }
         let int_val: u64 = int_str.parse().unwrap_or(0);
         // A bare 4-digit 1100-2099 integer in prose is a year: "since 1980"
         // must read "nineteen eighty", not "one thousand nine hundred eighty".
-        let is_year = !currency && !percent && !ordinal && frac.is_empty()
-            && magnitude.is_empty() && int_str.len() == 4 && (1100..=2099).contains(&int_val);
+        // Comma-grouped ("1,321") or signed ("+1980") numbers are never years.
+        let is_year = !currency && !percent && !ordinal && frac.is_empty() && !had_sep
+            && sign.is_none() && magnitude.is_empty() && int_str.len() == 4
+            && (1100..=2099).contains(&int_val);
         if out.ends_with(|c: char| c.is_alphanumeric()) {
+            out.push(' ');
+        }
+        if let Some(word) = sign {
+            out.push_str(word);
             out.push(' ');
         }
         if is_year {
@@ -894,6 +973,10 @@ fn normalize_numbers(text: &str) -> String {
             if !magnitude.is_empty() {
                 out.push(' ');
                 out.push_str(magnitude);
+            }
+            if !prerelease.is_empty() {
+                out.push(' ');
+                out.push_str(prerelease);
             }
         } else {
             out.push_str(&say_cardinal(int_val));
@@ -1067,6 +1150,31 @@ fn phonemize(
         }
     };
 
+    // Split an OOV word into two dictionary words and pronounce each half
+    // (pushbuffer -> push + buffer), demoting the second part's primary
+    // stress (U+02C8) to secondary (U+02CC) so the pair reads as one
+    // prosodic word instead of two with a pause. Shared by the possessive
+    // fallback (so "GitHub's" can resolve its base "GitHub" through a
+    // compound split even when the base alone is OOV) and the compound
+    // fallback below, so the two paths can't drift apart.
+    let compound_join = |w: &str| -> Result<Option<Vec<String>>, String> {
+        let Some(parts) = segment_compound(word_set, w) else { return Ok(None) };
+        let mut combined: Vec<String> = Vec::new();
+        for (pi, part) in parts.iter().enumerate() {
+            let mut sub = phonemize_word(part)?;
+            if is_oov(&sub) {
+                return Ok(None);
+            }
+            if pi > 0 {
+                for t in sub.iter_mut() {
+                    if t == "\u{02C8}" { *t = "\u{02CC}".to_string(); }
+                }
+            }
+            combined.append(&mut sub);
+        }
+        if combined.is_empty() { Ok(None) } else { Ok(Some(combined)) }
+    };
+
     let pieces = split_tokens(text);
     // Context-resolved heteronyms: piece index -> pseudo dictionary key.
     let het = crate::heteronyms::resolve(&pieces);
@@ -1108,10 +1216,18 @@ fn phonemize(
                 // the whole "word's" token isn't. Pronounce the base and append
                 // the possessive /z/ instead of spelling the whole thing out.
                 // (Common possessives like "cat's"/"it's" are in the dict already,
-                // so they never reach here; this is for proper nouns.)
+                // so they never reach here; this is for proper nouns.) If the
+                // base itself is OOV, also try splitting it as a compound before
+                // giving up — this is what resolves "GitHub's" (base "GitHub")
+                // when only the compound path (git + hub) can pronounce it.
                 if let Some(base) = piece.strip_suffix("'s") {
                     if !base.is_empty() {
                         let mut b = phonemize_word(base)?;
+                        if is_oov(&b) {
+                            if let Some(joined) = compound_join(base)? {
+                                b = joined;
+                            }
+                        }
                         if !is_oov(&b) {
                             b.push("z".to_string());
                             pt = b;
@@ -1202,34 +1318,51 @@ fn phonemize(
                         break;
                     }
                 }
-                // Else split a glued compound into two dictionary words and
-                // pronounce each half (pushbuffer -> push + buffer). Sub-words
-                // come from `word_set` so they phonemize; concatenate their tokens
-                // with no separator so it reads as one word, not two with a pause.
+                // camelCase/PascalCase identifiers ("NotImplementedError",
+                // "PrimaryKeyRequired"): split at every lower->upper boundary
+                // and phonemize each piece as its own word, joined by a
+                // literal space token — identifiers read as separate words
+                // ("Not Implemented Error"), unlike glued compounds which read
+                // as one. Gated on >= 2 transitions (>= 3 parts) so
+                // single-transition brand names fall through to their own
+                // overrides/compound split instead (iPhone, GitHub); iOS (1
+                // transition, 2 parts) keeps spelling letter-by-letter.
                 if !replaced {
-                    if let Some(parts) = segment_compound(word_set, piece) {
+                    let mut parts: Vec<String> = Vec::new();
+                    let mut cur = String::new();
+                    let mut it = piece.chars().peekable();
+                    while let Some(c) = it.next() {
+                        cur.push(c);
+                        if c.is_lowercase() && it.peek().is_some_and(|n| n.is_uppercase()) {
+                            parts.push(std::mem::take(&mut cur));
+                        }
+                    }
+                    if !cur.is_empty() {
+                        parts.push(cur);
+                    }
+                    if parts.len() >= 3 {
                         let mut combined: Vec<String> = Vec::new();
                         let mut ok = true;
                         for (pi, part) in parts.iter().enumerate() {
-                            let mut sub = phonemize_word(part)?;
+                            let sub = phonemize_word(part)?;
                             if is_oov(&sub) { ok = false; break; }
-                            // Each word carries a primary stress marker (ˈ). Joined
-                            // as-is, the second word's ˈ starts a new prosodic unit
-                            // and the model inserts an audible pause (salesforce ->
-                            // "sales ... force"). A compound has ONE primary stress,
-                            // so demote later parts' ˈ (U+02C8) to secondary ˌ
-                            // (U+02CC): it reads as one word, no mid-word pause.
                             if pi > 0 {
-                                for t in sub.iter_mut() {
-                                    if t == "\u{02C8}" { *t = "\u{02CC}".to_string(); }
-                                }
+                                combined.push(" ".to_string());
                             }
-                            combined.append(&mut sub);
+                            combined.extend(sub);
                         }
                         if ok && !combined.is_empty() {
                             pt = combined;
                             replaced = true;
                         }
+                    }
+                }
+                // Else split a glued compound into two dictionary words and
+                // pronounce each half (pushbuffer -> push + buffer).
+                if !replaced {
+                    if let Some(joined) = compound_join(piece)? {
+                        pt = joined;
+                        replaced = true;
                     }
                 }
                 if !replaced {
@@ -1889,9 +2022,12 @@ mod tests {
     #[ignore = "diagnostic probe; run with --ignored --nocapture"]
     fn probe_reported_words() {
         let (ph, ws, gb) = gb_engine();
-        for w in std::env::var("PROBE_WORDS").unwrap_or_default().split(',') {
+        let words = std::env::var("PROBE_WORDS").unwrap_or_default();
+        // ';' separator when present, so words containing commas ("+1,321") probe whole.
+        let sep = if words.contains(';') { ';' } else { ',' };
+        for w in words.split(sep) {
             if w.is_empty() { continue; }
-            let norm = normalize_text(w);
+            let norm = spoken_text(w);
             let gbp = phonemize(&ph, Some(&gb), &ws, &norm).unwrap().join("");
             let usp = phonemize(&ph, None, &ws, &norm).unwrap().join("");
             eprintln!("{w:<16} gb={gbp:<30} us={usp}");
@@ -1915,7 +2051,7 @@ mod tests {
     #[test]
     fn reported_words_reach_phonemes_gb() {
         let (ph, ws, gb) = gb_engine();
-        let say = |t: &str| phonemize(&ph, Some(&gb), &ws, &normalize_text(t)).unwrap().join("");
+        let say = |t: &str| phonemize(&ph, Some(&gb), &ws, &spoken_text(t)).unwrap().join("");
         // OOV words that used to spell out letter-by-letter.
         assert_eq!(say("requeuing"), "ɹiːkjˈuːɪŋ");
         assert_eq!(say("homunculi"), "həʊmˈʌŋkjəlaɪ");
@@ -1931,6 +2067,47 @@ mod tests {
         assert_eq!(say("separate"), "sˈɛpəɹət");
         // Heteronym disambiguation for "separate" still holds after the r fix.
         assert_eq!(say("to separate the files"), "tuː sˈɛpəɹˌeɪt ðɐ fˈaɪlz");
+
+        // 2026-07-05 second batch. Exact strings pinned from the probe (never
+        // hand-derived): PROBE_WORDS="iPhone;GitHub's;xhigh;SQL;upsert;
+        // upserting;iterator;iterated;un-iterated;lazily;+1,321;4.0a1;-40;
+        // NotImplementedError;PrimaryKeyRequired;refuses;raises;UN;the UN said"
+        // OOV brand/tech terms, now via PRONUNCIATION_OVERRIDES.
+        assert_eq!(say("iPhone"), "ˈaɪfˌəʊn");
+        assert_eq!(say("xhigh"), "ˈɛkshˌaɪ");
+        assert_eq!(say("SQL"), "ˈɛskjˈuːˈɛl");
+        assert_eq!(say("upsert"), "ˈʌpsˌət");
+        assert_eq!(say("upserting"), "ˈʌpsˌətɪŋ");
+        assert_eq!(say("iterator"), "ˈɪtəɹˌeɪtɐ");
+        assert_eq!(say("iterated"), "ˈɪtəɹˌeɪtɪd");
+        assert_eq!(say("lazily"), "lˈeɪzəlɪ");
+        // Possessive of an overridden OOV base, plus /z/.
+        assert_eq!(say("GitHub's"), "ɡˈɪthˌʌbz");
+        // Possessive-compound fallback (no override involved): "pushbuffer"
+        // has none (it relies on the plain compound split, per the comment on
+        // PRONUNCIATION_OVERRIDES), so this exercises compound_join purely
+        // through the possessive branch added in this batch. Verified by
+        // temporarily removing the github override that "GitHub's" would
+        // otherwise also resolve through the compound path (git + hub) alone.
+        assert_eq!(say("pushbuffer's"), "pˈʊʃbˌʌfɐz");
+        // GB "un" override fixes the hyphen-split prefix.
+        assert_eq!(say("un-iterated"), "ʌn ˈɪtəɹˌeɪtɪd");
+        // normalize_numbers: signed/comma-grouped numbers and version suffixes,
+        // through the full engine path.
+        assert_eq!(say("+1,321"), "plˈʌs wˈɒn θˈaʊzənd θɹˈiː hˈʌndɹəd twˈɛntɪ wˈɒn");
+        assert_eq!(say("4.0a1"), "fˈɔː pˈɔɪnt zˈiəɹəʊ ˈælfɐ wˈɒn");
+        // camelCase/PascalCase identifier fallback.
+        assert_eq!(say("NotImplementedError"), "nɒt ˈɪmpləmˌɛntəd ˈɛɹɐ");
+        assert_eq!(say("PrimaryKeyRequired"), "pɹˈaɪmˌəɹɪ kˈiː ɹɪkwˈaɪəd");
+        // Checked-correct guards: reported, but already right on GB — do not
+        // "fix" these if a future change makes them regress.
+        assert_eq!(say("refuses"), "ɹəfjˈuːzəz");
+        assert_eq!(say("raises"), "ɹˈeɪzəz");
+        // The GB "un" override must never leak into the all-caps acronym path:
+        // uppercase "UN" still spells letter-by-letter, standalone and in a
+        // sentence.
+        assert_eq!(say("UN"), "juːɛn");
+        assert_eq!(say("the UN said"), "ðɐ juːɛn sˈɛd");
     }
 
     #[test]
@@ -1992,6 +2169,39 @@ mod tests {
         assert_eq!(normalize_numbers("50% off"), "fifty percent off");
         assert_eq!(normalize_numbers("3rd place"), "third place");
         assert_eq!(normalize_numbers("no digits here"), "no digits here");
+    }
+
+    // Reported 2026-07-05 (alba), second batch: signed numbers, comma-grouped
+    // numbers, and pre-release version suffixes.
+    #[test]
+    fn normalize_signs_and_prerelease() {
+        // Comma-grouped and signed numbers are never read as years.
+        assert_eq!(normalize_numbers("+1,321"), "plus one thousand three hundred twenty one");
+        assert_eq!(normalize_numbers("-40"), "minus forty");
+        assert_eq!(
+            normalize_numbers("up +1,321 today"),
+            "up plus one thousand three hundred twenty one today"
+        );
+        // Mid-token hyphen (range): '-' is preceded by '9', not a boundary, so
+        // it is untouched passthrough, same as before this change. (The bare
+        // hyphen carries no phoneme once split_tokens/phonemize see it, so
+        // this is inaudible either way — see reported_words_reach_phonemes_gb.)
+        assert_eq!(normalize_numbers("2019-2021"), "twenty nineteen-twenty twenty one");
+        // Pre-release version suffixes.
+        assert_eq!(normalize_numbers("4.0a1"), "four point zero alpha one");
+        assert_eq!(normalize_numbers("1.0rc2"), "one point zero release candidate two");
+        // Non-matches fall through unchanged.
+        assert_eq!(normalize_numbers("3.5ab"), "three point five ab");
+        assert_eq!(normalize_numbers("2.0abc1"), "two point zero abc one");
+        assert_eq!(normalize_numbers("4.0a"), "four point zero a");
+        // Regression: pre-existing number handling still holds.
+        assert_eq!(normalize_numbers("in 2026."), "in twenty twenty six.");
+        assert_eq!(normalize_numbers("since 1980"), "since nineteen eighty");
+        assert_eq!(
+            normalize_numbers("$1,234.50"),
+            "one thousand two hundred thirty four dollars and fifty cents"
+        );
+        assert_eq!(normalize_numbers("200k users"), "two hundred thousand users");
     }
 
     #[test]

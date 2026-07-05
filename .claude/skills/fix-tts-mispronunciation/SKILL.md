@@ -15,7 +15,9 @@ cd src-tauri && PROBE_WORDS="requeuing,generated,we're,Dr. Smith,IDs" \
   cargo test --lib probe_reported_words -- --ignored --nocapture
 ```
 
-No `ORT_DYLIB_PATH` needed: phonemization is pure Rust. The probe (`piper::tests::probe_reported_words`) runs each word through `normalize_text` then `phonemize` on both the GB and US dictionaries, exactly as `load()` builds them, and prints:
+Use `;` instead of `,` as the separator when a reported word itself contains a comma (`PROBE_WORDS="+1,321;4.0a1;-40"`) — the probe splits on `;` when the list contains one, else on `,`.
+
+No `ORT_DYLIB_PATH` needed: phonemization is pure Rust. The probe (`piper::tests::probe_reported_words`) runs each word through `spoken_text` (`normalize_text` + `normalize_numbers` — the full real text pipeline, not just typography) then `phonemize` on both the GB and US dictionaries, exactly as `load()` builds them, and prints:
 
 ```
 requeuing        gb=ɹiːkjˈuːɪŋ                     us=ɹiːkjˈuːɪŋ
@@ -24,6 +26,8 @@ generated        gb=dʒˈɛnəˌeɪtəd                   us=dʒˈɛnɚˌeɪtəd
 
 Read the IPA aloud in your head. A string of letter-names (`ˈɛskjˈuːˈɛl...` = "S-Q-L") means the word is OOV and being spelled out.
 
+**Digit-containing reports MUST be probed whole** (e.g. `"+1,321"`, `"4.0a1"`, using the `;` separator so the comma/dot survive), not split into bare words — the number is only visible once `normalize_numbers` sees it in context. A number that reads wrong is almost always a `normalize_numbers` bug, not a missing dict entry (a previous probe revision skipped `normalize_numbers` and made every number look silently OOV — that was a diagnostic artifact, not the real behavior).
+
 ## How pronunciation resolves (why the fix location matters)
 
 Per word, in order (`phonemize` + `phonemize_word` in `src-tauri/src/piper.rs`):
@@ -31,7 +35,7 @@ Per word, in order (`phonemize` + `phonemize_word` in `src-tauri/src/piper.rs`):
 1. **GB dict** (`data/gb_dict.json`, ~76k wikipron IPA entries) is checked first on GB voices. If present, it wins outright. A wrong entry here can only be fixed by a **GB override**, never a US one.
 2. Else the **US phonemizer**: CMUdict (`data/cmudict_data.json`, ARPAbet) plus `PRONUNCIATION_OVERRIDES` (ARPAbet) merged in at load.
 3. If the US result is real (not OOV), GB voices run it through **`us_to_rp`** (`src-tauri/src/gb_english.rs`) to rewrite US IPA into RP.
-4. If still OOV, fallbacks fire in order: possessive, acronym-plural, British respelling, plural, prefix, compound split, then letter-by-letter spelling.
+4. If still OOV, fallbacks fire in order: possessive, acronym-plural, British respelling, plural, prefix, camelCase split, compound split, then letter-by-letter spelling. The possessive fallback resolves its base through the dicts/overrides and then the compound splitter (not the other fallbacks) — so e.g. "GitHub's" resolves via the git+hub compound when "GitHub" alone only pronounces that way.
 
 `normalize_text` runs before all of this and rewrites raw text (abbreviations, curly quotes, dashes). Heteronyms (`heteronyms.rs`) inject context-resolved readings via pseudo dict keys.
 
