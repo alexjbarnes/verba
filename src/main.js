@@ -2827,19 +2827,41 @@ document.getElementById('voice-sheet-list').addEventListener('click', async (e) 
 // ── Add-text modal ──
 
 const libAddModal = document.getElementById('lib-add-modal');
-function closeAddModal() {
-  libAddModal.classList.add('hidden');
-  libAddModal.classList.remove('flex');
-}
-// Open the add-text modal. Used by the Library page button and the bottom-nav
-// Add (+) button.
-function openAddModal() {
+const addChooserModal = document.getElementById('add-chooser-modal');
+const addUrlModal = document.getElementById('add-url-modal');
+function openModal(el) { el.classList.remove('hidden'); el.classList.add('flex'); }
+function closeModal(el) { el.classList.add('hidden'); el.classList.remove('flex'); }
+
+// The bottom-nav + button and the Library page button open a source chooser
+// (Text, URL, File, eBook). Text and URL are wired; File/eBook are stubbed
+// until import support lands.
+function openAddModal() { openModal(addChooserModal); }
+
+function openTextModal() {
   document.getElementById('lib-add-title').value = '';
   document.getElementById('lib-add-body').value = '';
-  libAddModal.classList.remove('hidden');
-  libAddModal.classList.add('flex');
+  openModal(libAddModal);
 }
+function closeAddModal() { closeModal(libAddModal); }
+
+function openUrlModal() {
+  document.getElementById('add-url-input').value = '';
+  openModal(addUrlModal);
+}
+function closeUrlModal() { closeModal(addUrlModal); }
+
 document.getElementById('lib-add-btn').addEventListener('click', openAddModal);
+document.getElementById('add-chooser-cancel').addEventListener('click', () => closeModal(addChooserModal));
+addChooserModal.addEventListener('click', (e) => {
+  if (e.target === addChooserModal) { closeModal(addChooserModal); return; } // backdrop
+  const btn = e.target.closest('.add-source');
+  if (!btn) return;
+  const src = btn.dataset.source;
+  if (src === 'text') { closeModal(addChooserModal); openTextModal(); }
+  else if (src === 'url') { closeModal(addChooserModal); openUrlModal(); }
+  else { showToast('Coming soon'); } // file, ebook — stubbed
+});
+
 document.getElementById('lib-add-cancel').addEventListener('click', closeAddModal);
 document.getElementById('lib-add-save').addEventListener('click', async () => {
   const title = document.getElementById('lib-add-title').value;
@@ -2850,6 +2872,17 @@ document.getElementById('lib-add-save').addEventListener('click', async () => {
     closeAddModal();
     loadLibrary();
   } catch (err) { showToast('Save failed: ' + err); }
+});
+
+document.getElementById('add-url-cancel').addEventListener('click', closeUrlModal);
+document.getElementById('add-url-save').addEventListener('click', () => {
+  let url = document.getElementById('add-url-input').value.trim();
+  if (!url) { showToast('Paste a URL first'); return; }
+  if (!/^https?:\/\//i.test(url)) url = 'https://' + url;
+  closeUrlModal();
+  // importSharedText extracts the URL, fetches + Readability-parses in Rust,
+  // adds to the library, switches to Listen and opens the reader.
+  importSharedText(url);
 });
 
 // ── Feeds (RSS subscriptions) ──
