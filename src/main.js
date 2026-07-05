@@ -164,14 +164,17 @@ document.getElementById('nav-more-list').addEventListener('click', (e) => {
 
 // ── Speak / Listen mode ──
 
+const modeThumb = document.getElementById('mode-thumb');
+
 function setMode(mode) {
   currentMode = mode;
+  if (modeThumb) modeThumb.style.transform = mode === 'listen' ? 'translateX(100%)' : 'translateX(0)';
   document.querySelectorAll('.mode-btn').forEach(b => {
     const active = b.dataset.mode === mode;
-    b.classList.toggle('bg-surface-container-low', active);
-    b.classList.toggle('shadow-sm', active);
-    b.classList.toggle('text-on-surface', active);
+    b.classList.toggle('text-primary', active);
     b.classList.toggle('text-on-surface-variant', !active);
+    const icon = b.querySelector('.material-symbols-outlined');
+    if (icon) icon.style.fontVariationSettings = `'FILL' ${active ? 1 : 0}`;
   });
   renderBottomNav();
   navigateTo(modeDefaultTab[mode]);
