@@ -5,10 +5,16 @@ let engineReady = false;
 
 // ── Confirm dialog (window.confirm doesn't work in WKWebView) ──
 
-function showConfirm(message) {
+// Confirm dialog. Defaults to a destructive "Delete" action (its original
+// use); pass { okLabel, danger:false } for a neutral action like Download.
+function showConfirm(message, { okLabel = 'Delete', danger = true } = {}) {
   return new Promise((resolve) => {
     const dialog = document.getElementById('confirm-dialog');
     document.getElementById('confirm-msg').textContent = message;
+    const ok = document.getElementById('confirm-ok');
+    ok.textContent = okLabel;
+    ok.classList.toggle('bg-error', danger);
+    ok.classList.toggle('bg-primary', !danger);
     dialog.classList.remove('hidden');
     dialog.classList.add('flex');
 
@@ -23,67 +29,140 @@ function showConfirm(message) {
   });
 }
 
+// Gate a voice's (possibly large) model download behind a prompt. Returns true
+// if the model is already on disk or the user agreed to fetch it.
+async function confirmVoiceDownload(model) {
+  const m = modelById(model);
+  if (isDownloaded(m)) return true;
+  const name = (m && m.name) || 'this voice';
+  const size = m && m.size ? ` (${m.size})` : '';
+  return showConfirm(`Download ${name}${size}? It downloads once, then works offline.`,
+    { okLabel: 'Download', danger: false });
+}
+
 // ── Sidebar & navigation ──
 
-const sidebar = document.getElementById('sidebar');
-const sidebarOverlay = document.getElementById('sidebar-overlay');
 const isDesktop = !navigator.userAgent.includes('Android');
 const modeDefaultTab = { speak: 'history', listen: 'library' };
 let currentMode = 'speak';
+let activeTab = null;
 
-function openSidebar() {
-  sidebar.classList.remove('-translate-x-full');
-  sidebarOverlay.classList.remove('hidden');
+// Detail views hide the bottom nav (and drop the player bar to the screen edge).
+const DETAIL_PANELS = new Set(['reading', 'feed-entries']);
+
+// Bottom-nav layout per mode. `center` is the prominent circular action button
+// (Listen's Add); `overflow` opens the More sheet.
+const BOTTOM_NAV = {
+  listen: [
+    { tab: 'library', label: 'Library', icon: 'library_books' },
+    { tab: 'feeds', label: 'Feeds', icon: 'rss_feed' },
+    { action: 'add', label: 'Add', icon: 'add', center: true },
+    { tab: 'voices', label: 'Voices', icon: 'graphic_eq' },
+    { overflow: true, label: 'More', icon: 'more_horiz' },
+  ],
+  speak: [
+    { tab: 'history', label: 'History', icon: 'history' },
+    { tab: 'snippets', label: 'Snippets', icon: 'sticky_note_2' },
+    { tab: 'models', label: 'Models', icon: 'layers' },
+    { tab: 'general', label: 'Settings', icon: 'settings' },
+    { overflow: true, label: 'More', icon: 'more_horiz' },
+  ],
+};
+// Pages reachable only through the More sheet, per mode.
+const MORE_ITEMS = {
+  listen: [
+    { tab: 'reports', label: 'Reports', icon: 'flag' },
+    { tab: 'debug', label: 'Debug', icon: 'bug_report' },
+  ],
+  speak: [
+    ...(isDesktop ? [{ tab: 'audio', label: 'Audio', icon: 'mic' }] : []),
+    { tab: 'debug', label: 'Debug', icon: 'bug_report' },
+  ],
+};
+
+const bottomNav = document.getElementById('bottom-nav');
+const moreSheet = document.getElementById('nav-more-sheet');
+
+// Per-tab data refreshers, run when a tab is shown.
+const TAB_LOADERS = {
+  history: () => loadHistory(),
+  models: () => loadModels(),
+  general: () => loadVocab(),
+  snippets: () => loadSnippets(),
+  library: () => loadLibrary(),
+  feeds: () => loadFeeds(),
+  voices: () => loadVoices(),
+  reports: () => loadReports(),
+};
+
+// Show a top-level tab: swap the panel, refresh its data, keep/hide the player
+// bar as a mini-player, and light up the matching bottom-nav slot.
+function navigateTo(tab) {
+  activeTab = tab;
+  showPanel(tab);
+  setBottomNavVisible(!DETAIL_PANELS.has(tab));
+  // Leaving any open reading: keep the player bar only while audio is actively
+  // playing (mini-player); otherwise hide it.
+  if (!(ttsStarted && !ttsState.finished && !ttsState.paused)) hidePlayerBar();
+  renderBottomNav();
+  const load = TAB_LOADERS[tab];
+  if (load) load();
 }
 
-function closeSidebar() {
-  sidebar.classList.add('-translate-x-full');
-  sidebarOverlay.classList.add('hidden');
+function renderBottomNav() {
+  const items = BOTTOM_NAV[currentMode] || [];
+  bottomNav.innerHTML = items.map(it => {
+    if (it.center) {
+      return `<button class="nav-slot flex-1 flex items-center justify-center" data-action="${it.action}">
+        <span class="w-14 h-14 -mt-5 flex items-center justify-center rounded-full bg-primary text-on-primary shadow-lg active:scale-95 transition-transform">
+          <span class="material-symbols-outlined text-3xl">${it.icon}</span>
+        </span>
+      </button>`;
+    }
+    const active = it.tab && it.tab === activeTab;
+    const attr = it.overflow ? 'data-overflow="1"' : `data-tab="${it.tab}"`;
+    const color = active ? 'text-primary' : 'text-on-surface-variant';
+    return `<button class="nav-slot flex-1 flex flex-col items-center justify-center gap-0.5 py-1.5 ${color} active:opacity-70 transition-colors" ${attr}>
+      <span class="material-symbols-outlined text-[22px]" style="font-variation-settings:'FILL' ${active ? 1 : 0}">${it.icon}</span>
+      <span class="text-[10px] font-medium leading-none">${it.label}</span>
+    </button>`;
+  }).join('');
 }
 
-document.getElementById('sidebar-toggle').addEventListener('click', openSidebar);
-sidebarOverlay.addEventListener('click', closeSidebar);
+// Toggle the nav, then re-anchor the player bar relative to it.
+function setBottomNavVisible(show) {
+  bottomNav.classList.toggle('hidden', !show);
+  positionPlayerBar();
+}
 
-document.querySelectorAll('.nav-btn').forEach(btn => {
-  btn.addEventListener('click', () => {
-    document.querySelectorAll('.nav-btn').forEach(b => {
-      b.classList.remove('text-primary', 'bg-primary/10');
-      b.classList.add('text-on-surface-variant');
-    });
-    document.querySelectorAll('.tab-panel').forEach(p => p.classList.add('hidden'));
+bottomNav.addEventListener('click', (e) => {
+  const slot = e.target.closest('.nav-slot');
+  if (!slot) return;
+  if (slot.dataset.action === 'add') { openAddModal(); return; }
+  if (slot.dataset.overflow) { openMoreSheet(); return; }
+  if (slot.dataset.tab) navigateTo(slot.dataset.tab);
+});
 
-    btn.classList.remove('text-on-surface-variant');
-    btn.classList.add('text-primary', 'bg-primary/10');
-    document.getElementById(btn.dataset.tab).classList.remove('hidden');
+// ── More sheet ──
 
-    closeSidebar();
-
-    // Sidebar nav leaves any open reading. Keep the player bar only while audio
-    // is actively playing (as a mini-player); otherwise hide it.
-    if (!(ttsStarted && !ttsState.finished && !ttsState.paused)) hidePlayerBar();
-
-    // Refresh data when switching to relevant tabs
-    if (btn.dataset.tab === 'history') loadHistory();
-    if (btn.dataset.tab === 'models') loadModels();
-    if (btn.dataset.tab === 'general') loadVocab();
-    if (btn.dataset.tab === 'snippets') loadSnippets();
-    if (btn.dataset.tab === 'library') loadLibrary();
-    if (btn.dataset.tab === 'feeds') loadFeeds();
-    if (btn.dataset.tab === 'voices') loadVoices();
-    if (btn.dataset.tab === 'reports') loadReports();
-  });
+function openMoreSheet() {
+  document.getElementById('nav-more-list').innerHTML = (MORE_ITEMS[currentMode] || []).map(it =>
+    `<button class="more-item w-full flex items-center gap-3 px-4 py-3 rounded-xl text-left cursor-pointer hover:bg-surface-container-highest text-on-surface" data-tab="${it.tab}">
+      <span class="material-symbols-outlined text-lg text-on-surface-variant">${it.icon}</span>
+      <span class="text-sm">${it.label}</span>
+    </button>`).join('');
+  moreSheet.classList.remove('hidden');
+}
+function closeMoreSheet() { moreSheet.classList.add('hidden'); }
+document.getElementById('nav-more-overlay').addEventListener('click', closeMoreSheet);
+document.getElementById('nav-more-list').addEventListener('click', (e) => {
+  const btn = e.target.closest('.more-item');
+  if (!btn) return;
+  closeMoreSheet();
+  navigateTo(btn.dataset.tab);
 });
 
 // ── Speak / Listen mode ──
-
-function applyModeVisibility(mode) {
-  document.querySelectorAll('.nav-btn').forEach(btn => {
-    const m = btn.dataset.mode;
-    const visible = (m === mode || m === 'global')
-      && (btn.dataset.desktopOnly !== 'true' || isDesktop);
-    btn.classList.toggle('hidden', !visible);
-  });
-}
 
 function setMode(mode) {
   currentMode = mode;
@@ -94,9 +173,8 @@ function setMode(mode) {
     b.classList.toggle('text-on-surface', active);
     b.classList.toggle('text-on-surface-variant', !active);
   });
-  applyModeVisibility(mode);
-  const target = document.querySelector(`.nav-btn[data-tab="${modeDefaultTab[mode]}"]`);
-  if (target) target.click();
+  renderBottomNav();
+  navigateTo(modeDefaultTab[mode]);
 }
 
 document.querySelectorAll('.mode-btn').forEach(b => {
@@ -548,16 +626,18 @@ listen('download-progress', (event) => {
   const { id, progress } = event.payload;
   const pct = Math.round(progress * 100);
 
-  // Reader's inline voice-download bar + Voices-page empty-state bar (neither
-  // has a model-row container).
+  // Reader's inline voice-download bar (no model-row container).
   if (id === ttsModelId) {
-    for (const [fillId, pctId] of [['tts-dl-fill', 'tts-dl-pct'], ['voices-dl-fill', 'voices-dl-pct']]) {
-      const f = document.getElementById(fillId);
-      const p = document.getElementById(pctId);
-      if (f) f.style.width = `${pct}%`;
-      if (p) p.textContent = `${pct}%`;
-    }
+    const f = document.getElementById('tts-dl-fill');
+    const p = document.getElementById('tts-dl-pct');
+    if (f) f.style.width = `${pct}%`;
+    if (p) p.textContent = `${pct}%`;
   }
+
+  // Voices-page catalogue: inline percent on the row being fetched via Use.
+  document.querySelectorAll(`[data-voice-progress="${id}"]`).forEach(el => {
+    el.textContent = `${pct}%`;
+  });
 
   const container = document.querySelector(`[data-model-id="${id}"]`);
   if (!container) return;
@@ -637,7 +717,10 @@ async function loadConfig() {
   document.getElementById('cfg-threads').value = String(cfg.threads);
 
   // Restore TTS voice favourites, last-selected voice, and per-voice speeds.
-  ttsFavourites = Array.isArray(cfg.tts_favourite_sids) ? cfg.tts_favourite_sids.slice() : [];
+  // Favourites are "model:sid" keys. Old configs stored bare sids, but those
+  // only ever referred to LibriTTS speakers and that model left the
+  // catalogue, so there is nothing to migrate them onto.
+  ttsFavourites = Array.isArray(cfg.tts_favourite_voices) ? cfg.tts_favourite_voices.slice() : [];
   ttsVoiceSpeeds = (cfg.tts_voice_speeds && typeof cfg.tts_voice_speeds === 'object') ? cfg.tts_voice_speeds : {};
   ttsActiveModel = cfg.tts_model || '';
   ttsVoice = cfg.tts_voice || '0';
@@ -1101,6 +1184,10 @@ const TTS_VOICE_PRESETS = {
 let ttsModelId = null;       // active Piper TTS model id, resolved from the registry
 let ttsLoadedModelId = null;
 let ttsLoadedEngine = null;
+// Set when the voice/model changes; a paused player must re-synthesize under
+// the new voice on resume instead of resuming the old audio. Cleared whenever
+// a fresh synth starts (startSpeak).
+let voiceDirty = false;
 // User-chosen TTS model (config.tts_model); '' = first registry TTS model.
 let ttsActiveModel = '';
 
@@ -1111,12 +1198,10 @@ function pickTtsModel(models) {
   return all.find(m => m.id === ttsActiveModel) || all[0] || null;
 }
 
-// Friendly label for a speaker id. Models with a named preset (e.g. Kokoro) use
-// it; LibriTTS speakers are unnamed, so fall back to "Voice N".
+// Friendly label for a speaker id of the ACTIVE model (catalogue names, then
+// legacy presets, then "Voice N").
 function voiceLabel(sid) {
-  const presets = TTS_VOICE_PRESETS[ttsModelId] || [];
-  const p = presets.find(v => v.sid === sid);
-  return p ? p.label : `Voice ${sid}`;
+  return catalogLabel(ttsModelId, sid);
 }
 
 async function updateTtsPanel() {
@@ -1153,121 +1238,105 @@ async function updateTtsPanel() {
   block.classList.toggle('hidden', downloaded && !downloading);
 }
 
-// ── Voices page: sample + favourite ──
+// ── Voices page: catalogue (listen, favourite, download) ──
 
-// Speaker count for the model, cached when the Voices page or voice sheet builds.
-let voicesNumSpeakers = 0;
-// sid currently auditioning (drives the row's playing icon); -1 = none.
-let samplingSid = -1;
+// Remote audition clips from the piper-samples site (playable before the
+// model is downloaded); local synthesis is the fallback once it is.
+const SAMPLE_BASE = 'https://rhasspy.github.io/piper-samples/samples/';
+
+// Internal plumbing only: sample-clip path builders per backing file. The
+// UI never surfaces "models" — users see voices, and the shared file a
+// voice needs is fetched transparently on first Use.
+const MODEL_META = {
+  'tts-piper-alba': { sample: () => 'en/en_GB/alba/medium/speaker_0.mp3' },
+  'tts-piper-alan': { sample: () => 'en/en_GB/alan/medium/speaker_0.mp3' },
+  'tts-piper-aru': { sample: sid => `en/en_GB/aru/medium/speaker_${sid}.mp3` },
+  'tts-piper-cori': { sample: () => 'en/en_GB/cori/medium/speaker_0.mp3' },
+  'tts-piper-cori-high': { sample: () => 'en/en_GB/cori/high/speaker_0.mp3' },
+  'tts-piper-jenny': { sample: () => 'en/en_GB/jenny_dioco/medium/speaker_0.mp3' },
+  'tts-piper-northern-male': { sample: () => 'en/en_GB/northern_english_male/medium/speaker_0.mp3' },
+  'tts-piper-semaine': { sample: sid => `en/en_GB/semaine/medium/speaker_${sid}.mp3` },
+  'tts-piper-southern-female': { sample: () => 'en/en_GB/southern_english_female/low/speaker_0.mp3' },
+};
+
+// The catalogue as users see it: named voices first, the big generic packs
+// under "More voices". Keys stay model-scoped internally.
+const VOICES = [
+  { model: 'tts-piper-alba', sid: 0, label: 'Alba', hint: 'Scottish female' },
+  { model: 'tts-piper-alan', sid: 0, label: 'Alan', hint: 'Male' },
+  { model: 'tts-piper-cori', sid: 0, label: 'Cori', hint: 'Female' },
+  { model: 'tts-piper-cori-high', sid: 0, label: 'Cori HQ', hint: 'Female, highest quality' },
+  { model: 'tts-piper-jenny', sid: 0, label: 'Jenny', hint: 'Female' },
+  { model: 'tts-piper-northern-male', sid: 0, label: 'Northern English Male', hint: 'Male, northern accent' },
+  { model: 'tts-piper-southern-female', sid: 0, label: 'Southern English Female', hint: 'Female, southern accent' },
+  { model: 'tts-piper-semaine', sid: 0, label: 'Prudence', hint: 'Expressive female' },
+  { model: 'tts-piper-semaine', sid: 1, label: 'Spike', hint: 'Expressive male' },
+  { model: 'tts-piper-semaine', sid: 2, label: 'Obadiah', hint: 'Expressive male' },
+  { model: 'tts-piper-semaine', sid: 3, label: 'Poppy', hint: 'Expressive female' },
+  ...Array.from({ length: 12 }, (_, i) => ({ model: 'tts-piper-aru', sid: i, label: `Aru ${i + 1}`, group: 1 })),
+];
+
+function voiceByKey(key) {
+  return VOICES.find(v => voiceKey(v.model, v.sid) === key);
+}
+
+let ttsModelsCache = [];
+// Voice currently auditioning (drives the row's playing icon); null = none.
+let samplingKey = null;
 let sampleClearTimer = null;
+let sampleAudio = null;
 
-// The "Voice models" section: one row per registry TTS model with its
-// download/active state. Only rendered when there's a choice to make.
-function renderVoiceModels(models) {
-  const section = document.getElementById('voices-models-section');
-  const list = document.getElementById('voices-models-list');
-  const all = models.filter(m => m.engine.startsWith('tts_'));
-  section.classList.toggle('hidden', all.length < 2);
-  if (all.length < 2) return;
-  const active = pickTtsModel(models);
-  list.innerHTML = all.map(m => {
-    const downloaded = m.status === 'downloaded' || m.status === 'active';
-    const downloading = m.status === 'downloading';
-    const right = active && m.id === active.id
-      ? '<span class="text-[11px] font-semibold text-primary shrink-0 px-3">Active</span>'
-      : downloaded
-        ? `<button class="voice-model-use shrink-0 text-xs font-semibold text-on-surface-variant hover:text-primary transition-colors px-3 py-1.5 rounded-lg hover:bg-primary/10 cursor-pointer" data-id="${escapeHtml(m.id)}">Use</button>`
-        : `<button class="voice-model-dl shrink-0 text-xs font-semibold text-on-primary bg-primary px-3 py-1.5 rounded-lg hover:brightness-110 transition-colors cursor-pointer disabled:opacity-40" data-id="${escapeHtml(m.id)}" ${downloading ? 'disabled' : ''}>${downloading ? 'Downloading…' : 'Download'}</button>`;
-    return `
-    <div class="flex items-center justify-between gap-3 px-4 py-2.5">
-      <div class="min-w-0 flex-1">
-        <div class="text-sm text-on-surface truncate">${escapeHtml(m.name)}</div>
-        <div class="text-[11px] text-on-surface-variant truncate mt-0.5">${escapeHtml(m.desc || m.size)}</div>
-      </div>
-      ${right}
-    </div>`;
-  }).join('');
+const voiceKey = (model, sid) => `${model}:${sid}`;
+
+function splitKey(key) {
+  const i = key.lastIndexOf(':');
+  return [key.slice(0, i), key.slice(i + 1)];
 }
 
-async function selectVoiceModel(id) {
-  ttsActiveModel = id;
-  try {
-    const cfg = await invoke('get_config');
-    cfg.tts_model = id;
-    await invoke('save_config', { cfg });
-  } catch (_) {}
-  // Force a reload on the next play/sample and reset to the model's first
-  // speaker (the old sid may not exist on the new model).
-  try { await invoke('tts_stop'); } catch (_) {}
-  ttsLoadedModelId = null;
-  ttsVoice = '0';
-  updateVoiceBtnLabel();
-  setTtsSpeed(speedForVoice(ttsVoice));
-  await loadVoices();
+function catalogLabel(model, sid) {
+  const v = voiceByKey(voiceKey(model, sid));
+  if (v) return v.label;
+  const presets = TTS_VOICE_PRESETS[model] || [];
+  const p = presets.find(x => x.sid === sid);
+  if (p) return p.label;
+  return `Voice ${sid}`;
 }
 
-document.getElementById('voices-models-list').addEventListener('click', async (e) => {
-  const useBtn = e.target.closest('.voice-model-use');
-  if (useBtn) { selectVoiceModel(useBtn.dataset.id); return; }
-  const dlBtn = e.target.closest('.voice-model-dl');
-  if (dlBtn) {
-    dlBtn.disabled = true;
-    dlBtn.textContent = 'Downloading…';
-    try {
-      await invoke('download_model', { id: dlBtn.dataset.id });
-    } catch (err) {
-      showToast('Download failed: ' + err);
-    }
-    loadVoices();
-  }
-});
-
-async function loadVoices() {
-  const models = await invoke('list_models');
-  renderVoiceModels(models);
-  const tts = pickTtsModel(models);
-  const dl = document.getElementById('voices-download');
-  const favSection = document.getElementById('voices-fav-section');
-  const allSection = document.getElementById('voices-all-section');
-  const dlBtn = document.getElementById('voices-download-btn');
-
-  if (!tts) {
-    dl.classList.remove('hidden');
-    document.getElementById('voices-download-label').textContent = 'No voice model available';
-    dlBtn.classList.add('hidden');
-    favSection.classList.add('hidden');
-    allSection.classList.add('hidden');
-    return;
-  }
-
-  ttsModelId = tts.id;
-  const downloaded = tts.status === 'downloaded' || tts.status === 'active';
-  if (!downloaded) {
-    dl.classList.remove('hidden');
-    document.getElementById('voices-download-label').textContent = `${tts.name}, ${tts.size}`;
-    dlBtn.classList.remove('hidden');
-    dlBtn.disabled = tts.status === 'downloading';
-    favSection.classList.add('hidden');
-    allSection.classList.add('hidden');
-    return;
-  }
-  dl.classList.add('hidden');
-
-  const info = await invoke('tts_info');
-  voicesNumSpeakers = info.loaded ? info.num_speakers : await invoke('tts_model_speakers', { id: tts.id });
-  renderVoiceLists();
+function modelById(id) { return ttsModelsCache.find(m => m.id === id); }
+function isDownloaded(m) { return !!m && (m.status === 'downloaded' || m.status === 'active'); }
+function speakersOf(m) {
+  return VOICES.filter(v => v.model === m.id).length || 1;
 }
 
-function voiceRowHtml(sid) {
-  const fav = ttsFavourites.includes(sid);
-  const playing = sid === samplingSid;
+function voiceRowHtml(v) {
+  const key = voiceKey(v.model, v.sid);
+  const m = modelById(v.model);
+  const fav = ttsFavourites.includes(key);
+  const playing = key === samplingKey;
+  const ready = isDownloaded(m);
+  const inUse = ready && (pickTtsModel(ttsModelsCache) || {}).id === v.model && String(v.sid) === ttsVoice;
+  const hintBits = [];
+  if (v.hint) hintBits.push(escapeHtml(v.hint));
+  if (!ready && m) hintBits.push(`${escapeHtml(m.size)} on first use`);
+  const hint = hintBits.length
+    ? `<span class="block text-[11px] text-on-surface-variant/70 truncate">${hintBits.join(' \u{b7} ')}</span>`
+    : '';
+  const right = inUse
+    ? '<span class="text-[11px] font-semibold text-primary shrink-0">In use</span>'
+    : key === pendingUseKey
+      ? `<span class="text-[11px] font-semibold text-on-surface-variant shrink-0" data-voice-progress="${escapeHtml(v.model)}">0%</span>`
+      : `<button class="voice-use shrink-0 text-xs font-semibold text-on-surface-variant hover:text-primary transition-colors px-2 py-1 rounded-lg hover:bg-primary/10 cursor-pointer" data-model="${escapeHtml(v.model)}" data-sid="${v.sid}">Use</button>`;
   return `
-    <div class="voice-row flex items-center justify-between gap-2 px-4 py-2.5" data-sid="${sid}">
-      <button class="voice-sample flex items-center gap-3 min-w-0 flex-1 text-left cursor-pointer" data-sid="${sid}">
+    <div class="voice-row flex items-center justify-between gap-2 px-4 py-2.5" data-key="${escapeHtml(key)}">
+      <button class="voice-sample flex items-center gap-3 min-w-0 flex-1 text-left cursor-pointer" data-model="${escapeHtml(v.model)}" data-sid="${v.sid}">
         <span class="material-symbols-outlined text-xl ${playing ? 'text-primary' : 'text-on-surface-variant'}">${playing ? 'graphic_eq' : 'play_circle'}</span>
-        <span class="text-sm text-on-surface truncate">${escapeHtml(voiceLabel(sid))}</span>
+        <span class="min-w-0">
+          <span class="block text-sm text-on-surface truncate">${escapeHtml(v.label)}</span>
+          ${hint}
+        </span>
       </button>
-      <button class="voice-fav shrink-0 p-1 cursor-pointer ${fav ? 'text-primary' : 'text-on-surface-variant/40'}" data-sid="${sid}">
+      ${right}
+      <button class="voice-fav shrink-0 p-1 cursor-pointer ${fav ? 'text-primary' : 'text-on-surface-variant/40'}" data-key="${escapeHtml(key)}">
         <span class="material-symbols-outlined text-lg" style="font-variation-settings:'FILL' ${fav ? 1 : 0}">star</span>
       </button>
     </div>`;
@@ -1276,65 +1345,153 @@ function voiceRowHtml(sid) {
 function rebuildFavSection() {
   const favSection = document.getElementById('voices-fav-section');
   const favList = document.getElementById('voices-fav-list');
-  const favs = ttsFavourites.filter(sid => sid < voicesNumSpeakers);
-  favSection.classList.toggle('hidden', favs.length === 0);
-  favList.innerHTML = favs.map(voiceRowHtml).join('');
+  const rows = ttsFavourites
+    .map(key => {
+      const v = voiceByKey(key);
+      // Stale keys (unknown voice or its backing file left the registry)
+      // stay in config but don't render.
+      return v && modelById(v.model) ? voiceRowHtml(v) : '';
+    })
+    .filter(Boolean);
+  favSection.classList.toggle('hidden', rows.length === 0);
+  favList.innerHTML = rows.join('');
 }
 
-function renderVoiceLists() {
+async function loadVoices() {
+  const models = await invoke('list_models');
+  ttsModelsCache = models.filter(m => m.engine.startsWith('tts_'));
+  const active = pickTtsModel(models);
+  if (active) ttsModelId = active.id;
+  const section = (title, rows) => rows.length
+    ? `<section>
+        <p class="text-xs font-semibold text-on-surface-variant uppercase tracking-wider mb-2">${title}</p>
+        <div class="bg-surface-container-low rounded-xl overflow-hidden divide-y divide-white/5">${rows.map(voiceRowHtml).join('')}</div>
+      </section>`
+    : '';
+  document.getElementById('voices-catalogue').innerHTML =
+    section('Voices', VOICES.filter(v => !v.group && modelById(v.model)))
+    + section('More voices', VOICES.filter(v => v.group === 1 && modelById(v.model)));
   rebuildFavSection();
-  const allSection = document.getElementById('voices-all-section');
-  const allList = document.getElementById('voices-all-list');
-  allSection.classList.toggle('hidden', voicesNumSpeakers <= 0);
-  let html = '';
-  for (let sid = 0; sid < voicesNumSpeakers; sid++) html += voiceRowHtml(sid);
-  allList.innerHTML = html;
 }
 
-async function sampleVoice(sid) {
-  if (!ttsModelId) { showToast('No voice available'); return; }
-  try {
-    if (!ttsLoadedModelId) {
-      await invoke('tts_load', { id: ttsModelId });
-      ttsLoadedModelId = ttsModelId;
+function stopSampleAudio() {
+  if (sampleAudio) {
+    try { sampleAudio.pause(); } catch (_) { /* already stopped */ }
+    sampleAudio = null;
+  }
+}
+
+async function localSample(model, sid) {
+  if (ttsLoadedModelId !== model) {
+    await invoke('tts_load', { id: model });
+    ttsLoadedModelId = model;
+  }
+  await invoke('tts_sample', { sid, speed: ttsSpeed });
+}
+
+// Preview a voice: stream the piper-samples clip (works before download);
+// fall back to on-device synthesis for downloaded models without a clip.
+async function sampleVoiceRow(model, sid) {
+  stopSampleAudio();
+  setSamplingKey(voiceKey(model, sid));
+  const meta = MODEL_META[model];
+  const url = meta && meta.sample ? SAMPLE_BASE + meta.sample(sid) : null;
+  const fallback = async () => {
+    if (!isDownloaded(modelById(model))) {
+      showToast('No sample available — download the model to preview');
+      clearSampling();
+      return;
     }
-    await invoke('tts_sample', { sid, speed: ttsSpeed });
-    setSamplingSid(sid);
-  } catch (err) { showToast('Sample failed: ' + err); }
+    try { await localSample(model, sid); } catch (err) {
+      showToast('Sample failed: ' + err);
+      clearSampling();
+    }
+  };
+  if (!url) { await fallback(); return; }
+  sampleAudio = new Audio(url);
+  sampleAudio.onended = () => clearSampling();
+  sampleAudio.onerror = () => { fallback(); };
+  try { await sampleAudio.play(); } catch (_) { await fallback(); }
 }
 
-// The sample plays with no app handle, so no finished event comes back. Show the
-// playing icon on the row and clear it after a short delay (or when another row
-// is sampled).
-function setSamplingSid(sid) {
-  const prev = samplingSid;
-  samplingSid = sid;
-  if (prev !== sid) updateSampleIcon(prev);
-  updateSampleIcon(sid);
+function setSamplingKey(key) {
+  const prev = samplingKey;
+  samplingKey = key;
+  if (prev && prev !== key) updateSampleIcon(prev);
+  updateSampleIcon(key);
   if (sampleClearTimer) clearTimeout(sampleClearTimer);
-  sampleClearTimer = setTimeout(() => { const s = samplingSid; samplingSid = -1; updateSampleIcon(s); }, 4000);
+  // Local synth has no finished event back to us; clear after the clip-ish
+  // duration unless another row starts first.
+  sampleClearTimer = setTimeout(clearSampling, 7000);
 }
 
-function updateSampleIcon(sid) {
-  if (sid < 0) return;
-  const playing = sid === samplingSid;
-  document.querySelectorAll(`.voice-sample[data-sid="${sid}"] .material-symbols-outlined`).forEach(icon => {
+function clearSampling() {
+  const prev = samplingKey;
+  samplingKey = null;
+  if (prev) updateSampleIcon(prev);
+  if (sampleClearTimer) { clearTimeout(sampleClearTimer); sampleClearTimer = null; }
+}
+
+function updateSampleIcon(key) {
+  const playing = key === samplingKey;
+  document.querySelectorAll(`.voice-row[data-key="${CSS.escape(key)}"] .voice-sample .material-symbols-outlined`).forEach(icon => {
     icon.textContent = playing ? 'graphic_eq' : 'play_circle';
     icon.classList.toggle('text-primary', playing);
     icon.classList.toggle('text-on-surface-variant', !playing);
   });
 }
 
-async function toggleFavourite(sid) {
-  const i = ttsFavourites.indexOf(sid);
+// Voice being fetched because the user tapped Use before its backing file
+// was on disk; activation completes when the download does.
+let pendingUseKey = null;
+
+// Switch the reader to a voice. If its backing file isn't downloaded yet,
+// ask first, then fetch — the row shows inline progress and the voice
+// activates when the download completes.
+async function useVoice(model, sid) {
+  const key = voiceKey(model, sid);
+  if (!isDownloaded(modelById(model))) {
+    if (!await confirmVoiceDownload(model)) return;
+    pendingUseKey = key;
+    await loadVoices();
+    try {
+      await invoke('download_model', { id: model });
+    } catch (err) {
+      showToast('Voice download failed: ' + err);
+      pendingUseKey = null;
+      await loadVoices();
+      return;
+    }
+    if (pendingUseKey !== key) return; // user picked another voice meanwhile
+    pendingUseKey = null;
+    const models = await invoke('list_models');
+    ttsModelsCache = models.filter(m => m.engine.startsWith('tts_'));
+  }
+  const active = pickTtsModel(ttsModelsCache);
+  if (!active || active.id !== model) {
+    ttsActiveModel = model;
+    try {
+      const cfg = await invoke('get_config');
+      cfg.tts_model = model;
+      await invoke('save_config', { cfg });
+    } catch (_) { /* non-fatal */ }
+    try { await invoke('tts_stop'); } catch (_) { /* not playing */ }
+    ttsLoadedModelId = null;
+    ttsModelId = model;
+  }
+  setTtsVoice(String(sid));
+  await loadVoices();
+}
+
+async function toggleFavourite(key) {
+  const i = ttsFavourites.indexOf(key);
   const adding = i < 0;
-  if (adding) ttsFavourites.push(sid);
+  if (adding) ttsFavourites.push(key);
   else ttsFavourites.splice(i, 1);
-  ttsFavourites.sort((a, b) => a - b);
   await persistFavourites();
-  // Update the star in place across both lists, then rebuild only the small
-  // favourites list (avoids re-rendering the full ~900-row list each tap).
-  document.querySelectorAll(`.voice-fav[data-sid="${sid}"]`).forEach(btn => {
+  // Update stars in place across catalogue + favourites, then rebuild only
+  // the small favourites list (avoids re-rendering ~1000 rows per tap).
+  document.querySelectorAll(`.voice-fav[data-key="${CSS.escape(key)}"]`).forEach(btn => {
     btn.classList.toggle('text-primary', adding);
     btn.classList.toggle('text-on-surface-variant/40', !adding);
     const star = btn.querySelector('.material-symbols-outlined');
@@ -1346,38 +1503,21 @@ async function toggleFavourite(sid) {
 async function persistFavourites() {
   try {
     const cfg = await invoke('get_config');
-    cfg.tts_favourite_sids = ttsFavourites;
+    cfg.tts_favourite_voices = ttsFavourites;
     await invoke('save_config', { cfg });
   } catch (err) { showToast('Save failed: ' + err); }
 }
 
-function onVoiceListClick(e) {
+function onCatalogueClick(e) {
+  const use = e.target.closest('.voice-use');
+  if (use) { useVoice(use.dataset.model, parseInt(use.dataset.sid, 10)); return; }
   const sampleBtn = e.target.closest('.voice-sample');
-  if (sampleBtn) { sampleVoice(parseInt(sampleBtn.dataset.sid, 10)); return; }
+  if (sampleBtn) { sampleVoiceRow(sampleBtn.dataset.model, parseInt(sampleBtn.dataset.sid, 10)); return; }
   const favBtn = e.target.closest('.voice-fav');
-  if (favBtn) { toggleFavourite(parseInt(favBtn.dataset.sid, 10)); }
+  if (favBtn) toggleFavourite(favBtn.dataset.key);
 }
-document.getElementById('voices-fav-list').addEventListener('click', onVoiceListClick);
-document.getElementById('voices-all-list').addEventListener('click', onVoiceListClick);
-
-document.getElementById('voices-download-btn').addEventListener('click', async () => {
-  if (!ttsModelId) return;
-  const btn = document.getElementById('voices-download-btn');
-  const progress = document.getElementById('voices-dl-progress');
-  btn.disabled = true;
-  btn.textContent = 'Downloading...';
-  progress.classList.remove('hidden');
-  try {
-    await invoke('download_model', { id: ttsModelId });
-    // download-complete refreshes the page; reset the button for next time.
-    btn.textContent = 'Download';
-  } catch (err) {
-    showToast('Download failed: ' + err);
-    progress.classList.add('hidden');
-    btn.disabled = false;
-    btn.textContent = 'Download';
-  }
-});
+document.getElementById('voices-catalogue').addEventListener('click', onCatalogueClick);
+document.getElementById('voices-fav-list').addEventListener('click', onCatalogueClick);
 
 document.getElementById('tts-download-btn').addEventListener('click', async () => {
   if (!ttsModelId) return;
@@ -1558,12 +1698,27 @@ function fmtMins(ms) {
 
 function showPlayerBar() {
   playerBar.classList.remove('translate-y-full');
+  positionPlayerBar();
   document.querySelectorAll('.tab-panel').forEach(p => { p.style.paddingBottom = PLAYER_PAD; });
 }
 
 function hidePlayerBar() {
   playerBar.classList.add('translate-y-full');
+  positionPlayerBar();
   document.querySelectorAll('.tab-panel').forEach(p => { p.style.paddingBottom = ''; });
+}
+
+// Keep the fixed player bar just above the bottom nav when BOTH are shown, so
+// the mini-player and tab bar stack (Spotify-style) without overlapping. When
+// the player is hidden or the nav is a detail view, it drops to the edge so
+// translate-y-full slides it fully off-screen. Height is measured so safe-area
+// insets never cause overlap.
+function positionPlayerBar() {
+  const navVisible = !bottomNav.classList.contains('hidden');
+  const playerShown = !playerBar.classList.contains('translate-y-full');
+  const lift = navVisible && playerShown;
+  playerBar.style.bottom = lift ? `${bottomNav.offsetHeight}px` : '0px';
+  playerBar.style.paddingBottom = lift ? '0px' : 'env(safe-area-inset-bottom)';
 }
 
 function resetTtsUI() {
@@ -1813,6 +1968,12 @@ playPauseBtn.addEventListener('click', () => {
       startSpeak(readingText, 0, 0);
     }
   } else if (ttsState.paused) {
+    // Voice changed while paused: re-synthesize from here under the new voice
+    // instead of resuming the old audio.
+    if (voiceDirty) {
+      const r = currentResumePoint();
+      if (r) { ttsState.paused = false; startSpeak(r.text, r.word, r.ms); return; }
+    }
     invoke('tts_resume');
   } else {
     invoke('tts_pause');
@@ -1925,6 +2086,7 @@ async function startSpeak(text, baseWord, baseMs) {
 
   const myGen = ++genId;
   ttsStarted = true;
+  voiceDirty = false; // this synth reflects the current voice
   setTtsLoading(true); // generating/pre-buffering until the first audio plays
   autoFollow = true;
   dynMilestoneIdx = 0;
@@ -2028,22 +2190,33 @@ async function startSpeak(text, baseWord, baseMs) {
   }
 }
 
-// On a speed or voice change mid-listen, continue from the current word at the
-// new setting rather than restarting from the top.
-async function resumeFromCurrentWord() {
-  if (ttsState.finished || ttsState.paused) return;
-  if (playerBar.classList.contains('translate-y-full')) return; // not playing
-  if (!readingText) return;
-  // Derive the current word from the PLAYBACK position, not the highlight, so a
-  // re-render works even when highlighting hasn't caught up. Fall back to the
-  // fragment start before any timing has arrived.
+// True when audio is actively playing (bar shown, not paused/finished).
+function isPlaying() {
+  return !ttsState.finished && !ttsState.paused
+    && !playerBar.classList.contains('translate-y-full');
+}
+
+// Where playback currently is, as a {text, word, ms} startSpeak can resume
+// from. Derived from the PLAYBACK position, not the highlight, so it's valid
+// even when highlighting hasn't caught up. Null when there's nothing to
+// resume. Capture this BEFORE any voice/model switch that might reset state.
+function currentResumePoint() {
+  if (!readingText) return null;
   const curMs = timelineBaseMs + ttsState.position_ms;
   let w = wordAtTime(curMs);
   if (w == null) w = genBaseWord;
-  if (!readingWords[w]) return;
+  if (!readingWords[w]) return null;
   const remaining = readingText.slice(readingWords[w].start);
-  if (!remaining.trim()) return;
-  await startSpeak(remaining, w, wordTimes[w] ? wordTimes[w].s : curMs);
+  if (!remaining.trim()) return null;
+  return { text: remaining, word: w, ms: wordTimes[w] ? wordTimes[w].s : curMs };
+}
+
+// On a speed or voice change mid-listen, continue from the current word at the
+// new setting rather than restarting from the top.
+async function resumeFromCurrentWord() {
+  if (!isPlaying()) return;
+  const r = currentResumePoint();
+  if (r) await startSpeak(r.text, r.word, r.ms);
 }
 
 speedPresets.forEach(chip => {
@@ -2426,6 +2599,7 @@ async function openReading(id) {
   document.getElementById('reading-title').textContent = item.title;
   renderReading(readingText);
   showPanel('reading');
+  setBottomNavVisible(false); // detail view: hide the tab bar, player bar to edge
 
   // Resume point: a part-read item (progress between 0 and the end) reopens at
   // that word and highlights it; a finished or fresh item starts at the top.
@@ -2461,8 +2635,7 @@ document.getElementById('reading-back').addEventListener('click', () => {
   saveProgress(true);
   invoke('tts_stop');
   hidePlayerBar();
-  showPanel('library');
-  loadLibrary();
+  navigateTo('library');
 });
 
 // Tap a word to jump playback there. Ignore taps that finish a text selection
@@ -2492,6 +2665,7 @@ function speedForVoice(voice) {
 }
 
 function setTtsVoice(val) {
+  if (String(val) !== ttsVoice) voiceDirty = true;
   ttsVoice = String(val);
   updateVoiceBtnLabel();
   // Each voice carries its own speed; restore it (default 1x) and reflect it in
@@ -2521,25 +2695,41 @@ function voiceSheetItemHtml(value, label) {
     </button>`;
 }
 
-// Build the player voice list: favourites if any, else all speakers; then any
-// custom voices. Speaker count is fetched here so the sheet works even if the
+// Build the player voice list: starred voices from the catalogue (any model)
+// if there are any, else all speakers of the active model; then any custom
+// voices. Speaker count is fetched here so the sheet works even if the
 // Voices page was never opened.
 async function buildVoiceSheet() {
   const list = document.getElementById('voice-sheet-list');
   const hint = document.getElementById('voice-sheet-hint');
-  let n = 0;
-  try {
-    const info = await invoke('tts_info');
-    n = info.loaded ? info.num_speakers : (ttsModelId ? await invoke('tts_model_speakers', { id: ttsModelId }) : 0);
-  } catch (_) {}
-  voicesNumSpeakers = n;
+  if (!ttsModelsCache.length) {
+    try {
+      const models = await invoke('list_models');
+      ttsModelsCache = models.filter(m => m.engine.startsWith('tts_'));
+    } catch (_) { /* offline: sheet still renders from the active model */ }
+  }
 
-  const favs = ttsFavourites.filter(sid => sid < n);
-  const usingFavs = favs.length > 0;
-  const sids = usingFavs ? favs : Array.from({ length: n }, (_, i) => i);
-  hint.textContent = usingFavs ? 'Favourites' : (n > 0 ? 'All voices' : '');
-
-  let html = sids.map(sid => voiceSheetItemHtml(String(sid), voiceLabel(sid))).join('');
+  let html = '';
+  if (ttsFavourites.length) {
+    hint.textContent = 'Favourites';
+    html = ttsFavourites.map(key => {
+      const [model, sidStr] = splitKey(key);
+      if (model === ttsModelId) {
+        return voiceSheetItemHtml(sidStr, catalogLabel(model, parseInt(sidStr, 10)));
+      }
+      const modelName = (modelById(model) || {}).name || model;
+      const label = `${catalogLabel(model, parseInt(sidStr, 10))} \u{b7} ${modelName}`;
+      return voiceSheetItemHtml(key, label);
+    }).join('');
+  } else {
+    // No favourites yet: offer every voice that's ready to speak.
+    const ready = VOICES.filter(v => isDownloaded(modelById(v.model)));
+    hint.textContent = ready.length ? 'Voices' : '';
+    html = ready.map(v => {
+      const val = v.model === ttsModelId ? String(v.sid) : voiceKey(v.model, v.sid);
+      return voiceSheetItemHtml(val, v.label);
+    }).join('');
+  }
 
   const custom = await invoke('tts_list_custom_voices');
   if (custom.length) {
@@ -2555,14 +2745,82 @@ async function openVoiceSheet() {
 }
 function closeVoiceSheet() { voiceSheet.classList.add('hidden'); }
 
+// Switch the active TTS model from the player, WITHOUT tearing down playback
+// (unlike useVoice, which is for the Voices page). Fetches the backing voice
+// if needed — the CALLER must confirm the download first (confirmVoiceDownload)
+// so this never pulls MBs unprompted. The next startSpeak lazy-loads the new
+// model because ttsLoadedModelId is cleared. Returns false if the fetch failed.
+async function switchActiveModel(model) {
+  if (ttsModelId === model) return true;
+  if (!isDownloaded(modelById(model))) {
+    try {
+      await invoke('download_model', { id: model });
+      const models = await invoke('list_models');
+      ttsModelsCache = models.filter(m => m.engine.startsWith('tts_'));
+    } catch (err) {
+      showToast('Voice download failed: ' + err);
+      return false;
+    }
+  }
+  ttsActiveModel = model;
+  try {
+    const cfg = await invoke('get_config');
+    cfg.tts_model = model;
+    await invoke('save_config', { cfg });
+  } catch (_) { /* non-fatal */ }
+  ttsLoadedModelId = null; // force reload of the new model on next speak
+  ttsModelId = model;
+  voiceDirty = true;
+  return true;
+}
+
 document.getElementById('tts-voice-btn').addEventListener('click', openVoiceSheet);
 document.getElementById('voice-sheet-overlay').addEventListener('click', closeVoiceSheet);
-document.getElementById('voice-sheet-list').addEventListener('click', (e) => {
+document.getElementById('voice-sheet-list').addEventListener('click', async (e) => {
   const btn = e.target.closest('.voice-pick');
   if (!btn) return;
-  setTtsVoice(btn.dataset.voice);
+  const val = btn.dataset.voice;
+  const cross = !val.startsWith('custom:') && val.includes(':');
+  const targetModel = cross ? splitKey(val)[0] : null;
   closeVoiceSheet();
-  resumeFromCurrentWord();
+
+  // Prompt before any large download, BEFORE touching playback, so declining
+  // leaves the current voice playing untouched.
+  if (cross && !await confirmVoiceDownload(targetModel)) return;
+
+  // Snapshot the resume point up front: switching models clears the loaded
+  // engine, so grab where we are while state is still intact.
+  const resume = isPlaying() ? currentResumePoint() : null;
+
+  // Selecting a new voice mid-listen: silence the old voice immediately and
+  // show the buffering state, rather than letting it play on while the new
+  // model loads in the background. tts_pause keeps the media session alive
+  // (unlike tts_stop) so we can resume cleanly.
+  if (resume) {
+    setTtsLoading(true);
+    try { await invoke('tts_pause'); } catch (_) { /* nothing playing */ }
+  }
+
+  let ok = true;
+  if (cross) {
+    // A voice on another model: switch model + speaker together. The download
+    // (if any) is already user-confirmed above.
+    const [model, sidStr] = splitKey(val);
+    ok = await switchActiveModel(model);
+    if (ok) setTtsVoice(sidStr);
+  } else {
+    setTtsVoice(val);
+  }
+
+  if (resume && ok) {
+    // New voice ready to generate: play it from where we paused.
+    await startSpeak(resume.text, resume.word, resume.ms);
+  } else if (resume) {
+    // Switch failed (e.g. download error): drop the buffering state and resume
+    // the original voice where it left off.
+    setTtsLoading(false);
+    try { await invoke('tts_resume'); } catch (_) { /* nothing to resume */ }
+  }
 });
 
 // ── Add-text modal ──
@@ -2572,12 +2830,15 @@ function closeAddModal() {
   libAddModal.classList.add('hidden');
   libAddModal.classList.remove('flex');
 }
-document.getElementById('lib-add-btn').addEventListener('click', () => {
+// Open the add-text modal. Used by the Library page button and the bottom-nav
+// Add (+) button.
+function openAddModal() {
   document.getElementById('lib-add-title').value = '';
   document.getElementById('lib-add-body').value = '';
   libAddModal.classList.remove('hidden');
   libAddModal.classList.add('flex');
-});
+}
+document.getElementById('lib-add-btn').addEventListener('click', openAddModal);
 document.getElementById('lib-add-cancel').addEventListener('click', closeAddModal);
 document.getElementById('lib-add-save').addEventListener('click', async () => {
   const title = document.getElementById('lib-add-title').value;
@@ -3004,6 +3265,7 @@ async function openFeedEntries(id) {
   document.getElementById('feed-entries-title').textContent = feed.title;
   document.getElementById('feed-auto-add').checked = !!feed.auto_add;
   showPanel('feed-entries');
+  setBottomNavVisible(false); // detail view
   const listEl = document.getElementById('feed-entries-list');
   if (!sessionEntries[feed.id]) {
     listEl.innerHTML = '<div class="text-xs text-on-surface-variant px-1 py-4">Loading…</div>';
@@ -3170,8 +3432,7 @@ document.getElementById('feed-add-save').addEventListener('click', async () => {
 
 document.getElementById('feed-entries-back').addEventListener('click', () => {
   browsingFeed = null;
-  showPanel('feeds');
-  loadFeeds();
+  navigateTo('feeds');
 });
 
 document.getElementById('feed-auto-add').addEventListener('change', (e) => {

@@ -67,58 +67,13 @@
 </head>
 <body class="bg-surface text-on-surface font-sans antialiased overflow-hidden h-screen flex flex-col select-none">
 
-  <!-- Top bar -->
-  <header class="flex items-center gap-3 px-4 py-3 shrink-0 bg-surface-container-low border-b border-outline-variant/30" data-tauri-drag-region>
-    <button id="sidebar-toggle" class="text-on-surface-variant hover:text-on-surface transition-colors cursor-pointer p-1 -ml-1 rounded-lg hover:bg-surface-container-highest">
-      <span class="material-symbols-outlined text-xl">menu</span>
-    </button>
-    <div id="mode-switch" class="flex flex-1 gap-0.5 bg-surface-container-highest rounded-lg p-0.5">
+  <!-- Top bar: Listen / Speak selector -->
+  <header class="flex items-center justify-center px-4 py-3 shrink-0 bg-surface-container-low border-b border-outline-variant/30" data-tauri-drag-region>
+    <div id="mode-switch" class="flex w-full max-w-xs gap-0.5 bg-surface-container-highest rounded-lg p-0.5">
       <button class="mode-btn flex-1 text-center py-2 rounded-md text-sm font-semibold transition-colors bg-surface-container-low shadow-sm text-on-surface" data-mode="speak">Speak</button>
       <button class="mode-btn flex-1 text-center py-2 rounded-md text-sm font-semibold transition-colors text-on-surface-variant" data-mode="listen">Listen</button>
     </div>
   </header>
-
-  <!-- Sidebar overlay -->
-  <div id="sidebar-overlay" class="fixed inset-0 z-40 bg-black/50 backdrop-blur-sm hidden"></div>
-
-  <!-- Sidebar -->
-  <aside id="sidebar" class="fixed top-0 left-0 z-50 h-full w-64 bg-surface-container-low border-r border-outline-variant/30 -translate-x-full transition-transform duration-200 ease-out flex flex-col" style="padding-top: env(safe-area-inset-top);">
-    <div class="px-5 py-4 border-b border-outline-variant/20">
-      <p class="text-base font-bold text-on-surface tracking-tight">Verba</p>
-    </div>
-    <nav class="flex-1 py-2 overflow-y-auto">
-      <button class="nav-btn w-full flex items-center gap-3 px-5 py-3 text-sm font-medium text-on-surface-variant hover:text-on-surface hover:bg-surface-container-highest transition-colors cursor-pointer" data-tab="history" data-mode="speak">
-        <span class="material-symbols-outlined text-lg">history</span> History
-      </button>
-      <button class="nav-btn w-full flex items-center gap-3 px-5 py-3 text-sm font-medium text-on-surface-variant hover:text-on-surface hover:bg-surface-container-highest transition-colors cursor-pointer" data-tab="snippets" data-mode="speak">
-        <span class="material-symbols-outlined text-lg">sticky_note_2</span> Snippets
-      </button>
-      <button class="nav-btn w-full flex items-center gap-3 px-5 py-3 text-sm font-medium text-on-surface-variant hover:text-on-surface hover:bg-surface-container-highest transition-colors cursor-pointer" data-tab="models" data-mode="speak">
-        <span class="material-symbols-outlined text-lg">layers</span> Models
-      </button>
-      <button id="nav-audio" class="nav-btn w-full flex items-center gap-3 px-5 py-3 text-sm font-medium text-on-surface-variant hover:text-on-surface hover:bg-surface-container-highest transition-colors cursor-pointer hidden" data-tab="audio" data-mode="speak" data-desktop-only="true">
-        <span class="material-symbols-outlined text-lg">mic</span> Audio
-      </button>
-      <button class="nav-btn w-full flex items-center gap-3 px-5 py-3 text-sm font-medium text-on-surface-variant hover:text-on-surface hover:bg-surface-container-highest transition-colors cursor-pointer" data-tab="general" data-mode="speak">
-        <span class="material-symbols-outlined text-lg">settings</span> Settings
-      </button>
-      <button class="nav-btn w-full flex items-center gap-3 px-5 py-3 text-sm font-medium text-on-surface-variant hover:text-on-surface hover:bg-surface-container-highest transition-colors cursor-pointer" data-tab="library" data-mode="listen">
-        <span class="material-symbols-outlined text-lg">library_books</span> Library
-      </button>
-      <button class="nav-btn w-full flex items-center gap-3 px-5 py-3 text-sm font-medium text-on-surface-variant hover:text-on-surface hover:bg-surface-container-highest transition-colors cursor-pointer" data-tab="feeds" data-mode="listen">
-        <span class="material-symbols-outlined text-lg">rss_feed</span> Feeds
-      </button>
-      <button class="nav-btn w-full flex items-center gap-3 px-5 py-3 text-sm font-medium text-on-surface-variant hover:text-on-surface hover:bg-surface-container-highest transition-colors cursor-pointer" data-tab="voices" data-mode="listen">
-        <span class="material-symbols-outlined text-lg">graphic_eq</span> Voices
-      </button>
-      <button class="nav-btn w-full flex items-center gap-3 px-5 py-3 text-sm font-medium text-on-surface-variant hover:text-on-surface hover:bg-surface-container-highest transition-colors cursor-pointer" data-tab="reports" data-mode="listen">
-        <span class="material-symbols-outlined text-lg">flag</span> Reports
-      </button>
-      <button class="nav-btn w-full flex items-center gap-3 px-5 py-3 text-sm font-medium text-on-surface-variant hover:text-on-surface hover:bg-surface-container-highest transition-colors cursor-pointer" data-tab="debug" data-mode="global">
-        <span class="material-symbols-outlined text-lg">bug_report</span> Debug
-      </button>
-    </nav>
-  </aside>
 
   <!-- History tab -->
   <div id="history" class="tab-panel flex-1 overflow-y-auto px-5 py-6 flex flex-col">
@@ -433,35 +388,14 @@
       <p class="text-xs text-on-surface-variant mt-0.5">Tap a voice to hear a sample. Star your favourites to show them in the player.</p>
     </div>
 
-    <!-- Voice models: pick which downloaded model provides the voices below -->
-    <section id="voices-models-section" class="hidden">
-      <p class="text-xs font-semibold text-on-surface-variant uppercase tracking-wider mb-2">Voice models</p>
-      <div id="voices-models-list" class="bg-surface-container-low rounded-xl overflow-hidden divide-y divide-white/5"></div>
-    </section>
-
-    <!-- Empty state when the voice model isn't downloaded yet -->
-    <div id="voices-download" class="hidden flex flex-col items-center justify-center py-12 text-center text-on-surface-variant">
-      <span class="material-symbols-outlined text-4xl mb-3 opacity-30">graphic_eq</span>
-      <p class="text-sm">Voice not downloaded yet</p>
-      <p id="voices-download-label" class="text-xs mt-1 opacity-70 mb-4">Download required</p>
-      <button id="voices-download-btn" class="text-xs font-semibold px-4 py-2 bg-primary text-on-primary rounded-lg hover:brightness-110 transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed">Download</button>
-      <div id="voices-dl-progress" class="hidden w-40 mt-3">
-        <div class="progress-bar"><div id="voices-dl-fill" class="progress-bar-fill" style="width:0%"></div></div>
-        <span id="voices-dl-pct" class="text-[10px] mt-1 block text-right">0%</span>
-      </div>
-    </div>
-
-    <!-- Favourites -->
+    <!-- Favourites: starred voices across every model -->
     <section id="voices-fav-section" class="hidden">
       <p class="text-xs font-semibold text-on-surface-variant uppercase tracking-wider mb-2">Favourites</p>
       <div id="voices-fav-list" class="bg-surface-container-low rounded-xl overflow-hidden divide-y divide-white/5"></div>
     </section>
 
-    <!-- All voices -->
-    <section id="voices-all-section" class="hidden">
-      <p class="text-xs font-semibold text-on-surface-variant uppercase tracking-wider mb-2">All voices</p>
-      <div id="voices-all-list" class="bg-surface-container-low rounded-xl overflow-hidden divide-y divide-white/5"></div>
-    </section>
+    <!-- Catalogue: one group per voice model, with inline download -->
+    <section id="voices-catalogue" class="space-y-5"></section>
 
     <!-- Generation settings -->
     <section>
@@ -517,6 +451,19 @@
       </div>
     </div>
     <div id="log-output" class="flex-1 min-h-0 bg-surface-container-lowest rounded-xl border border-outline-variant/20 p-3 overflow-y-auto font-mono text-xs leading-relaxed"></div>
+  </div>
+
+  <!-- Bottom navigation bar (rendered per mode by main.js) -->
+  <nav id="bottom-nav" class="shrink-0 bg-surface-container-low border-t border-outline-variant/20 flex items-stretch justify-around px-1 pt-1" style="padding-bottom: max(0.25rem, env(safe-area-inset-bottom));"></nav>
+
+  <!-- Overflow ("More") sheet -->
+  <div id="nav-more-sheet" class="fixed inset-0 z-50 hidden">
+    <div id="nav-more-overlay" class="absolute inset-0 bg-black/50"></div>
+    <div class="absolute bottom-0 left-0 right-0 bg-surface-container-high rounded-t-2xl shadow-xl border-t border-outline-variant/20 max-h-[70vh] flex flex-col" style="padding-bottom: max(1.25rem, env(safe-area-inset-bottom));">
+      <div class="w-10 h-1 bg-outline-variant/40 rounded-full mx-auto mt-3 mb-4 shrink-0"></div>
+      <p class="text-sm font-bold text-on-surface px-5 mb-2 shrink-0">More</p>
+      <div id="nav-more-list" class="overflow-y-auto px-3 pb-2"></div>
+    </div>
   </div>
 
   <!-- Confirm dialog (replaces window.confirm which doesn't work in WKWebView) -->
