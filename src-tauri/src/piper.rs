@@ -184,7 +184,7 @@ fn config_is_gb(config_path: &str) -> bool {
 /// this so they can never disagree.
 /// Bump when pronunciation logic changes for ALL locales (heteronym rules,
 /// tokenizer fixes) so cached audio regenerates with the new readings.
-const PRON_VERSION: u32 = 6;
+const PRON_VERSION: u32 = 7;
 
 pub fn cache_fingerprint(model_path: &str, config_path: &str) -> String {
     let fp = model_fingerprint(model_path);
@@ -1000,7 +1000,8 @@ fn normalize_numbers(text: &str) -> String {
 /// Normalize typographic characters the phonemizer and CMUdict don't understand
 /// into ASCII equivalents. Curly apostrophes become straight so contractions
 /// like "don't" stay one dictionary word instead of splitting into "don" + "t";
-/// curly quotes become straight; em/en dashes and ellipsis become pause marks.
+/// curly quotes become straight; ellipsis becomes a full stop; dashes used as
+/// a spoken pause become a clause-pause comma (see the dash block below).
 /// Runs before tokenization.
 fn normalize_text(text: &str) -> String {
     // Latin abbreviations: the internal dots would otherwise read as pauses
@@ -1025,15 +1026,98 @@ fn normalize_text(text: &str) -> String {
         .replace("Mr.", "Mister")
         .replace("Ms.", "Mizz")
         .replace("Prof.", "Professor");
-    text.chars()
-        .map(|c| match c {
-            '\u{2019}' | '\u{2018}' | '\u{02BC}' => '\'',
-            '\u{201C}' | '\u{201D}' => '"',
-            '\u{2014}' | '\u{2013}' => ',',
-            '\u{2026}' => '.',
-            _ => c,
-        })
-        .collect()
+
+    // Dashes used as a spoken pause ("wait — no", "wait -- no", "wait - no")
+    // rewrite to a clause-pause comma so they ride the CLAUSE_PAUSE_MS
+    // machinery split_for_pauses and phonemize's kept-punctuation filter
+    // already give ',' — em/en dash used to map straight to ',' with no
+    // regard for spacing or neighboring digits, which (a) left a bare ASCII
+    // hyphen used the same way ("wait - no") without any pause cue at all,
+    // since '-' isn't in that kept-punctuation set, and (b) mangled a digit
+    // range ("2019\u{2013}2021") into a comma that normalize_numbers then
+    // read as a thousands separator, fusing the two numbers into one huge
+    // cardinal. Any surrounding space is collapsed so the result is always
+    // "word, word", never "word , word". A digit-adjacent dash is a RANGE,
+    // not a pause, and becomes a plain hyphen instead — same as an ASCII
+    // hyphen range, which already reads silently (split_tokens/phonemize
+    // drop a bare mid-token '-'; see normalize_signs_and_prerelease).
+    // Unspaced hyphens ("un-iterated", "well-known") are compound words, not
+    // dashes, and are left untouched.
+    let chars: Vec<char> = text.chars().collect();
+    let n = chars.len();
+    // Rewrite the dash of length `len` starting at `from` into a clause-pause
+    // comma: drop one trailing space already written to `out` (if any) and
+    // swallow one leading space in the source (if any). Returns the index
+    // just past the consumed dash (and any swallowed trailing space).
+    let push_dash_pause = |out: &mut String, from: usize, len: usize| -> usize {
+        if out.ends_with(' ') {
+            out.pop();
+        }
+        out.push_str(", ");
+        let mut j = from + len;
+        if chars.get(j).is_some_and(|&d| d == ' ') {
+            j += 1;
+        }
+        j
+    };
+    let mut out = String::new();
+    let mut i = 0;
+    while i < n {
+        let c = chars[i];
+        if matches!(c, '\u{2019}' | '\u{2018}' | '\u{02BC}') {
+            out.push('\'');
+            i += 1;
+        } else if matches!(c, '\u{201C}' | '\u{201D}') {
+            out.push('"');
+            i += 1;
+        } else if c == '\u{2026}' {
+            out.push('.');
+            i += 1;
+        } else if matches!(c, '\u{2014}' | '\u{2013}') {
+            let is_range = i >= 1
+                && chars[i - 1].is_ascii_digit()
+                && chars.get(i + 1).is_some_and(|d| d.is_ascii_digit());
+            if is_range {
+                out.push('-');
+                i += 1;
+            } else {
+                i = push_dash_pause(&mut out, i, 1);
+            }
+        } else if c == '-' && chars.get(i + 1).is_some_and(|&d| d == '-') {
+            // Double (or longer) hyphen run: an old-typewriter dash substitute.
+            let mut end = i;
+            while chars.get(end).is_some_and(|&d| d == '-') {
+                end += 1;
+            }
+            let is_range = i >= 1
+                && chars[i - 1].is_ascii_digit()
+                && chars.get(end).is_some_and(|d| d.is_ascii_digit());
+            if is_range {
+                for _ in i..end {
+                    out.push('-');
+                }
+                i = end;
+            } else {
+                i = push_dash_pause(&mut out, i, end - i);
+            }
+        } else if c == '-'
+            && i >= 2
+            && chars[i - 1] == ' '
+            && chars[i - 2].is_alphabetic()
+            && chars.get(i + 1).is_some_and(|&d| d == ' ')
+            && chars.get(i + 2).is_some_and(|d| d.is_alphabetic())
+        {
+            // A spaced single hyphen with letters on both ends is a dash
+            // ("word - word"), not a line-start list marker (which has no
+            // letter immediately before the leading space) and not a
+            // compound word (which has no space around its hyphen).
+            i = push_dash_pause(&mut out, i, 1);
+        } else {
+            out.push(c);
+            i += 1;
+        }
+    }
+    out
 }
 
 /// Split text into word / standalone-punctuation runs, preserving punctuation so
@@ -2043,6 +2127,43 @@ mod tests {
         assert_eq!(normalize_text("Prof. Lee"), "Professor Lee");
     }
 
+    // Reported 2026-07-05: dashes read aloud with no audible pause. Em/en
+    // dash, a "--" run, and a spaced ASCII hyphen used the same way all
+    // rewrite to a clause-pause comma so they ride the CLAUSE_PAUSE_MS
+    // machinery (see split_for_pauses / the punctuation-piece filter in
+    // phonemize). Spacing is collapsed either way: glued or spaced input
+    // both land on "word, word".
+    #[test]
+    fn dash_pause_rewrites() {
+        assert_eq!(normalize_text("wait \u{2014} no"), "wait, no");
+        assert_eq!(normalize_text("one\u{2014}two"), "one, two");
+        assert_eq!(normalize_text("a \u{2013} b"), "a, b");
+        assert_eq!(normalize_text("one\u{2013}two"), "one, two");
+        assert_eq!(normalize_text("word -- word"), "word, word");
+        assert_eq!(normalize_text("word--word"), "word, word");
+        assert_eq!(normalize_text("word - word"), "word, word");
+    }
+
+    // Negative guards: shapes that must NOT be touched, so the dash rewrite
+    // never corrupts a compound word or a digit range.
+    #[test]
+    fn dash_pause_negative_guards() {
+        // Unspaced hyphen compounds are words, not dashes.
+        assert_eq!(normalize_text("un-iterated"), "un-iterated");
+        assert_eq!(normalize_text("well-known plan"), "well-known plan");
+        // A digit-adjacent em/en dash is a range: becomes '-', matching how
+        // an already-ASCII-hyphen range reads (see normalize_numbers).
+        assert_eq!(normalize_text("2019\u{2013}2021"), "2019-2021");
+        assert_eq!(normalize_text("2019\u{2014}2021"), "2019-2021");
+        // A plain ASCII hyphen range is already '-' and stays that way.
+        assert_eq!(normalize_text("2019-2021"), "2019-2021");
+        // A spaced hyphen flanked by digits (not letters) is not this dash.
+        assert_eq!(normalize_text("5 - 3"), "5 - 3");
+        // A line-start hyphen is a list marker, not a dash: no letter
+        // precedes the space before it.
+        assert_eq!(normalize_text("Intro.\n- item one"), "Intro.\n- item one");
+    }
+
     // Regression for the 2026-07-05 report batch: each word must reach real
     // phonemes on the GB voices (alba/jenny), not a letter-by-letter spelling or
     // a bad dict entry. Exact GB IPA pinned so a dict/override/transform change
@@ -2108,6 +2229,28 @@ mod tests {
         // sentence.
         assert_eq!(say("UN"), "juːɛn");
         assert_eq!(say("the UN said"), "ðɐ juːɛn sˈɛd");
+    }
+
+    // Reported 2026-07-05: dashes produced no audible pause. Confirms the
+    // clause-pause comma from normalize_text's dash rewrite survives the full
+    // engine path (not just normalize_text in isolation), through the same
+    // GB voice path the report came in on.
+    #[test]
+    fn dash_pause_reaches_phonemes_gb() {
+        let (ph, ws, gb) = gb_engine();
+        let say = |t: &str| phonemize(&ph, Some(&gb), &ws, &spoken_text(t)).unwrap().join("");
+        // Plain ASCII hyphen and "--" used as a spoken dash: previously
+        // silent (bare '-' isn't in phonemize's kept-punctuation set), now a
+        // comma.
+        assert_eq!(say("wait - no"), "wˈeɪt, nəʊ");
+        assert_eq!(say("word -- word"), "wˈɜːd, wˈɜːd");
+        // Digit-adjacent en dash is a range, not a pause: two plain cardinals
+        // back to back, same as an ASCII hyphen range already reads (no
+        // comma, and no longer fused into one garbled number via
+        // normalize_numbers' thousands-separator comma handling).
+        assert_eq!(say("2019\u{2013}2021"), "twˈɛntɪ nˈaɪntˈiːn twˈɛntɪ twˈɛntɪ wˈɒn");
+        // Unspaced hyphen compound: still one phrase, no pause.
+        assert_eq!(say("un-iterated"), "ʌn ˈɪtəɹˌeɪtɪd");
     }
 
     #[test]
