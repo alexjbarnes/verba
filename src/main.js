@@ -1968,11 +1968,17 @@ playPauseBtn.addEventListener('click', () => {
       startSpeak(readingText, 0, 0);
     }
   } else if (ttsState.paused) {
-    // Voice changed while paused: re-synthesize from here under the new voice
-    // instead of resuming the old audio.
+    // Voice changed while paused: tear down the old (paused) generation, then
+    // re-synthesize from here under the new voice instead of resuming the old
+    // audio. Stopping first prevents the old worker racing tts_load's engine
+    // swap (same hazard as the mid-play switch).
     if (voiceDirty) {
       const r = currentResumePoint();
-      if (r) { ttsState.paused = false; startSpeak(r.text, r.word, r.ms); return; }
+      if (r) {
+        ttsState.paused = false;
+        invoke('tts_stop').finally(() => startSpeak(r.text, r.word, r.ms));
+        return;
+      }
     }
     invoke('tts_resume');
   } else {
@@ -2788,39 +2794,31 @@ document.getElementById('voice-sheet-list').addEventListener('click', async (e) 
   // leaves the current voice playing untouched.
   if (cross && !await confirmVoiceDownload(targetModel)) return;
 
-  // Snapshot the resume point up front: switching models clears the loaded
-  // engine, so grab where we are while state is still intact.
+  // Snapshot where we are, then FULLY STOP the current voice before switching.
+  // Pausing is not enough: a paused generation keeps its worker AND player
+  // alive (is_active stays true), so the old worker keeps generating while
+  // tts_load swaps the engine under it, and the old audio resurfaces over the
+  // new voice a few seconds in. Stopping tears it all down; we restart from
+  // the snapshot below, with the buffering spinner covering the reload.
   const resume = isPlaying() ? currentResumePoint() : null;
-
-  // Selecting a new voice mid-listen: silence the old voice immediately and
-  // show the buffering state, rather than letting it play on while the new
-  // model loads in the background. tts_pause keeps the media session alive
-  // (unlike tts_stop) so we can resume cleanly.
   if (resume) {
     setTtsLoading(true);
-    try { await invoke('tts_pause'); } catch (_) { /* nothing playing */ }
+    try { await invoke('tts_stop'); } catch (_) { /* nothing playing */ }
   }
 
-  let ok = true;
   if (cross) {
-    // A voice on another model: switch model + speaker together. The download
-    // (if any) is already user-confirmed above.
+    // A voice on another model: switch model + speaker together. Any download
+    // was user-confirmed above. On failure ttsModelId/ttsVoice stay put, so the
+    // restart below simply resumes the original voice.
     const [model, sidStr] = splitKey(val);
-    ok = await switchActiveModel(model);
-    if (ok) setTtsVoice(sidStr);
+    if (await switchActiveModel(model)) setTtsVoice(sidStr);
   } else {
     setTtsVoice(val);
   }
 
-  if (resume && ok) {
-    // New voice ready to generate: play it from where we paused.
-    await startSpeak(resume.text, resume.word, resume.ms);
-  } else if (resume) {
-    // Switch failed (e.g. download error): drop the buffering state and resume
-    // the original voice where it left off.
-    setTtsLoading(false);
-    try { await invoke('tts_resume'); } catch (_) { /* nothing to resume */ }
-  }
+  // Restart from the snapshot under the now-active voice.
+  if (resume) await startSpeak(resume.text, resume.word, resume.ms);
+  else setTtsLoading(false);
 });
 
 // ── Add-text modal ──
