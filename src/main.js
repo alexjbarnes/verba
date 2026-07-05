@@ -2303,6 +2303,9 @@ function showPanel(id) {
   document.querySelectorAll('.tab-panel').forEach(p => p.classList.add('hidden'));
   const el = document.getElementById(id);
   if (el) el.classList.remove('hidden');
+  // Android text-selection "Report mispronunciation" only makes sense over
+  // the reading view's own text.
+  invoke('set_report_menu_enabled', { enabled: id === 'reading' }).catch(() => {});
 }
 
 function tokenizeWords(text) {
@@ -2505,16 +2508,120 @@ function bookProgress(it) {
   return { totalWords, wordsRead, pct: totalWords ? Math.round(wordsRead / totalWords * 100) : 0 };
 }
 
+// Selected Library tab ('articles' | 'books'). The fetched items (and feed
+// titles used for the source badge) are cached in module vars so switching
+// tabs re-renders instantly without hitting the backend again.
+let libTab = 'articles';
+let libItems = [];
+let libFeedsById = {};
+
+const libThumb = document.getElementById('lib-thumb');
+
+function setLibTab(tab) {
+  libTab = tab;
+  if (libThumb) libThumb.style.transform = tab === 'books' ? 'translateX(100%)' : 'translateX(0)';
+  document.querySelectorAll('.lib-tab-btn').forEach(b => {
+    const active = b.dataset.lib === tab;
+    b.classList.toggle('text-primary', active);
+    b.classList.toggle('text-on-surface-variant', !active);
+  });
+  renderLibraryList();
+}
+
+document.querySelectorAll('.lib-tab-btn').forEach(b => {
+  b.addEventListener('click', () => setLibTab(b.dataset.lib));
+});
+
+// Long-press (500ms) gesture for a row's action sheet, without eating the
+// normal tap-to-open click. Movement past a small threshold, or an early
+// release/cancel, aborts the timer. Firing sets `el._longPressed`, which the
+// row's own click handler checks (and clears) so the synthetic click that
+// follows a long-press doesn't ALSO open the item; a fresh pointerdown also
+// clears it, in case a 'contextmenu' fired without a click after it.
+// `contextmenu` (desktop right-click, some Android long-press paths) is
+// wired as a fallback trigger.
+function attachLongPress(el, handler) {
+  let timer = null;
+  let startX = 0, startY = 0;
+  const clear = () => { if (timer) { clearTimeout(timer); timer = null; } };
+
+  el.addEventListener('pointerdown', (e) => {
+    el._longPressed = false;
+    startX = e.clientX; startY = e.clientY;
+    clear();
+    timer = setTimeout(() => {
+      timer = null;
+      el._longPressed = true;
+      handler(e);
+    }, 500);
+  });
+  el.addEventListener('pointermove', (e) => {
+    if (timer && Math.hypot(e.clientX - startX, e.clientY - startY) > 10) clear();
+  });
+  el.addEventListener('pointerup', clear);
+  el.addEventListener('pointercancel', clear);
+  el.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    clear();
+    el._longPressed = true;
+    handler(e);
+  });
+}
+
+// ── Library row long-press action sheet ──
+
+const libActionSheet = document.getElementById('lib-action-sheet');
+let libActionTarget = null; // { id }
+
+function openLibActionSheet(item, isBook) {
+  libActionTarget = { id: item.id };
+  document.getElementById('lib-action-title').textContent = item.title;
+  const actions = isBook
+    ? [
+        { action: 'mark-read', icon: 'check_circle', label: 'Mark as read' },
+        { action: 'mark-unread', icon: 'radio_button_unchecked', label: 'Mark as unread' },
+      ]
+    : [
+        { action: 'reset-progress', icon: 'restart_alt', label: 'Reset progress' },
+      ];
+  document.getElementById('lib-action-list').innerHTML = actions.map(a =>
+    `<button class="more-item w-full flex items-center gap-3 px-4 py-3 rounded-xl text-left cursor-pointer hover:bg-surface-container-highest text-on-surface" data-action="${a.action}">
+      <span class="material-symbols-outlined text-lg text-on-surface-variant">${a.icon}</span>
+      <span class="text-sm">${a.label}</span>
+    </button>`).join('');
+  libActionSheet.classList.remove('hidden');
+}
+function closeLibActionSheet() { libActionSheet.classList.add('hidden'); }
+document.getElementById('lib-action-overlay').addEventListener('click', closeLibActionSheet);
+document.getElementById('lib-action-list').addEventListener('click', async (e) => {
+  const btn = e.target.closest('.more-item');
+  if (!btn || !libActionTarget) return;
+  const { id } = libActionTarget;
+  const action = btn.dataset.action;
+  closeLibActionSheet();
+  if (action === 'reset-progress') await invoke('library_set_progress', { id, progress: 0 });
+  else if (action === 'mark-read') await invoke('book_set_read', { id, read: true });
+  else if (action === 'mark-unread') await invoke('book_set_read', { id, read: false });
+  loadLibrary();
+});
+
 async function loadLibrary() {
-  const items = await invoke('library_list');
+  libItems = await invoke('library_list');
   // Feed titles for the source badge on imported articles (cheap local JSON).
-  const feedsById = {};
+  libFeedsById = {};
   try {
-    (await invoke('feeds_list')).forEach(f => { feedsById[f.id] = f; });
+    (await invoke('feeds_list')).forEach(f => { libFeedsById[f.id] = f; });
   } catch (_) {}
+  renderLibraryList();
+}
+
+// Renders the selected tab from the module-cached `libItems`/`libFeedsById` —
+// no backend round trip, so switching tabs is instant.
+function renderLibraryList() {
+  const items = libItems;
+  const feedsById = libFeedsById;
   const list = document.getElementById('lib-list');
   const empty = document.getElementById('lib-empty');
-  empty.classList.toggle('hidden', items.length > 0);
   const renderRow = (it) => {
     if (it.chapters && it.chapters.length) {
       const { totalWords, wordsRead, pct } = bookProgress(it);
@@ -2522,12 +2629,16 @@ async function loadLibrary() {
       const meta = pct >= 100 ? `${chaptersLabel} · Finished`
         : pct > 0 ? `${chaptersLabel} · ${pct}% · ${fmtMins(estMsForWords(totalWords - wordsRead, ttsSpeed))} left`
         : `${chaptersLabel} · ${fmtMins(estMsForWords(totalWords, ttsSpeed))}`;
+      const doneTick = pct >= 100
+        ? '<span class="material-symbols-outlined text-lg text-primary shrink-0">check_circle</span>'
+        : '';
       return `
       <div class="lib-item flex items-center justify-between gap-3 bg-surface-container-low rounded-xl px-4 py-3 cursor-pointer hover:bg-surface-container-high transition-colors" data-id="${escapeHtml(it.id)}">
         <div class="min-w-0 flex-1">
           <div class="text-sm font-medium text-on-surface truncate"><span class="material-symbols-outlined text-sm align-middle mr-1 text-on-surface-variant/70">menu_book</span>${escapeHtml(it.title)}</div>
           <div class="text-[11px] ${pct >= 100 ? 'text-primary' : 'text-on-surface-variant'} tabular-nums mt-1">${meta}</div>
         </div>
+        ${doneTick}
         <button class="lib-del shrink-0 text-on-surface-variant/50 hover:text-error transition-colors p-1 cursor-pointer" data-id="${escapeHtml(it.id)}">
           <span class="material-symbols-outlined text-lg">delete</span>
         </button>
@@ -2548,15 +2659,18 @@ async function loadLibrary() {
     const pub = fmtPubDate(it.published);
     if (pub) meta += ` · ${pub}`;
     // Feed provenance: source badge (feed title, else hostname once the feed
-    // is deleted) and a NEW chip until the article is first listened to.
+    // is deleted) and a NEW chip until the article is first opened.
     if (it.feed_id) {
       const feed = feedsById[it.feed_id];
       let src = feed ? feed.title : '';
       if (!src && it.url) { try { src = new URL(it.url).hostname; } catch (_) {} }
       if (src) meta += ` · ${escapeHtml(src)}`;
     }
-    const newChip = (it.feed_id && !(it.progress > 0))
+    const newChip = (it.feed_id && !it.seen && !(it.progress > 0))
       ? '<span class="text-[10px] font-semibold text-primary bg-primary/10 rounded px-1.5 py-0.5 mr-1.5">NEW</span>'
+      : '';
+    const doneTick = pct >= 100
+      ? '<span class="material-symbols-outlined text-lg text-primary shrink-0">check_circle</span>'
       : '';
     return `
     <div class="lib-item flex items-center justify-between gap-3 bg-surface-container-low rounded-xl px-4 py-3 cursor-pointer hover:bg-surface-container-high transition-colors" data-id="${escapeHtml(it.id)}">
@@ -2565,6 +2679,7 @@ async function loadLibrary() {
         <div class="text-xs text-on-surface-variant truncate mt-0.5">${escapeHtml(it.body.slice(0, 80))}</div>
         <div class="text-[11px] ${pct >= 100 ? 'text-primary' : 'text-on-surface-variant'} tabular-nums mt-1">${meta}</div>
       </div>
+      ${doneTick}
       <button class="lib-del shrink-0 text-on-surface-variant/50 hover:text-error transition-colors p-1 cursor-pointer" data-id="${escapeHtml(it.id)}">
         <span class="material-symbols-outlined text-lg">delete</span>
       </button>
@@ -2572,21 +2687,22 @@ async function loadLibrary() {
   };
   const rev = items.slice().reverse();
   const isBook = (it) => !!(it.chapters && it.chapters.length);
-  const books = rev.filter(isBook);
-  const articles = rev.filter(it => !isBook(it));
-  const header = (label) =>
-    `<div class="pt-2 px-1 text-[11px] font-semibold uppercase tracking-wider text-on-surface-variant/70">${label}</div>`;
-  // Books and Articles render as separate sections; headers only earn their
-  // space when both kinds are present (a single-kind library stays a plain list).
-  list.innerHTML = books.length && articles.length
-    ? header('Books') + books.map(renderRow).join('') + header('Articles') + articles.map(renderRow).join('')
-    : rev.map(renderRow).join('');
-  const bookIds = new Set(items.filter(it => it.chapters && it.chapters.length).map(it => it.id));
+  // One kind at a time (Articles/Books pill) — no section headers.
+  const shown = rev.filter(it => isBook(it) === (libTab === 'books'));
+  empty.classList.toggle('hidden', shown.length > 0);
+  document.getElementById('lib-empty-title').textContent = libTab === 'books' ? 'No books yet' : 'No saved texts yet';
+  list.innerHTML = shown.map(renderRow).join('');
+  const bookIds = new Set(items.filter(isBook).map(it => it.id));
   list.querySelectorAll('.lib-item').forEach(el => {
+    const id = el.dataset.id;
     el.addEventListener('click', (e) => {
+      if (el._longPressed) { el._longPressed = false; return; }
       if (e.target.closest('.lib-del')) return;
-      const id = el.dataset.id;
       if (bookIds.has(id)) openBook(id); else openReading(id);
+    });
+    attachLongPress(el, () => {
+      const item = items.find(it => it.id === id);
+      if (item) openLibActionSheet(item, bookIds.has(id));
     });
   });
   list.querySelectorAll('.lib-del').forEach(btn => {
@@ -2713,6 +2829,7 @@ async function openReading(id) {
   try { item = await invoke('library_get', { id }); }
   catch (err) { showToast('Open failed: ' + err); return; }
   if (!item) { showToast('Text not found'); return; }
+  invoke('library_mark_seen', { id }).catch(() => {});
   readingItem = item;
   readingText = item.body;
   activeWord = -1; genBaseWord = 0; timingCursor = 0; wordTimes = {};
@@ -2769,7 +2886,7 @@ async function openBook(id) {
     const done = completed.has(idx);
     const current = idx === item.current_chapter;
     const currentChip = current
-      ? '<span class="text-[10px] font-semibold text-primary bg-primary/10 rounded px-1.5 py-0.5 mr-1.5">CURRENT</span>'
+      ? '<span class="text-[10px] font-semibold text-primary bg-primary/10 rounded px-1.5 py-0.5">CURRENT</span>'
       : '';
     const doneIcon = done
       ? '<span class="material-symbols-outlined text-lg text-primary shrink-0">check_circle</span>'
@@ -2777,8 +2894,11 @@ async function openBook(id) {
     return `
     <div class="lib-item book-chapter-row flex items-center justify-between gap-3 bg-surface-container-low rounded-xl px-4 py-3 cursor-pointer hover:bg-surface-container-high transition-colors" data-idx="${idx}">
       <div class="min-w-0 flex-1">
-        <div class="text-sm font-medium text-on-surface truncate">${currentChip}${idx + 1}. ${escapeHtml(ch.title || `Chapter ${idx + 1}`)}</div>
-        <div class="text-[11px] text-on-surface-variant tabular-nums mt-1">${fmtMins(estMsForWords(ch.words, ttsSpeed))}</div>
+        <div class="text-sm font-medium text-on-surface truncate">${idx + 1}. ${escapeHtml(ch.title || `Chapter ${idx + 1}`)}</div>
+        <div class="flex items-center justify-between mt-1">
+          <span class="text-[11px] text-on-surface-variant tabular-nums">${fmtMins(estMsForWords(ch.words, ttsSpeed))}</span>
+          ${currentChip}
+        </div>
       </div>
       ${doneIcon}
     </div>`;
@@ -3042,8 +3162,7 @@ const addUrlModal = document.getElementById('add-url-modal');
 function openModal(el) { el.classList.remove('hidden'); el.classList.add('flex'); }
 function closeModal(el) { el.classList.add('hidden'); el.classList.remove('flex'); }
 
-// The bottom-nav + button and the Library page button open a source chooser
-// (Text, URL, File, eBook).
+// The bottom-nav + button opens a source chooser (Text, URL, File, eBook).
 function openAddModal() { openModal(addChooserModal); }
 
 function openTextModal() {
@@ -3059,7 +3178,6 @@ function openUrlModal() {
 }
 function closeUrlModal() { closeModal(addUrlModal); }
 
-document.getElementById('lib-add-btn').addEventListener('click', openAddModal);
 document.getElementById('add-chooser-cancel').addEventListener('click', () => closeModal(addChooserModal));
 addChooserModal.addEventListener('click', (e) => {
   if (e.target === addChooserModal) { closeModal(addChooserModal); return; } // backdrop
@@ -3561,6 +3679,9 @@ async function loadFeeds() {
         <div class="text-xs text-on-surface-variant truncate mt-0.5">${escapeHtml(f.url)}</div>
         <div class="text-[11px] text-on-surface-variant tabular-nums mt-1">${meta}</div>
       </div>
+      <button class="feed-edit shrink-0 text-on-surface-variant/50 hover:text-primary transition-colors p-1 cursor-pointer" data-id="${escapeHtml(f.id)}">
+        <span class="material-symbols-outlined text-lg">edit</span>
+      </button>
       <button class="feed-del shrink-0 text-on-surface-variant/50 hover:text-error transition-colors p-1 cursor-pointer" data-id="${escapeHtml(f.id)}">
         <span class="material-symbols-outlined text-lg">delete</span>
       </button>
@@ -3568,8 +3689,15 @@ async function loadFeeds() {
   }).join('');
   list.querySelectorAll('.feed-item').forEach(el => {
     el.addEventListener('click', (e) => {
-      if (e.target.closest('.feed-del')) return;
+      if (e.target.closest('.feed-del') || e.target.closest('.feed-edit')) return;
       openFeedEntries(el.dataset.id);
+    });
+  });
+  list.querySelectorAll('.feed-edit').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const feed = feeds.find(f => f.id === btn.dataset.id);
+      if (feed) openFeedEditModal(feed);
     });
   });
   list.querySelectorAll('.feed-del').forEach(btn => {
@@ -3753,6 +3881,34 @@ document.getElementById('feed-add-save').addEventListener('click', async () => {
   } finally {
     btn.disabled = false;
     btn.textContent = 'Add';
+  }
+});
+
+const feedEditModal = document.getElementById('feed-edit-modal');
+let feedEditId = null;
+function openFeedEditModal(feed) {
+  feedEditId = feed.id;
+  document.getElementById('feed-edit-title').value = feed.title;
+  document.getElementById('feed-edit-url').value = feed.url;
+  feedEditModal.classList.remove('hidden');
+  feedEditModal.classList.add('flex');
+}
+function closeFeedEditModal() {
+  feedEditModal.classList.add('hidden');
+  feedEditModal.classList.remove('flex');
+}
+document.getElementById('feed-edit-cancel').addEventListener('click', closeFeedEditModal);
+document.getElementById('feed-edit-save').addEventListener('click', async () => {
+  const title = document.getElementById('feed-edit-title').value.trim();
+  let url = document.getElementById('feed-edit-url').value.trim();
+  if (!url) { showToast('Enter a feed URL'); return; }
+  if (!/^https?:\/\//i.test(url)) url = 'https://' + url;
+  try {
+    await invoke('feed_update', { id: feedEditId, title, url });
+    closeFeedEditModal();
+    loadFeeds();
+  } catch (err) {
+    showToast('Could not save: ' + err);
   }
 });
 

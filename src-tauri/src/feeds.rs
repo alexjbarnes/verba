@@ -132,6 +132,49 @@ impl Feeds {
         Ok(feed)
     }
 
+    /// Edit a subscription's title/url (from the pencil button next to a feed
+    /// row). Rejects an empty title, an empty/non-http(s) url, or a url that
+    /// collides with a DIFFERENT feed already on the list. When the
+    /// normalized url actually changes, resets `etag`/`last_modified`/`seen`:
+    /// the edited url is treated as a different feed, so the next poll
+    /// re-evaluates every entry as fresh. That reset can't flood the library —
+    /// the same per-poll auto-import cap that bounds a first-time `add`
+    /// applies to every subsequent poll too.
+    pub fn update(&self, id: &str, title: String, url: String) -> Result<(), String> {
+        let title = title.trim().to_string();
+        let url = url.trim().to_string();
+        if title.is_empty() {
+            return Err("Empty title".into());
+        }
+        if url.is_empty() {
+            return Err("Empty URL".into());
+        }
+        if !(url.starts_with("http://") || url.starts_with("https://")) {
+            return Err("Not an http(s) URL".into());
+        }
+        let mut feeds = self.feeds.lock().unwrap();
+        if feeds
+            .iter()
+            .any(|f| f.id != id && norm_url(&f.url) == norm_url(&url))
+        {
+            return Err("Another feed already uses that URL".into());
+        }
+        if let Some(feed) = feeds.iter_mut().find(|f| f.id == id) {
+            let url_changed = norm_url(&feed.url) != norm_url(&url);
+            feed.title = title;
+            feed.url = url;
+            if url_changed {
+                feed.etag = String::new();
+                feed.last_modified = String::new();
+                feed.seen = Vec::new();
+            }
+            if let Err(e) = Self::save_to_disk(&feeds) {
+                log::error!("Failed to save feeds: {e}");
+            }
+        }
+        Ok(())
+    }
+
     pub fn delete(&self, id: &str) {
         let mut feeds = self.feeds.lock().unwrap();
         feeds.retain(|f| f.id != id);
@@ -371,6 +414,52 @@ mod tests {
         let f = feeds.add("https://a.com/feed".into(), "A".into(), vec![]).unwrap();
         feeds.set_auto_add(&f.id, false);
         assert!(!feeds.list_unlocked()[0].auto_add);
+    }
+
+    #[test]
+    fn update_rejects_duplicate_url_of_another_feed() {
+        let feeds = empty();
+        feeds.add("https://a.com/feed".into(), "A".into(), vec![]).unwrap();
+        let b = feeds.add("https://b.com/feed".into(), "B".into(), vec![]).unwrap();
+        let err = feeds.update(&b.id, "B2".into(), "https://a.com/feed".into());
+        assert!(err.is_err());
+        // Untouched: still its original url.
+        assert_eq!(feeds.list_unlocked()[1].url, "https://b.com/feed");
+    }
+
+    #[test]
+    fn update_title_only_preserves_etag_and_seen() {
+        let feeds = empty();
+        let f = feeds
+            .add("https://a.com/feed".into(), "A".into(), vec!["k1".into()])
+            .unwrap();
+        feeds.checked(&f.id, "etag123".into(), "lastmod".into());
+        feeds
+            .update(&f.id, "New Title".into(), "https://a.com/feed".into())
+            .unwrap();
+        let got = &feeds.list_unlocked()[0];
+        assert_eq!(got.title, "New Title");
+        assert_eq!(got.url, "https://a.com/feed");
+        assert_eq!(got.etag, "etag123");
+        assert_eq!(got.last_modified, "lastmod");
+        assert_eq!(got.seen, vec!["k1".to_string()]);
+    }
+
+    #[test]
+    fn update_changed_url_clears_etag_and_seen() {
+        let feeds = empty();
+        let f = feeds
+            .add("https://a.com/feed".into(), "A".into(), vec!["k1".into()])
+            .unwrap();
+        feeds.checked(&f.id, "etag123".into(), "lastmod".into());
+        feeds
+            .update(&f.id, "A".into(), "https://a.com/new-feed".into())
+            .unwrap();
+        let got = &feeds.list_unlocked()[0];
+        assert_eq!(got.url, "https://a.com/new-feed");
+        assert_eq!(got.etag, "");
+        assert_eq!(got.last_modified, "");
+        assert!(got.seen.is_empty());
     }
 
     impl Feeds {

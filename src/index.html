@@ -275,19 +275,20 @@
 
   <!-- Library tab (Listen home) -->
   <div id="library" class="tab-panel hidden flex-1 flex flex-col px-5 py-6 min-h-0">
-    <div class="flex items-center justify-between mb-4">
-      <div>
-        <h2 class="text-lg font-bold tracking-tight text-on-surface">Library</h2>
-        <p class="text-xs text-on-surface-variant mt-0.5">Saved texts to listen to</p>
+    <div class="flex items-center justify-between mb-4 gap-3">
+      <h2 class="text-lg font-bold tracking-tight text-on-surface">Library</h2>
+      <div id="lib-switch" class="relative flex w-44 shrink-0 p-1 rounded-full bg-surface-container shadow-[inset_0_1px_2px_rgba(0,0,0,0.45)]">
+        <span id="lib-thumb" class="absolute top-1 bottom-1 left-1 w-[calc(50%-0.25rem)] rounded-full bg-surface-bright shadow-md ring-1 ring-white/10 transition-transform duration-300 ease-[cubic-bezier(0.4,0,0.2,1)]"></span>
+        <button class="lib-tab-btn relative z-10 flex-1 flex items-center justify-center py-1 rounded-full text-xs font-semibold transition-colors text-primary" data-lib="articles">Articles</button>
+        <button class="lib-tab-btn relative z-10 flex-1 flex items-center justify-center py-1 rounded-full text-xs font-semibold transition-colors text-on-surface-variant" data-lib="books">Books</button>
       </div>
-      <button id="lib-add-btn" class="text-xs font-semibold text-on-primary bg-primary px-3 py-1.5 rounded-lg hover:brightness-110 transition-colors cursor-pointer">Add text</button>
     </div>
     <div id="lib-scroll" class="flex-1 min-h-0 overflow-y-auto">
       <div id="lib-list" class="space-y-2"></div>
       <div id="lib-empty" class="hidden flex flex-col items-center justify-center pt-16 text-on-surface-variant">
         <span class="material-symbols-outlined text-4xl mb-3 opacity-30">library_books</span>
-        <p class="text-sm">No saved texts yet</p>
-        <p class="text-xs mt-1 opacity-70">Tap "Add text" to paste an article</p>
+        <p id="lib-empty-title" class="text-sm">No saved texts yet</p>
+        <p class="text-xs mt-1 opacity-70">Tap the + button below to add one</p>
       </div>
     </div>
   </div>
@@ -473,6 +474,19 @@
     </div>
   </div>
 
+  <!-- Edit feed modal -->
+  <div id="feed-edit-modal" class="fixed inset-0 z-50 hidden items-center justify-center bg-black/50 backdrop-blur-sm">
+    <div class="bg-surface-container-high rounded-2xl p-6 mx-4 max-w-sm w-full shadow-xl border border-outline-variant/20 space-y-4">
+      <p class="text-sm font-semibold text-on-surface">Edit feed</p>
+      <input id="feed-edit-title" type="text" placeholder="Title" class="w-full bg-surface-container-highest border border-outline-variant/30 rounded-lg px-3 py-2 text-sm text-on-surface placeholder:text-on-surface-variant/50 focus:outline-none focus:ring-1 focus:ring-primary/50" />
+      <input id="feed-edit-url" type="url" inputmode="url" autocapitalize="off" autocomplete="off" placeholder="Feed URL" class="w-full bg-surface-container-highest border border-outline-variant/30 rounded-lg px-3 py-2 text-sm text-on-surface placeholder:text-on-surface-variant/50 focus:outline-none focus:ring-1 focus:ring-primary/50" />
+      <div class="flex justify-end gap-3">
+        <button id="feed-edit-cancel" class="px-4 py-2 text-sm font-medium text-on-surface-variant rounded-lg hover:bg-surface-container-highest transition-colors cursor-pointer">Cancel</button>
+        <button id="feed-edit-save" class="px-4 py-2 text-sm font-medium text-on-primary bg-primary rounded-lg hover:brightness-110 transition-colors cursor-pointer">Save</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Voices (TTS) tab -->
   <div id="voices" class="tab-panel hidden flex-1 overflow-y-auto px-5 py-6 space-y-6">
     <div>
@@ -555,6 +569,16 @@
       <div class="w-10 h-1 bg-outline-variant/40 rounded-full mx-auto mt-3 mb-4 shrink-0"></div>
       <p class="text-sm font-bold text-on-surface px-5 mb-2 shrink-0">More</p>
       <div id="nav-more-list" class="overflow-y-auto px-3 pb-2"></div>
+    </div>
+  </div>
+
+  <!-- Library row long-press action sheet -->
+  <div id="lib-action-sheet" class="fixed inset-0 z-50 hidden">
+    <div id="lib-action-overlay" class="absolute inset-0 bg-black/50"></div>
+    <div class="absolute bottom-0 left-0 right-0 bg-surface-container-high rounded-t-2xl shadow-xl border-t border-outline-variant/20 max-h-[70vh] flex flex-col" style="padding-bottom: max(1.25rem, env(safe-area-inset-bottom));">
+      <div class="w-10 h-1 bg-outline-variant/40 rounded-full mx-auto mt-3 mb-4 shrink-0"></div>
+      <p id="lib-action-title" class="text-sm font-bold text-on-surface px-5 mb-2 shrink-0 truncate">Item</p>
+      <div id="lib-action-list" class="overflow-y-auto px-3 pb-2"></div>
     </div>
   </div>
 

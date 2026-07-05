@@ -822,6 +822,12 @@ fn library_set_duration(id: String, duration_ms: u64, speed: f32) {
     library::Library::global().set_duration(&id, duration_ms, speed);
 }
 
+/// Mark an item opened at least once, clearing the Library list's NEW badge.
+#[tauri::command]
+fn library_mark_seen(id: String) {
+    library::Library::global().mark_seen(&id);
+}
+
 // ── Books (chapter-bounded library items) ──
 
 #[tauri::command]
@@ -900,6 +906,13 @@ fn book_forget_audio(id: String, model_id: String, sid: i32, speed: f32) -> u32 
     forgotten
 }
 
+/// Mark a whole book read or unread (long-press action sheet). No-op for a
+/// plain article.
+#[tauri::command]
+fn book_set_read(id: String, read: bool) {
+    library::Library::global().set_book_read(&id, read);
+}
+
 // ── RSS feeds (Listen reader subscriptions) ──
 
 #[tauri::command]
@@ -930,6 +943,11 @@ fn feed_mark_seen(id: String, keys: Vec<String>) {
 #[tauri::command]
 fn feed_checked(id: String, etag: String, last_modified: String) {
     feeds::Feeds::global().checked(&id, etag, last_modified);
+}
+
+#[tauri::command]
+fn feed_update(id: String, title: String, url: String) -> Result<(), String> {
+    feeds::Feeds::global().update(&id, title, url)
 }
 
 #[tauri::command]
@@ -1405,18 +1423,21 @@ pub fn run() {
             library_delete,
             library_set_progress,
             library_set_duration,
+            library_mark_seen,
             book_add,
             book_chapter,
             book_set_position,
             book_chapter_completed,
             book_trim_audio,
             book_forget_audio,
+            book_set_read,
             feeds_list,
             feed_add,
             feed_delete,
             feed_set_auto_add,
             feed_mark_seen,
             feed_checked,
+            feed_update,
             fetch_feed,
             webview_fetch,
         ])

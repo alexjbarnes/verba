@@ -81,6 +81,11 @@ pub struct LibraryItem {
     /// `current_chapter`: jumping into chapter 8 must NOT mark 1-7 done.
     #[serde(default)]
     pub completed: Vec<u32>,
+    /// Whether the item has been opened at least once (`mark_seen`). Drives
+    /// the Library list's NEW badge (feed-imported items only), independent
+    /// of playback progress. Legacy JSON predating this field loads as false.
+    #[serde(default)]
+    pub seen: bool,
 }
 
 pub struct Library {
@@ -148,6 +153,7 @@ impl Library {
             chapters: Vec::new(),
             current_chapter: 0,
             completed: Vec::new(),
+            seen: false,
         };
         let mut items = self.items.lock().unwrap();
         items.push(item.clone());
@@ -213,6 +219,7 @@ impl Library {
             chapters: meta,
             current_chapter: 0,
             completed: Vec::new(),
+            seen: false,
         };
         let mut items = self.items.lock().unwrap();
         items.push(item.clone());
@@ -260,6 +267,32 @@ impl Library {
         }
     }
 
+    /// Mark a whole book read or unread in one shot (long-press action sheet).
+    /// Read: every chapter completed, parked on the last one at its full
+    /// length (100%). Unread: back to a fresh, unstarted book. No-op for a
+    /// plain article (empty `chapters`) — there's nothing to mark.
+    pub fn set_book_read(&self, id: &str, read: bool) {
+        let mut items = self.items.lock().unwrap();
+        if let Some(item) = items.iter_mut().find(|i| i.id == id) {
+            if item.chapters.is_empty() {
+                return;
+            }
+            if read {
+                let last = item.chapters.len() as u32 - 1;
+                item.completed = (0..item.chapters.len() as u32).collect();
+                item.current_chapter = last;
+                item.progress = item.chapters[last as usize].chars as u64;
+            } else {
+                item.completed.clear();
+                item.current_chapter = 0;
+                item.progress = 0;
+            }
+            if let Err(e) = Self::save_to_disk(&items) {
+                log::error!("Failed to save library: {e}");
+            }
+        }
+    }
+
     pub fn list(&self) -> Vec<LibraryItem> {
         // Reload from disk in case of external edits.
         if let Some(items) = Self::load_from_disk() {
@@ -302,6 +335,22 @@ impl Library {
         if let Some(item) = items.iter_mut().find(|i| i.id == id) {
             item.duration_ms = duration_ms;
             item.duration_speed = speed;
+            if let Err(e) = Self::save_to_disk(&items) {
+                log::error!("Failed to save library: {e}");
+            }
+        }
+    }
+
+    /// Mark an item opened at least once. Idempotent — a no-op (no disk
+    /// write) once already true, so re-opening a previously-seen item costs
+    /// nothing.
+    pub fn mark_seen(&self, id: &str) {
+        let mut items = self.items.lock().unwrap();
+        if let Some(item) = items.iter_mut().find(|i| i.id == id) {
+            if item.seen {
+                return;
+            }
+            item.seen = true;
             if let Err(e) = Self::save_to_disk(&items) {
                 log::error!("Failed to save library: {e}");
             }
@@ -451,6 +500,7 @@ mod tests {
         assert!(items[0].chapters.is_empty());
         assert_eq!(items[0].current_chapter, 0);
         assert!(items[0].completed.is_empty());
+        assert!(!items[0].seen);
 
         // A book item's chapter fields round-trip through serialize/deserialize.
         let book = LibraryItem {
@@ -468,12 +518,14 @@ mod tests {
             chapters: vec![ChapterMeta { title: "Ch1".into(), words: 10, chars: 50 }],
             current_chapter: 1,
             completed: vec![0],
+            seen: false,
         };
         let round: LibraryItem = serde_json::from_str(&serde_json::to_string(&book).unwrap()).unwrap();
         assert_eq!(round.chapters.len(), 1);
         assert_eq!(round.chapters[0].words, 10);
         assert_eq!(round.completed, vec![0]);
         assert_eq!(round.current_chapter, 1);
+        assert!(!round.seen);
     }
 
     #[test]
@@ -521,5 +573,58 @@ mod tests {
         lib.mark_chapter_completed(&item.id, 1);
         let got = lib.items.lock().unwrap()[0].completed.clone();
         assert_eq!(got, vec![1, 0]);
+    }
+
+    #[test]
+    fn mark_seen_sets_true_once_and_is_idempotent() {
+        let lib = Library { items: Mutex::new(vec![]) };
+        let a = lib.add("t".into(), "body".into(), String::new(), String::new(), String::new(), String::new());
+        assert!(!lib.items.lock().unwrap()[0].seen);
+        lib.mark_seen(&a.id);
+        assert!(lib.items.lock().unwrap()[0].seen);
+        lib.mark_seen(&a.id); // second call: stays true, no error
+        assert!(lib.items.lock().unwrap()[0].seen);
+    }
+
+    #[test]
+    fn set_book_read_round_trips_both_directions() {
+        let lib = Library { items: Mutex::new(vec![]) };
+        let item = lib
+            .add_book(
+                "B".into(),
+                vec![
+                    ChapterIn { title: "1".into(), body: "one one".into() },
+                    ChapterIn { title: "2".into(), body: "two two two".into() },
+                    ChapterIn { title: "3".into(), body: "three".into() },
+                ],
+                String::new(),
+            )
+            .unwrap();
+        let last_chars = item.chapters[2].chars as u64;
+
+        lib.set_book_read(&item.id, true);
+        {
+            let got = lib.items.lock().unwrap();
+            assert_eq!(got[0].completed, vec![0, 1, 2]);
+            assert_eq!(got[0].current_chapter, 2);
+            assert_eq!(got[0].progress, last_chars);
+        }
+
+        lib.set_book_read(&item.id, false);
+        let got = lib.items.lock().unwrap();
+        assert!(got[0].completed.is_empty());
+        assert_eq!(got[0].current_chapter, 0);
+        assert_eq!(got[0].progress, 0);
+    }
+
+    #[test]
+    fn set_book_read_is_noop_for_plain_article() {
+        let lib = Library { items: Mutex::new(vec![]) };
+        let a = lib.add("t".into(), "body".into(), String::new(), String::new(), String::new(), String::new());
+        lib.set_book_read(&a.id, true);
+        let got = lib.items.lock().unwrap();
+        assert!(got[0].completed.is_empty());
+        assert_eq!(got[0].current_chapter, 0);
+        assert_eq!(got[0].progress, 0);
     }
 }
