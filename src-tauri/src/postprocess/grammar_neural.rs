@@ -1,15 +1,22 @@
 //! Stage 4 (neural path): grammar router + corrector.
 //!
-//! Model files are embedded at compile time from `data/grammar/`. If those
-//! files are absent when the crate is built the entire stage compiles out
-//! and grammar correction becomes a no-op (build.rs prints a warning;
-//! regenerate the files with scripts/download_t5_grammar_onnx.py).
+//! Model files are loaded at runtime from the downloaded dictation package
+//! (see MODEL_PACKAGES.md), under the platform models directory as
+//! `models/grammar/<version>/...`. `crate::models::ModelManager::grammar_files`
+//! resolves the seven files and returns `None` unless every one is present
+//! on disk. Until the package is downloaded — or if any file is missing —
+//! the stage is a silent no-op, exactly like a not-yet-downloaded voice.
+//!
+//! `init_global` runs on every pipeline entry (`postprocess::warm_up` and a
+//! background nudge after a package install) and is cheap on the absent
+//! path (a handful of fs metadata checks), so the very first pipeline run
+//! after the download finishes picks up grammar correction with no restart.
 //!
 //! Model-specific parameters (input prefix, encoder output name, thresholds)
-//! are read from `data/grammar/config.json` at compile time. To swap models,
-//! replace the ONNX/tokenizer files and update config.json, then rebuild.
+//! are read from the package's `config.json` at load time. To swap models,
+//! ship new ONNX/tokenizer files and an updated config.json in the package.
 //!
-//! To enable: place the following files in src-tauri/data/grammar/ then rebuild:
+//! The seven files consumed (see `models::GrammarFilePaths`):
 //!   cola_model_quantized.onnx          - grammar router model (CoLA classifier)
 //!   cola_tokenizer.json                - grammar router tokenizer
 //!   encoder_model_quantized.onnx       - corrector encoder
@@ -30,8 +37,8 @@ pub struct SentenceResult {
     pub guarded: bool,
 }
 
-#[cfg(grammar_neural_bundled)]
-mod bundled {
+mod neural {
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Mutex, OnceLock};
 
     use ndarray::{s, Array2, ArrayD};
@@ -39,21 +46,6 @@ mod bundled {
     use ort::session::Session;
     use ort::value::TensorRef;
     use tokenizers::Tokenizer;
-
-    static ROUTER_MODEL_BYTES: &[u8] =
-        include_bytes!("../../data/grammar/cola_model_quantized.0.0.1.onnx");
-    static ROUTER_TOKENIZER_BYTES: &[u8] =
-        include_bytes!("../../data/grammar/cola_tokenizer.0.0.1.json");
-    static ENC_MODEL_BYTES: &[u8] =
-        include_bytes!("../../data/grammar/encoder_model_quantized.0.0.1.onnx");
-    static DEC_MODEL_BYTES: &[u8] =
-        include_bytes!("../../data/grammar/decoder_with_past_quantized.0.0.1.onnx");
-    static CROSS_ATTN_WEIGHTS: &[u8] =
-        include_bytes!("../../data/grammar/cross_attn_kv_weights.0.0.1.bin");
-    static T5_TOKENIZER_BYTES: &[u8] =
-        include_bytes!("../../data/grammar/t5_tokenizer.0.0.1.json");
-    static CONFIG_BYTES: &str =
-        include_str!("../../data/grammar/config.0.0.1.json");
 
     /// Runtime-configurable parameters loaded from config.json.
     #[derive(serde::Deserialize)]
@@ -88,20 +80,52 @@ mod bundled {
     fn default_sentence_split_threshold() -> usize { 30 }
     fn default_decode_headroom() -> usize { 32 }
 
-    static CHECKER: OnceLock<Option<GrammarNeuralChecker>> = OnceLock::new();
+    static CHECKER: Mutex<Option<std::sync::Arc<GrammarNeuralChecker>>> = Mutex::new(None);
 
-    pub fn global() -> Option<&'static GrammarNeuralChecker> {
-        CHECKER.get().and_then(|o| o.as_ref())
+    /// Set once the not-yet-downloaded state has been logged, so repeated
+    /// pipeline runs before the package is installed don't spam the log.
+    static LOGGED_ABSENT: AtomicBool = AtomicBool::new(false);
+    /// Set once a present-but-corrupt package has failed to load. Gates
+    /// retries: a broken download is not retried on every pipeline run,
+    /// only after a process restart.
+    static LOAD_FAILED: AtomicBool = AtomicBool::new(false);
+
+    pub fn global() -> Option<std::sync::Arc<GrammarNeuralChecker>> {
+        CHECKER.lock().unwrap().clone()
     }
 
     pub fn init_global() {
-        if CHECKER.get().is_some() {
+        if CHECKER.lock().unwrap().is_some() || LOAD_FAILED.load(Ordering::Relaxed) {
             return;
         }
-        let checker = GrammarNeuralChecker::load()
-            .map_err(|e| log::warn!("Neural grammar failed to load ({e}), grammar stage disabled"))
-            .ok();
-        let _ = CHECKER.set(checker);
+        let mgr = match crate::models::ModelManager::init_global() {
+            Ok(m) => m,
+            Err(e) => {
+                if !LOGGED_ABSENT.swap(true, Ordering::Relaxed) {
+                    log::info!("Neural grammar disabled: model manager unavailable ({e})");
+                }
+                return;
+            }
+        };
+        let Some(paths) = mgr.grammar_files() else {
+            if !LOGGED_ABSENT.swap(true, Ordering::Relaxed) {
+                log::info!(
+                    "Neural grammar models not downloaded yet; grammar stage is a \
+                     no-op until the dictation package is installed"
+                );
+            }
+            return;
+        };
+        match GrammarNeuralChecker::load(&paths) {
+            Ok(checker) => {
+                *CHECKER.lock().unwrap() = Some(std::sync::Arc::new(checker));
+            }
+            Err(e) => {
+                if !LOAD_FAILED.swap(true, Ordering::Relaxed) {
+                    log::warn!("Neural grammar failed to load ({e}), grammar stage disabled");
+                }
+            }
+        }
     }
 
     /// Total KV cache tensors: 4 layers x 4 (self-attn K,V + cross-attn K,V) = 16.
@@ -147,8 +171,10 @@ mod bundled {
     }
 
     impl GrammarNeuralChecker {
-        fn load() -> Result<Self, String> {
-            let config: Config = serde_json::from_str(CONFIG_BYTES)
+        fn load(paths: &crate::models::GrammarFilePaths) -> Result<Self, String> {
+            let config_raw = std::fs::read_to_string(&paths.config)
+                .map_err(|e| format!("grammar config.json: {e}"))?;
+            let config: Config = serde_json::from_str(&config_raw)
                 .map_err(|e| format!("grammar config.json: {e}"))?;
 
             ensure_ort_init()?;
@@ -162,29 +188,29 @@ mod bundled {
                 .map_err(|e| format!("session builder: {e}"))?
                 .with_execution_providers(&cpu_ep)
                 .map_err(|e| format!("router ep: {e}"))?
-                .commit_from_memory(ROUTER_MODEL_BYTES)
+                .commit_from_file(&paths.router_model)
                 .map_err(|e| format!("router model: {e}"))?;
 
-            let router_tokenizer = Tokenizer::from_bytes(ROUTER_TOKENIZER_BYTES)
+            let router_tokenizer = Tokenizer::from_file(&paths.router_tokenizer)
                 .map_err(|e| format!("router tokenizer: {e}"))?;
 
             let t5_encoder = Session::builder()
                 .map_err(|e| format!("session builder: {e}"))?
                 .with_execution_providers(&cpu_ep)
                 .map_err(|e| format!("encoder ep: {e}"))?
-                .commit_from_memory(ENC_MODEL_BYTES)
+                .commit_from_file(&paths.encoder)
                 .map_err(|e| format!("t5 encoder: {e}"))?;
 
             let t5_decoder = Session::builder()
                 .map_err(|e| format!("session builder: {e}"))?
                 .with_execution_providers(&cpu_ep)
                 .map_err(|e| format!("decoder ep: {e}"))?
-                .commit_from_memory(DEC_MODEL_BYTES)
+                .commit_from_file(&paths.decoder)
                 .map_err(|e| format!("t5 decoder: {e}"))?;
 
-            let cross_attn_weights = Self::load_cross_attn_weights()?;
+            let cross_attn_weights = Self::load_cross_attn_weights(&paths.kv_weights)?;
 
-            let t5_tokenizer = Tokenizer::from_bytes(T5_TOKENIZER_BYTES)
+            let t5_tokenizer = Tokenizer::from_file(&paths.t5_tokenizer)
                 .map_err(|e| format!("t5 tokenizer: {e}"))?;
 
             log::info!(
@@ -398,20 +424,22 @@ mod bundled {
 
         /// Load 8 cross-attention K/V projection weight matrices from binary.
         /// Layout: 8 contiguous [256, 256] f32 matrices, ordered by layer then K/V.
-        fn load_cross_attn_weights() -> Result<[ndarray::Array2<f32>; NUM_LAYERS * 2], String> {
+        fn load_cross_attn_weights(path: &std::path::Path) -> Result<[ndarray::Array2<f32>; NUM_LAYERS * 2], String> {
             const DIM: usize = 256;
             const MAT_BYTES: usize = DIM * DIM * 4;
-            if CROSS_ATTN_WEIGHTS.len() != MAT_BYTES * NUM_LAYERS * 2 {
+            let bytes = std::fs::read(path)
+                .map_err(|e| format!("cross_attn_kv_weights.bin: {e}"))?;
+            if bytes.len() != MAT_BYTES * NUM_LAYERS * 2 {
                 return Err(format!(
                     "cross_attn_kv_weights.bin: expected {} bytes, got {}",
                     MAT_BYTES * NUM_LAYERS * 2,
-                    CROSS_ATTN_WEIGHTS.len()
+                    bytes.len()
                 ));
             }
             let mut weights: Vec<ndarray::Array2<f32>> = Vec::with_capacity(NUM_LAYERS * 2);
             for i in 0..(NUM_LAYERS * 2) {
                 let offset = i * MAT_BYTES;
-                let floats: Vec<f32> = CROSS_ATTN_WEIGHTS[offset..offset + MAT_BYTES]
+                let floats: Vec<f32> = bytes[offset..offset + MAT_BYTES]
                     .chunks_exact(4)
                     .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
                     .collect();
@@ -701,29 +729,7 @@ fn strip_task_prefix(decoded: &str, prefix: &str) -> String {
     decoded.to_string()
 }
 
-#[cfg(grammar_neural_bundled)]
-pub use bundled::{global, init_global, GrammarNeuralChecker};
-
-#[cfg(not(grammar_neural_bundled))]
-pub struct GrammarNeuralChecker;
-
-#[cfg(not(grammar_neural_bundled))]
-impl GrammarNeuralChecker {
-    pub fn route(&self, _text: &str) -> (bool, Option<f32>) {
-        (false, None)
-    }
-    pub fn apply(&self, text: &str) -> (String, Vec<SentenceResult>) {
-        (text.to_string(), vec![])
-    }
-}
-
-#[cfg(not(grammar_neural_bundled))]
-pub fn global() -> Option<&'static GrammarNeuralChecker> {
-    None
-}
-
-#[cfg(not(grammar_neural_bundled))]
-pub fn init_global() {}
+pub use neural::{global, init_global, GrammarNeuralChecker};
 
 #[cfg(test)]
 mod tests {

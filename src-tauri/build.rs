@@ -4,32 +4,6 @@ fn main() {
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
 
-    let grammar_dir = std::path::Path::new(&manifest_dir).join("data/grammar");
-    let grammar_files = [
-        "cola_model_quantized.0.0.1.onnx",
-        "cola_tokenizer.0.0.1.json",
-        "encoder_model_quantized.0.0.1.onnx",
-        "decoder_with_past_quantized.0.0.1.onnx",
-        "cross_attn_kv_weights.0.0.1.bin",
-        "t5_tokenizer.0.0.1.json",
-        "config.0.0.1.json",
-    ];
-    let grammar_bundled = grammar_files.iter().all(|f| grammar_dir.join(f).exists());
-    if grammar_bundled {
-        println!("cargo:rustc-cfg=grammar_neural_bundled");
-    } else {
-        println!(
-            "cargo:warning=grammar model files missing in data/grammar/ — grammar \
-             correction will be a NO-OP in this build (regenerate: python3 \
-             scripts/download_t5_grammar_onnx.py --output-dir src-tauri/data/grammar/ \
-             --version 0.0.1)"
-        );
-    }
-    for f in &grammar_files {
-        println!("cargo:rerun-if-changed=data/grammar/{f}");
-    }
-    println!("cargo:rerun-if-changed=data/grammar/config.0.0.1.json");
-
     // Desktop shared-ORT setup (mirrors Android pattern).
     // When SHERPA_ONNX_LIB_DIR contains a .shared-ort marker, the directory
     // has static sherpa-onnx libs + a stub libonnxruntime.a + the real

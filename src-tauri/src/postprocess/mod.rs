@@ -4,7 +4,8 @@
 //! 2. Inverse text normalization (rule-based, ~5ms)
 //! 3. User vocab substitution (rule-based, <1ms)
 //! 4. Grammar correction — neural (CoLA router + T5 corrector, ~4-65ms);
-//!    requires the bundled models (grammar_neural_bundled), no-op otherwise
+//!    models load at runtime from the downloaded dictation package, no-op
+//!    until installed (see postprocess::grammar_neural)
 
 mod filler;
 pub mod grammar_neural;
@@ -139,8 +140,9 @@ pub fn postprocess(text: &str) -> PipelineResult {
         grammar_sentences: vec![],
     });
 
-    // Stage 4: Grammar correction — CoLA router + T5 corrector. No-op when
-    // the models aren't bundled (grammar_neural_bundled unset at build time).
+    // Stage 4: Grammar correction — CoLA router + T5 corrector. No-op until
+    // the dictation package's grammar models are downloaded (see
+    // grammar_neural::init_global).
     //
     // Skipped for short texts: fragments and replacement phrases (e.g. two
     // words dictated over a selection) score very low on the grammar router

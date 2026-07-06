@@ -9,8 +9,8 @@
 //!   cargo run --bin eval_pipeline -- --text "some raw text"    # single sentence
 //!   cargo run --bin eval_pipeline -- --route "check this"      # router score only
 //!
-//! The grammar neural stage only activates when built with the
-//! grammar_neural_bundled cfg flag and ONNX models present.
+//! The grammar neural stage only activates once the dictation package's
+//! grammar models have been downloaded to the runtime models directory.
 
 use std::path::PathBuf;
 use verba_rs_lib::postprocess;
@@ -123,8 +123,8 @@ fn run_route(text: &str) {
             }
         }
         None => {
-            eprintln!("Neural grammar not available (models not bundled).");
-            eprintln!("Run `just setup` to download grammar models, then rebuild.");
+            eprintln!("Neural grammar not available (models not downloaded).");
+            eprintln!("Install the dictation package from the app, then rerun.");
             std::process::exit(1);
         }
     }

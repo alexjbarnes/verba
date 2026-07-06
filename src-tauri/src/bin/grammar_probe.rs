@@ -6,15 +6,16 @@
 //!     ORT_DYLIB_PATH=<libonnxruntime.so> \
 //!         cargo run --bin grammar_probe < raw.json > results.json
 //!
-//! Input: JSON array of strings. Requires the grammar models bundled
-//! (grammar_neural_bundled set by build.rs); exits 2 otherwise.
+//! Input: JSON array of strings. Requires the grammar models to have been
+//! downloaded to the runtime models directory (dictation package); exits 2
+//! otherwise.
 
 use std::io::Read;
 
 fn main() {
     verba_rs_lib::postprocess::grammar_neural::init_global();
     if verba_rs_lib::postprocess::grammar_neural::global().is_none() {
-        eprintln!("neural grammar unavailable (models not bundled or failed to load)");
+        eprintln!("neural grammar unavailable (models not downloaded or failed to load)");
         std::process::exit(2);
     }
     let mut input = String::new();
