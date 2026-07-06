@@ -211,6 +211,20 @@
       </div>
     </section>
 
+    <!-- Reading section -->
+    <section>
+      <div class="mb-4">
+        <h2 class="text-lg font-bold tracking-tight text-on-surface">Reading</h2>
+      </div>
+      <div class="bg-surface-container-low rounded-xl p-5">
+        <div class="flex items-center justify-between mb-2">
+          <label class="text-sm font-medium text-on-surface">Reading text size</label>
+          <span id="font-scale-label" class="text-xs font-mono text-on-surface-variant">100%</span>
+        </div>
+        <input id="font-scale-range" type="range" min="85" max="140" step="5" value="100" class="w-full accent-primary" />
+      </div>
+    </section>
+
   </div>
 
   <!-- Snippets tab -->
@@ -277,10 +291,16 @@
   <div id="library" class="tab-panel hidden flex-1 flex flex-col px-5 py-6 min-h-0">
     <div class="flex items-center justify-between mb-4 gap-3">
       <h2 class="text-lg font-bold tracking-tight text-on-surface">Library</h2>
-      <div id="lib-switch" class="relative flex w-44 shrink-0 p-1 rounded-full bg-surface-container shadow-[inset_0_1px_2px_rgba(0,0,0,0.45)]">
-        <span id="lib-thumb" class="absolute top-1 bottom-1 left-1 w-[calc(50%-0.25rem)] rounded-full bg-surface-bright shadow-md ring-1 ring-white/10 transition-transform duration-300 ease-[cubic-bezier(0.4,0,0.2,1)]"></span>
-        <button class="lib-tab-btn relative z-10 flex-1 flex items-center justify-center py-1 rounded-full text-xs font-semibold transition-colors text-primary" data-lib="articles">Articles</button>
-        <button class="lib-tab-btn relative z-10 flex-1 flex items-center justify-center py-1 rounded-full text-xs font-semibold transition-colors text-on-surface-variant" data-lib="books">Books</button>
+      <div class="flex items-center gap-2 shrink-0">
+        <button id="queue-btn" class="relative p-2 text-on-surface-variant hover:text-primary transition-colors rounded-lg hover:bg-primary/10 cursor-pointer">
+          <span class="material-symbols-outlined text-xl">queue_music</span>
+          <span id="queue-badge" class="hidden absolute top-0 right-0 min-w-[16px] h-[16px] px-[3px] flex items-center justify-center rounded-full bg-primary text-on-primary text-[9px] font-bold leading-none">0</span>
+        </button>
+        <div id="lib-switch" class="relative flex w-44 shrink-0 p-1 rounded-full bg-surface-container shadow-[inset_0_1px_2px_rgba(0,0,0,0.45)]">
+          <span id="lib-thumb" class="absolute top-1 bottom-1 left-1 w-[calc(50%-0.25rem)] rounded-full bg-surface-bright shadow-md ring-1 ring-white/10 transition-transform duration-300 ease-[cubic-bezier(0.4,0,0.2,1)]"></span>
+          <button class="lib-tab-btn relative z-10 flex-1 flex items-center justify-center py-1 rounded-full text-xs font-semibold transition-colors text-primary" data-lib="articles">Articles</button>
+          <button class="lib-tab-btn relative z-10 flex-1 flex items-center justify-center py-1 rounded-full text-xs font-semibold transition-colors text-on-surface-variant" data-lib="books">Books</button>
+        </div>
       </div>
     </div>
     <div id="lib-scroll" class="flex-1 min-h-0 overflow-y-auto">
@@ -582,6 +602,16 @@
     </div>
   </div>
 
+  <!-- Playback queue sheet -->
+  <div id="queue-sheet" class="fixed inset-0 z-50 hidden">
+    <div id="queue-sheet-overlay" class="absolute inset-0 bg-black/50"></div>
+    <div class="absolute bottom-0 left-0 right-0 bg-surface-container-high rounded-t-2xl shadow-xl border-t border-outline-variant/20 max-h-[70vh] flex flex-col" style="padding-bottom: max(1.25rem, env(safe-area-inset-bottom));">
+      <div class="w-10 h-1 bg-outline-variant/40 rounded-full mx-auto mt-3 mb-4 shrink-0"></div>
+      <p class="text-sm font-bold text-on-surface px-5 mb-2 shrink-0">Queue</p>
+      <div id="queue-sheet-list" class="overflow-y-auto px-3 pb-2"></div>
+    </div>
+  </div>
+
   <!-- Confirm dialog (replaces window.confirm which doesn't work in WKWebView) -->
   <div id="confirm-dialog" class="fixed inset-0 z-50 hidden items-center justify-center bg-black/50 backdrop-blur-sm">
     <div class="bg-surface-container-high rounded-2xl p-6 mx-4 max-w-sm w-full shadow-xl border border-outline-variant/20">
@@ -646,9 +676,9 @@
       <span id="tts-time-total" class="text-[11px] text-on-surface-variant tabular-nums">0:00</span>
     </div>
     <div class="relative flex items-center justify-center pb-3 gap-7">
-      <button id="tts-voice-btn" class="absolute left-3 flex items-center gap-1 text-on-surface-variant active:text-on-surface transition-colors cursor-pointer px-1">
+      <button id="tts-voice-btn" class="absolute left-3 top-1/2 -translate-y-1/2 flex flex-col items-center gap-0.5 text-on-surface-variant active:text-on-surface transition-colors cursor-pointer px-1">
         <span class="material-symbols-outlined text-[20px]">record_voice_over</span>
-        <span id="tts-voice-btn-label" class="text-sm font-bold tabular-nums">0</span>
+        <span id="tts-voice-btn-label" class="text-[9px] font-semibold leading-none truncate max-w-[4.5rem]">Voice</span>
       </button>
       <button id="tts-skip-back" class="p-2 text-on-surface-variant active:text-on-surface transition-colors cursor-pointer">
         <span class="material-symbols-outlined text-[28px]">replay_10</span>

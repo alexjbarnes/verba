@@ -772,6 +772,44 @@ async function applyThreads() {
   }
 }
 
+// ── Reading text size ──
+
+function loadFontScale() {
+  try {
+    const n = parseInt(localStorage.getItem('verba-font-scale'), 10);
+    return Number.isFinite(n) ? n : 100;
+  } catch (_) {
+    return 100;
+  }
+}
+
+function saveFontScale(scale) {
+  try { localStorage.setItem('verba-font-scale', String(scale)); } catch (_) { /* storage unavailable */ }
+}
+
+// Applied directly to the reading view's font-size (rem, so it still scales
+// with the device's base font). Called unconditionally at boot below — must
+// not depend on the Settings panel ever having been opened.
+function applyFontScale(scale) {
+  const el = document.getElementById('reading-text');
+  if (el) el.style.fontSize = (scale / 100) + 'rem';
+}
+
+const fontScaleRange = document.getElementById('font-scale-range');
+const fontScaleLabel = document.getElementById('font-scale-label');
+fontScaleRange.addEventListener('input', () => {
+  const scale = parseInt(fontScaleRange.value, 10);
+  fontScaleLabel.textContent = scale + '%';
+  saveFontScale(scale);
+  applyFontScale(scale);
+});
+(function initFontScale() {
+  const scale = loadFontScale();
+  fontScaleRange.value = String(scale);
+  fontScaleLabel.textContent = scale + '%';
+  applyFontScale(scale);
+})();
+
 // ── Vocabulary tab ──
 
 async function loadVocab() {
@@ -1621,6 +1659,10 @@ let articleEstMs = 0;
 // genId whose real duration has already been saved, so a full play measures the
 // article's true length once (on gen_done) rather than repeatedly.
 let measuredGenId = -1;
+// genId already sampled into the per-voice calibration EMA (maybeLearnVoiceCal).
+// Tracked separately from measuredGenId because calibration also learns from
+// book chapters, which measuredGenId/maybeSaveMeasuredDuration deliberately skip.
+let calibratedGenId = -1;
 // The live duration estimate only refines the displayed total at these
 // generation-progress milestones (fraction of the fragment generated), so the
 // number changes a few discrete times rather than continuously. dynMilestoneIdx
@@ -1665,18 +1707,64 @@ function fmtTime(ms) {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
 }
 
-// Estimated spoken duration of `text` at a given speed. Two parts: speech time
-// scales with speed (length_scale ~ 1/speed), but the silence spliced at
-// punctuation (see piper.rs) is added in PCM at fixed lengths and does NOT scale
-// with speed. Keeping them separate is what makes the estimate hold up at slow
-// speeds (the old word-count/speed estimate doubled the pauses too). Approximate
-// — used for the library time-left and the ready-state bar before generation.
-// Calibrated against a real article (950 words, 0.75x measured 5:40): Piper
-// reads faster than a naive ~165 wpm, and the spliced pauses overlap/collapse so
-// they count for less than their raw splice lengths. These are rough — the real
-// duration is measured and saved after the first full play (itemDurationMs).
+// ── Per-voice duration calibration ──
+//
+// SPEAK_WPM below is one flat rate for every voice, but voices differ audibly
+// in pace. Rather than a per-voice WPM table (which would duplicate the pause
+// math per voice), a single multiplicative ratio is learned per voice from
+// real measured playback (maybeLearnVoiceCal) and applied on top of the flat
+// estimate, so the existing pause terms stay intact and nothing double-counts.
+function loadVoiceCal() {
+  try {
+    const cal = JSON.parse(localStorage.getItem('verba-voice-cal') || '{}');
+    return (cal && typeof cal === 'object') ? cal : {};
+  } catch (_) {
+    return {};
+  }
+}
+
+function saveVoiceCal(cal) {
+  try { localStorage.setItem('verba-voice-cal', JSON.stringify(cal)); } catch (_) { /* storage unavailable */ }
+}
+
+// Calibration key for the currently active voice — mirrors how loadCacheStatus
+// derives sid from ttsVoice (a custom voice has no numeric sid, so it's keyed
+// by name instead).
+function activeVoiceCalKey() {
+  const voiceVal = ttsVoice || '0';
+  if (voiceVal.startsWith('custom:')) return `custom:${voiceVal.slice(7)}`;
+  return `${ttsModelId}#${parseInt(voiceVal, 10) || 0}`;
+}
+
+function activeVoiceCalRatio() {
+  const entry = loadVoiceCal()[activeVoiceCalKey()];
+  return (entry && typeof entry.ratio === 'number') ? entry.ratio : 1;
+}
+
+// Pure EMA + clamp step, factored out from maybeLearnVoiceCal so it can be
+// unit-tested headlessly. `prev` is the voice's existing {ratio, n} entry, or
+// undefined/null for a never-calibrated voice.
+function nextVoiceCalEntry(prev, observedRatio) {
+  const n = prev ? prev.n : 0;
+  const ratio = n === 0 ? observedRatio : 0.7 * prev.ratio + 0.3 * observedRatio;
+  return { ratio: Math.min(2.0, Math.max(0.5, ratio)), n: n + 1 };
+}
+
+// Estimated spoken duration of `text` at a given speed, BEFORE per-voice
+// calibration. Two parts: speech time scales with speed (length_scale ~
+// 1/speed), but the silence spliced at punctuation (see piper.rs) is added in
+// PCM at fixed lengths and does NOT scale with speed. Keeping them separate is
+// what makes the estimate hold up at slow speeds (the old word-count/speed
+// estimate doubled the pauses too). Approximate — used for the library
+// time-left and the ready-state bar before generation. Calibrated against a
+// real article (950 words, 0.75x measured 5:40): Piper reads faster than a
+// naive ~165 wpm, and the spliced pauses overlap/collapse so they count for
+// less than their raw splice lengths. These are rough — the real duration is
+// measured and saved after the first full play (itemDurationMs). Exposed
+// raw (uncalibrated) so maybeLearnVoiceCal can compare a real measurement
+// against this baseline without the calibration ratio feeding back into itself.
 const SPEAK_WPM = 255;
-function estDurationMsForText(text, speed) {
+function estDurationMsForTextRaw(text, speed) {
   if (!text || !text.trim()) return 0;
   const words = text.trim().split(/\s+/).filter(Boolean).length;
   const spokenMs = words / SPEAK_WPM * 60000 / (speed || 1);
@@ -1687,12 +1775,22 @@ function estDurationMsForText(text, speed) {
   return Math.round(spokenMs + pauseMs);
 }
 
-// Word-count-only variant of estDurationMsForText, for a book chapter row:
+// Calibrated estimate used by every other call site: the raw estimate scaled
+// by the active voice's learned ratio (default 1 until it has measurements).
+function estDurationMsForText(text, speed) {
+  return Math.round(estDurationMsForTextRaw(text, speed) * activeVoiceCalRatio());
+}
+
+// Word-count-only variant of estDurationMsForTextRaw, for a book chapter row:
 // only ChapterMeta.words is available there (the chapter body isn't loaded
 // just to render the list), so there's no punctuation to estimate pauses from.
-function estMsForWords(words, speed) {
+function estMsForWordsRaw(words, speed) {
   if (!words) return 0;
   return Math.round(words / SPEAK_WPM * 60000 / (speed || 1));
+}
+
+function estMsForWords(words, speed) {
+  return Math.round(estMsForWordsRaw(words, speed) * activeVoiceCalRatio());
 }
 
 // Real measured duration once the article has been generated (saved on the
@@ -1859,6 +1957,7 @@ listen('tts-position', (event) => {
   highlightAt(timelineBaseMs + event.payload.position_ms);
   if (!event.payload.paused) saveProgress(false);
   maybeSaveMeasuredDuration(event.payload);
+  maybeLearnVoiceCal(event.payload);
   // Generation just cached more of the article — refresh coverage once per gen.
   if (event.payload.gen_done && cacheStatusGen !== genId) {
     cacheStatusGen = genId;
@@ -1880,6 +1979,26 @@ function maybeSaveMeasuredDuration(p) {
   readingItem.duration_ms = dur;
   readingItem.duration_speed = ttsSpeed;
   invoke('library_set_duration', { id: readingItem.id, durationMs: dur, speed: ttsSpeed }).catch(() => {});
+}
+
+// Learn how the active voice's real pace compares to the flat SPEAK_WPM
+// estimate, across both articles and book chapters — unlike
+// maybeSaveMeasuredDuration (which only saves whole-article durations and
+// early-returns for books), this must fire for chapters too. Same "full play"
+// guard (genBaseWord 0, gen_done), sitting next to that function rather than
+// inside it since it can't share its books early-return.
+function maybeLearnVoiceCal(p) {
+  if (!p.gen_done || genBaseWord !== 0 || !readingText) return;
+  if (calibratedGenId === genId) return;
+  const dur = p.buffered_ms;
+  if (!dur || dur < 5000) return; // too short a sample to be signal
+  calibratedGenId = genId;
+  const estRaw = estDurationMsForTextRaw(readingText, ttsSpeed);
+  if (!estRaw) return;
+  const key = activeVoiceCalKey();
+  const cal = loadVoiceCal();
+  cal[key] = nextVoiceCalEntry(cal[key], dur / estRaw);
+  saveVoiceCal(cal);
 }
 
 // While generating (and only for items without a measured duration), extrapolate
@@ -1992,6 +2111,8 @@ listen('tts-finished', async (event) => {
       }
       invoke('book_set_position', { id: bookState.id, chapter: bookState.current, offset: readingText.length }).catch(() => {});
       resetTtsUI();
+      // The book has nothing left to advance into — hand off to the queue.
+      await playNextInQueue();
     }
     return;
   }
@@ -2002,6 +2123,8 @@ listen('tts-finished', async (event) => {
     invoke('library_set_progress', { id: readingItem.id, progress: readingText.length }).catch(() => {});
   }
   resetTtsUI();
+  // The article just finished — hand off to whatever's queued next.
+  await playNextInQueue();
 });
 
 playPauseBtn.addEventListener('click', () => {
@@ -2571,18 +2694,20 @@ function attachLongPress(el, handler) {
 // ── Library row long-press action sheet ──
 
 const libActionSheet = document.getElementById('lib-action-sheet');
-let libActionTarget = null; // { id }
+let libActionTarget = null; // { id, chapter } — chapter null unless opened from a book chapter row
 
 function openLibActionSheet(item, isBook) {
-  libActionTarget = { id: item.id };
+  libActionTarget = { id: item.id, chapter: null };
   document.getElementById('lib-action-title').textContent = item.title;
   const actions = isBook
     ? [
         { action: 'mark-read', icon: 'check_circle', label: 'Mark as read' },
         { action: 'mark-unread', icon: 'radio_button_unchecked', label: 'Mark as unread' },
+        { action: 'add-queue', icon: 'playlist_add', label: 'Add to queue' },
       ]
     : [
         { action: 'reset-progress', icon: 'restart_alt', label: 'Reset progress' },
+        { action: 'add-queue', icon: 'playlist_add', label: 'Add to queue' },
       ];
   document.getElementById('lib-action-list').innerHTML = actions.map(a =>
     `<button class="more-item w-full flex items-center gap-3 px-4 py-3 rounded-xl text-left cursor-pointer hover:bg-surface-container-highest text-on-surface" data-action="${a.action}">
@@ -2591,17 +2716,33 @@ function openLibActionSheet(item, isBook) {
     </button>`).join('');
   libActionSheet.classList.remove('hidden');
 }
+
+// One-action variant of openLibActionSheet for a single book chapter row
+// (long-pressed from openBook's chapter list): only "Add to queue" applies,
+// keyed to this specific chapter rather than the book as a whole.
+function openChapterActionSheet(item, idx) {
+  libActionTarget = { id: item.id, chapter: idx };
+  const ch = item.chapters[idx];
+  document.getElementById('lib-action-title').textContent = ch.title || `Chapter ${idx + 1}`;
+  document.getElementById('lib-action-list').innerHTML =
+    `<button class="more-item w-full flex items-center gap-3 px-4 py-3 rounded-xl text-left cursor-pointer hover:bg-surface-container-highest text-on-surface" data-action="add-queue">
+      <span class="material-symbols-outlined text-lg text-on-surface-variant">playlist_add</span>
+      <span class="text-sm">Add to queue</span>
+    </button>`;
+  libActionSheet.classList.remove('hidden');
+}
 function closeLibActionSheet() { libActionSheet.classList.add('hidden'); }
 document.getElementById('lib-action-overlay').addEventListener('click', closeLibActionSheet);
 document.getElementById('lib-action-list').addEventListener('click', async (e) => {
   const btn = e.target.closest('.more-item');
   if (!btn || !libActionTarget) return;
-  const { id } = libActionTarget;
+  const { id, chapter } = libActionTarget;
   const action = btn.dataset.action;
   closeLibActionSheet();
   if (action === 'reset-progress') await invoke('library_set_progress', { id, progress: 0 });
   else if (action === 'mark-read') await invoke('book_set_read', { id, read: true });
   else if (action === 'mark-unread') await invoke('book_set_read', { id, read: false });
+  else if (action === 'add-queue') addToQueue(id, chapter);
   loadLibrary();
 });
 
@@ -2722,6 +2863,154 @@ function renderLibraryList() {
   });
 }
 
+// ── Playlist queue ──
+//
+// Device-local queue of articles/chapters to auto-play once the current item
+// finishes (see playNextInQueue, hooked into the tts-finished listener).
+// localStorage-only, never synced. An entry is {id, chapter}: chapter null
+// queues an article, or a book from wherever it currently is; chapter is a
+// chapter index to queue one specific chapter of a book.
+function loadQueue() {
+  try {
+    const q = JSON.parse(localStorage.getItem('verba-queue') || '[]');
+    return Array.isArray(q) ? q : [];
+  } catch (_) {
+    return [];
+  }
+}
+
+function saveQueue(q) {
+  try { localStorage.setItem('verba-queue', JSON.stringify(q)); } catch (_) { /* storage unavailable */ }
+}
+
+function renderQueueBadge() {
+  const badge = document.getElementById('queue-badge');
+  if (!badge) return;
+  const n = loadQueue().length;
+  badge.textContent = String(n);
+  badge.classList.toggle('hidden', n === 0);
+}
+
+// Queue one item/chapter. Refuses a duplicate id+chapter pair rather than
+// queuing the same thing twice.
+function addToQueue(id, chapter) {
+  const q = loadQueue();
+  if (q.some(e => e.id === id && e.chapter === chapter)) {
+    showToast('Already in queue');
+    return;
+  }
+  q.push({ id, chapter });
+  saveQueue(q);
+  renderQueueBadge();
+  showToast(`Added to queue (${q.length})`);
+}
+
+// Display title for a queue row: the cached library item's title (from A1's
+// libItems), plus the chapter title for a specific-chapter entry. A queued
+// item can be deleted before its turn comes up — still shown (and removable)
+// so the sheet doesn't just silently drop it.
+function queueEntryLabel(entry) {
+  const item = libItems.find(it => it.id === entry.id);
+  if (!item) return 'Deleted item';
+  if (entry.chapter == null) return item.title;
+  const ch = item.chapters && item.chapters[entry.chapter];
+  const chTitle = ch ? (ch.title || `Chapter ${entry.chapter + 1}`) : `Chapter ${entry.chapter + 1}`;
+  return `${item.title} — ${chTitle}`;
+}
+
+const queueSheet = document.getElementById('queue-sheet');
+
+function renderQueueSheet() {
+  const q = loadQueue();
+  const list = document.getElementById('queue-sheet-list');
+  if (!q.length) {
+    list.innerHTML = '<p class="text-sm text-on-surface-variant px-3 py-6 text-center">Queue is empty</p>';
+    return;
+  }
+  list.innerHTML = q.map((entry, i) => `
+    <div class="flex items-center gap-2 px-3 py-2.5" data-i="${i}">
+      <button class="queue-row-play min-w-0 flex-1 text-left text-sm text-on-surface truncate cursor-pointer hover:text-primary transition-colors">${escapeHtml(queueEntryLabel(entry))}</button>
+      <button class="queue-row-remove shrink-0 text-on-surface-variant hover:text-error transition-colors p-1 cursor-pointer" data-i="${i}">
+        <span class="material-symbols-outlined text-lg">close</span>
+      </button>
+    </div>`).join('')
+    + '<button id="queue-clear-btn" class="w-full text-xs font-semibold text-on-surface-variant hover:text-error transition-colors px-4 py-3 mt-1 rounded-xl hover:bg-error/10 cursor-pointer">Clear queue</button>';
+}
+
+function openQueueSheet() {
+  renderQueueSheet();
+  queueSheet.classList.remove('hidden');
+}
+function closeQueueSheet() { queueSheet.classList.add('hidden'); }
+
+document.getElementById('queue-btn').addEventListener('click', openQueueSheet);
+document.getElementById('queue-sheet-overlay').addEventListener('click', closeQueueSheet);
+document.getElementById('queue-sheet-list').addEventListener('click', (e) => {
+  if (e.target.closest('#queue-clear-btn')) {
+    saveQueue([]);
+    renderQueueBadge();
+    renderQueueSheet();
+    return;
+  }
+  const removeBtn = e.target.closest('.queue-row-remove');
+  if (removeBtn) {
+    const q = loadQueue();
+    q.splice(Number(removeBtn.dataset.i), 1);
+    saveQueue(q);
+    renderQueueBadge();
+    renderQueueSheet();
+    return;
+  }
+  const playBtn = e.target.closest('.queue-row-play');
+  if (playBtn) {
+    const i = Number(playBtn.closest('[data-i]').dataset.i);
+    const q = loadQueue();
+    const [entry] = q.splice(i, 1);
+    saveQueue(q);
+    renderQueueBadge();
+    closeQueueSheet();
+    if (entry) {
+      playQueueEntry(entry).then(ok => { if (!ok) showToast('Could not play — item may have been deleted'); });
+    }
+  }
+});
+renderQueueBadge();
+
+// Play one queue entry: article -> openReading (resumes where it left off);
+// book, any chapter -> openBookChapter for that chapter (chapter null means
+// "wherever the book currently is"). Resolves fresh via library_get rather
+// than trusting the libItems cache, since the item may have changed (or been
+// deleted) since it was queued. Returns false when the item is gone.
+async function playQueueEntry(entry) {
+  let item;
+  try { item = await invoke('library_get', { id: entry.id }); } catch (_) { item = null; }
+  if (!item) return false;
+  const isBook = item.chapters && item.chapters.length > 0;
+  if (!isBook) {
+    await openReading(entry.id, { autoplay: true });
+  } else if (entry.chapter == null) {
+    await openBookChapter(item, item.current_chapter, { autoplay: true });
+  } else {
+    await openBookChapter(item, entry.chapter, { autoplay: true });
+  }
+  return true;
+}
+
+// Auto-advance hand-off once the current item has nothing left to play (an
+// article finishing, or a book's LAST chapter finishing — the mid-book
+// chapter-to-chapter advance never reaches here, it has its own path). Pops
+// entries until one actually plays, skipping any that fail to resolve (e.g. a
+// queued item deleted before its turn), until the queue is empty.
+async function playNextInQueue() {
+  const q = loadQueue();
+  while (q.length) {
+    const entry = q.shift();
+    saveQueue(q);
+    renderQueueBadge();
+    if (await playQueueEntry(entry)) return;
+  }
+}
+
 // Shared Readability pipeline: parse HTML, strip site chrome and footnote
 // markers, extract the readable article. Used by the share-import flow and the
 // feed importer. Returns {title, body} or null when nothing readable is found.
@@ -2823,7 +3112,7 @@ async function importSharedText(text) {
   }
 }
 
-async function openReading(id) {
+async function openReading(id, { autoplay = false } = {}) {
   bookState = null; // opening a plain article, not continuing a book chapter
   let item;
   try { item = await invoke('library_get', { id }); }
@@ -2834,6 +3123,7 @@ async function openReading(id) {
   readingText = item.body;
   activeWord = -1; genBaseWord = 0; timingCursor = 0; wordTimes = {};
   document.getElementById('reading-title').textContent = item.title;
+  invoke('media_set_title', { title: item.title }).catch(() => {});
   renderReading(readingText);
   showPanel('reading');
   setBottomNavVisible(false); // detail view: hide the tab bar, player bar to edge
@@ -2866,6 +3156,9 @@ async function openReading(id) {
   // Reflect what's already cached for this voice+speed on the bar (and adopt the
   // real duration if fully cached) before any play. Fire-and-forget.
   loadCacheStatus();
+  // Queue/auto-advance hand-off: start exactly like the player-bar play button
+  // would for a not-yet-started item (resume point if there is one, else top).
+  if (autoplay) startPlaybackFromResume();
 }
 
 // Open a book's chapter list (from a Library row tap).
@@ -2904,7 +3197,11 @@ async function openBook(id) {
     </div>`;
   }).join('');
   listEl.querySelectorAll('.book-chapter-row').forEach(el => {
-    el.addEventListener('click', () => openBookChapter(item, Number(el.dataset.idx)));
+    el.addEventListener('click', () => {
+      if (el._longPressed) { el._longPressed = false; return; }
+      openBookChapter(item, Number(el.dataset.idx));
+    });
+    attachLongPress(el, () => openChapterActionSheet(item, Number(el.dataset.idx)));
   });
 }
 
@@ -2930,7 +3227,9 @@ async function openBookChapter(item, idx, { autoplay = false } = {}) {
   readingText = body;
   activeWord = -1; genBaseWord = 0; timingCursor = 0; wordTimes = {};
   const chapterTitle = item.chapters[idx].title || `Chapter ${idx + 1}`;
-  document.getElementById('reading-title').textContent = `${item.title} — ${chapterTitle}`;
+  const headerTitle = `${item.title} — ${chapterTitle}`;
+  document.getElementById('reading-title').textContent = headerTitle;
+  invoke('media_set_title', { title: headerTitle }).catch(() => {});
   renderReading(readingText);
   showPanel('reading');
   setBottomNavVisible(false); // detail view: hide the tab bar, player bar to edge
@@ -2995,7 +3294,7 @@ const voiceSheet = document.getElementById('voice-sheet');
 function updateVoiceBtnLabel() {
   const label = document.getElementById('tts-voice-btn-label');
   if (!label) return;
-  label.textContent = ttsVoice.startsWith('custom:') ? ttsVoice.slice(7) : (ttsVoice || '0');
+  label.textContent = ttsVoice.startsWith('custom:') ? ttsVoice.slice(7) : voiceLabel(parseInt(ttsVoice, 10) || 0);
 }
 
 function speedForVoice(voice) {
