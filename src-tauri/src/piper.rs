@@ -184,7 +184,7 @@ fn config_is_gb(config_path: &str) -> bool {
 /// this so they can never disagree.
 /// Bump when pronunciation logic changes for ALL locales (heteronym rules,
 /// tokenizer fixes) so cached audio regenerates with the new readings.
-const PRON_VERSION: u32 = 7;
+const PRON_VERSION: u32 = 8;
 
 pub fn cache_fingerprint(model_path: &str, config_path: &str) -> String {
     let fp = model_fingerprint(model_path);
@@ -681,6 +681,36 @@ const PRONUNCIATION_OVERRIDES: &[(&str, &str)] = &[
     ("iterating", "IH1 T ER0 EY2 T IH0 NG"),
     ("iterator", "IH1 T ER0 EY2 T ER0"),
     ("iterators", "IH1 T ER0 EY2 T ER0 Z"),
+    // Reported 2026-07-06 (alba, GB voice). OOV tech/brand terms that were
+    // spelling out letter-by-letter; built from real morphemes/compounds
+    // already in the dict (pie+torch, mat+mul rhyming with dull/hull/cull,
+    // in+painting, convolution's first syllable, re+size — "re-" is
+    // deliberately excluded from OOV_PREFIXES because the dict's "re" is the
+    // musical note "ray", so resize's family needs its own entries here,
+    // using the real prefix sound like repurpose/reanimate/requeue), or a
+    // rhyme match for a proper noun ("vanilla"'s V AH0 N IH1 L AH0 template
+    // restressed for Mozilla). "amount" and "Einsum" were reported in the
+    // same batch but already probe correct on GB (Einsum resolves through
+    // the phonemizer's own letter-to-sound guess, not letter spelling) and
+    // are deliberately left untouched.
+    ("pytorch", "P AY1 T AO1 R CH"),
+    ("inpainting", "IH0 N P EY1 N T IH0 NG"),
+    ("matmul", "M AE1 T M AH1 L"),
+    ("conv", "K AA1 N V"),
+    ("mozilla", "M AH0 Z IH1 L AH0"),
+    ("resize", "R IY0 S AY1 Z"),
+    ("resizes", "R IY0 S AY1 Z AH0 Z"),
+    ("resized", "R IY0 S AY1 Z D"),
+    ("resizing", "R IY0 S AY1 Z IH0 NG"),
+    // "initialize"/"initialized" already phonemize correctly (real cmudict
+    // entries); only the agentive noun forms were missing.
+    ("initializer", "IH0 N IH1 SH AH0 L AY2 Z ER0"),
+    ("initializers", "IH0 N IH1 SH AH0 L AY2 Z ER0 Z"),
+    // Feeds the "Q&A"/"Q & A" -> "QandA" glue in normalize_text: Q's letter
+    // name (matching the existing "sql" override), the dict word "and", and
+    // A's letter name (matching the existing "ai" override). Keeps the bare
+    // dictionary word "a" (the indefinite article) untouched everywhere else.
+    ("qanda", "K Y UW1 AH0 N D EY1"),
 ];
 
 /// Expand each (possibly multi-codepoint, like "ɑː" or "iː") token into
@@ -811,17 +841,24 @@ fn normalize_numbers(text: &str) -> String {
     while i < chars.len() {
         let c = chars[i];
         let currency = c == '$' && chars.get(i + 1).is_some_and(|d| d.is_ascii_digit());
-        // Leading sign ('+', '-', or the U+2212 minus) immediately before a
-        // digit, at a left boundary (start of text, after whitespace, or
-        // after '('): consumes the sign and speaks "plus"/"minus" before the
-        // number. Boundary-gated so mid-token hyphens pass through untouched:
-        // in "2019-2021" the '-' is preceded by '9' (alphanumeric, not a
-        // boundary), so it falls to the plain passthrough branch below.
-        let sign = if matches!(c, '+' | '-' | '\u{2212}')
+        // Leading sign ('+', '-', the U+2212 minus, or '~' for "about")
+        // immediately before a digit, at a left boundary (start of text,
+        // after whitespace, or after '('): consumes the sign and speaks a
+        // word before the number. Boundary-gated so mid-token hyphens pass
+        // through untouched: in "2019-2021" the '-' is preceded by '9'
+        // (alphanumeric, not a boundary), so it falls to the plain
+        // passthrough branch below. Reported 2026-07-06: "~1.3GB" left the
+        // '~' silently dropped (not in phonemize's kept-punctuation set),
+        // reading as if the approximation were never there.
+        let sign = if matches!(c, '+' | '-' | '\u{2212}' | '~')
             && chars.get(i + 1).is_some_and(|d| d.is_ascii_digit())
             && (out.is_empty() || out.ends_with(|b: char| b.is_whitespace() || b == '('))
         {
-            Some(if c == '+' { "plus" } else { "minus" })
+            Some(match c {
+                '+' => "plus",
+                '~' => "about",
+                _ => "minus",
+            })
         } else {
             None
         };
@@ -894,6 +931,35 @@ fn normalize_numbers(text: &str) -> String {
                 };
                 if !magnitude.is_empty() {
                     i += 1;
+                }
+            }
+        }
+        // Byte-size unit suffix ("10GB" / "1.5MB" / "200KB" / "2TB" / "3PB"):
+        // unlike magnitude, the two letters name the unit itself, spoken as
+        // its own singular/plural word after the number, rather than scaling
+        // an implicit noun ("$10B" is ten billion DOLLARS; "10GB" is not "ten
+        // billion bytes"). Checked as its own two-letter unit so a bare
+        // "GB"/"MB"/... is never left OOV for the letter-spelling fallback
+        // ("G-B") to spell out instead. Exact uppercase pairs only:
+        // lowercase "mb"/"tb" collide with other abbreviations (millibar,
+        // tuberculosis) too often to guess at case-insensitively. Reported
+        // 2026-07-06 ("~1.3GB" read the unit as "G-B" letters).
+        let mut byte_unit = "";
+        if !percent && !ordinal && magnitude.is_empty() {
+            let c1 = chars.get(i).copied().unwrap_or('\0');
+            let c2 = chars.get(i + 1).copied().unwrap_or('\0');
+            let boundary_after2 = chars.get(i + 2).map_or(true, |c| !c.is_alphanumeric());
+            if c2 == 'B' && boundary_after2 {
+                byte_unit = match c1 {
+                    'K' => "kilobyte",
+                    'M' => "megabyte",
+                    'G' => "gigabyte",
+                    'T' => "terabyte",
+                    'P' => "petabyte",
+                    _ => "",
+                };
+                if !byte_unit.is_empty() {
+                    i += 2;
                 }
             }
         }
@@ -988,6 +1054,15 @@ fn normalize_numbers(text: &str) -> String {
         if percent {
             out.push_str(" percent");
         }
+        if !byte_unit.is_empty() {
+            out.push(' ');
+            out.push_str(byte_unit);
+            // Singular only for an exact, unfractioned one ("1GB" -> "one
+            // gigabyte"); "1.3GB" and "1,000GB" both stay plural.
+            if !(frac.is_empty() && !had_sep && int_val == 1) {
+                out.push('s');
+            }
+        }
         // A letter glued to the number ("10x", "1990s") would fuse with the
         // spelled-out form ("tenx") and turn OOV; separate it.
         if chars.get(i).is_some_and(|c| c.is_ascii_alphabetic()) {
@@ -1026,6 +1101,26 @@ fn normalize_text(text: &str) -> String {
         .replace("Mr.", "Mister")
         .replace("Ms.", "Mizz")
         .replace("Prof.", "Professor");
+
+    // Reported 2026-07-06: "TL;DR:" split across the ';' (clause pause) and
+    // ':' (another pause): "TL" spelled letter-by-letter, then, after a beat,
+    // "DR" resolved through the dict entry for the street/honorific
+    // abbreviation "Dr" ("drive") instead of being OOV — probed as
+    // "tiːɛl; dɹˈaɪv:" ("T-L, drive:"). Gluing the two halves into one
+    // "TLDR" routes it through the ordinary OOV letter-spelling fallback
+    // instead, reading a clean "T-L-D-R" (it's too short for the compound
+    // splitter, which needs 3+ chars per half). Covers both "TL;DR" and
+    // "TL;DR:" (a trailing colon just stays in the text and reads as its
+    // own pause, same as any other colon).
+    let text = text.replace("TL;DR", "TLDR");
+    // Reported 2026-07-06: '&' isn't in phonemize's kept-punctuation set, so
+    // "Q&A" silently dropped it and read standalone "A" as the indefinite
+    // article's weak schwa (dict "a"), not the letter name — losing the
+    // "and" and mispronouncing the "A" in one go. Glue it into a single
+    // placeholder word so it resolves through the "qanda" override (which
+    // spells Q, "and", and the letter A) instead of touching how bare "a"
+    // reads everywhere else in running prose.
+    let text = text.replace("Q&A", "QandA").replace("Q & A", "QandA");
 
     // Dashes used as a spoken pause ("wait — no", "wait -- no", "wait - no")
     // rewrite to a clause-pause comma so they ride the CLAUSE_PAUSE_MS
@@ -1112,6 +1207,21 @@ fn normalize_text(text: &str) -> String {
             // letter immediately before the leading space) and not a
             // compound word (which has no space around its hyphen).
             i = push_dash_pause(&mut out, i, 1);
+        } else if c == '.'
+            && chars.get(i + 1).is_some_and(|&d| d == 'j')
+            && chars.get(i + 2).is_some_and(|&d| d == 's')
+            && out.ends_with(|c: char| c.is_alphanumeric())
+            && chars.get(i + 3).map_or(true, |d| !d.is_alphanumeric())
+        {
+            // Reported 2026-07-06 ("Transformers.js"): a glued library-name
+            // suffix. The bare '.' is punctuation phonemize treats as a
+            // full-stop pause (its kept-punctuation filter), splitting one
+            // name into two sentences ("Transformers... J-S"). Word-boundary
+            // gated on both sides so it doesn't fire inside ".json"/".jsx"
+            // (a real alphanumeric char right after "js" fails the check) or
+            // a standalone ".js" with nothing before it.
+            out.push(' ');
+            i += 1;
         } else {
             out.push(c);
             i += 1;
@@ -1148,6 +1258,11 @@ fn split_tokens(text: &str) -> Vec<String> {
 /// signal, so these are spelled letter-by-letter before the dict lookup.
 const SPELLED_ACRONYMS: &[&str] = &[
     "us", "uk", "eu", "un", "tv", "id", "os", "ip", "ui", "ux", "pr", "hr", "it",
+    // Reported 2026-07-06: "aws" isn't a dict word, but the phonemizer's own
+    // letter-to-sound guess reads it by analogy to "-aws" words like "jaws"
+    // (/ɔːz/) instead of leaving it OOV for spell()'s letter-by-letter path,
+    // so it needs the same explicit spelling as the acronyms above.
+    "aws",
 ];
 
 /// Prefixes tried against an OOV word ("unpatched" -> un + patched). The
@@ -2127,6 +2242,35 @@ mod tests {
         assert_eq!(normalize_text("Prof. Lee"), "Professor Lee");
     }
 
+    // Reported 2026-07-06: "TL;DR:" and "Q&A" each split across a separator
+    // character that phonemize's tokenizer treats as pause punctuation (';'/
+    // ':' for the first, dropping '&' outright for the second), spelling one
+    // abbreviation as two disjoint letter-groups or losing a word entirely.
+    // Gluing each into one placeholder word routes it through a single OOV/
+    // override lookup instead (see PRONUNCIATION_OVERRIDES's "qanda" entry
+    // and the OOV letter-spelling fallback for "TLDR").
+    #[test]
+    fn glued_abbreviation_expansions() {
+        assert_eq!(normalize_text("TL;DR: too long"), "TLDR: too long");
+        assert_eq!(normalize_text("TL;DR too long"), "TLDR too long");
+        assert_eq!(normalize_text("a Q&A session"), "a QandA session");
+        assert_eq!(normalize_text("a Q & A session"), "a QandA session");
+    }
+
+    // Reported 2026-07-06: "Transformers.js" read as two sentences ("...js"
+    // is punctuation-piece machinery treats the bare '.' as a full stop).
+    // Word-boundary gated so it doesn't fire inside a real "file.json"/
+    // "app.jsx" extension.
+    #[test]
+    fn dotjs_suffix_glue() {
+        assert_eq!(normalize_text("uses Transformers.js today"), "uses Transformers js today");
+        assert_eq!(normalize_text("built with Node.js"), "built with Node js");
+        assert_eq!(normalize_text("Transformers.js."), "Transformers js.");
+        // Negative guards: a real file extension keeps its pause.
+        assert_eq!(normalize_text("save objects.json"), "save objects.json");
+        assert_eq!(normalize_text("open app.jsx"), "open app.jsx");
+    }
+
     // Reported 2026-07-05: dashes read aloud with no audible pause. Em/en
     // dash, a "--" run, and a spaced ASCII hyphen used the same way all
     // rewrite to a clause-pause comma so they ride the CLAUSE_PAUSE_MS
@@ -2229,6 +2373,43 @@ mod tests {
         // sentence.
         assert_eq!(say("UN"), "juːɛn");
         assert_eq!(say("the UN said"), "ðɐ juːɛn sˈɛd");
+
+        // 2026-07-06 batch. Exact strings pinned from the probe (never
+        // hand-derived): PROBE_WORDS="Inpainting,PyTorch,Transformers.js,
+        // ~1.3GB,amount,Resize,Einsum,MatMul,Conv,initializers,AWS,Mozilla,
+        // Mozilla's,Q&A" (TL;DR probed separately: its own ';' collides with
+        // the probe's list separator).
+        // OOV brand/tech terms and compounds, now via PRONUNCIATION_OVERRIDES.
+        assert_eq!(say("Inpainting"), "ɪnpˈeɪntɪŋ");
+        assert_eq!(say("PyTorch"), "pˈaɪtˈɔːtʃ");
+        assert_eq!(say("Resize"), "ɹiːsˈaɪz");
+        assert_eq!(say("MatMul"), "mˈætmˈʌl");
+        assert_eq!(say("Conv"), "kˈɒnv");
+        assert_eq!(say("initializers"), "ɪnˈɪʃəlˌaɪzəz");
+        assert_eq!(say("Mozilla"), "məzˈɪlɐ");
+        // Possessive of an overridden OOV base resolves automatically (no
+        // separate "mozilla's" override needed, per the possessive fallback).
+        assert_eq!(say("Mozilla's"), "məzˈɪlɐz");
+        // "AWS" isn't OOV to the phonemizer (it guesses a rhyme-by-analogy
+        // reading, like "jaws"), so it needed SPELLED_ACRONYMS, not an override.
+        assert_eq!(say("AWS"), "eɪdʌbəljuːɛs");
+        // ".js" glue survives the full engine path: "Transformers" phonemizes
+        // normally, "js" spells as letters, no mid-word sentence pause.
+        assert_eq!(say("Transformers.js"), "tɹænsfˈɔːməz dʒeɪɛs");
+        // "TL;DR" glue: too short for the compound splitter (SEGMENT_MIN_PIECE
+        // needs 3+ chars/half), so it falls all the way to letter spelling.
+        assert_eq!(say("TL;DR"), "tiːɛldiːɑː");
+        assert_eq!(say("TL;DR:"), "tiːɛldiːɑː:");
+        // "Q&A" glue resolves through the "qanda" override: Q, "and", A.
+        assert_eq!(say("Q&A"), "kjˈuːəndˈeɪ");
+        // normalize_numbers: '~' + byte-size unit, through the full engine path.
+        assert_eq!(say("~1.3GB"), "əbaʊt wˈɒn pˈɔɪnt θɹˈiː ɡˈɪɡəbˌaɪts");
+        // Checked-correct guards: reported, but already right on GB — do not
+        // "fix" these if a future change makes them regress. "Einsum" resolves
+        // through the phonemizer's own letter-to-sound guess, not our letter
+        // spelling or dict path.
+        assert_eq!(say("amount"), "əmˈaʊnt");
+        assert_eq!(say("Einsum"), "ˈaɪnsˌʌm");
     }
 
     // Reported 2026-07-05: dashes produced no audible pause. Confirms the
@@ -2345,6 +2526,31 @@ mod tests {
             "one thousand two hundred thirty four dollars and fifty cents"
         );
         assert_eq!(normalize_numbers("200k users"), "two hundred thousand users");
+    }
+
+    // Reported 2026-07-06: "~1.3GB" left '~' silently dropped (not in
+    // phonemize's kept-punctuation set) and "GB" spelled out as letters
+    // ("G-B") since a bare two-letter unit never matched the single-letter
+    // magnitude suffix (which requires nothing alphanumeric right after it).
+    #[test]
+    fn byte_units_and_about() {
+        // Byte-size units speak the full word; plural except exactly one.
+        assert_eq!(normalize_numbers("~1.3GB"), "about one point three gigabytes");
+        assert_eq!(normalize_numbers("1GB"), "one gigabyte");
+        assert_eq!(normalize_numbers("10MB file"), "ten megabytes file");
+        assert_eq!(normalize_numbers("200KB"), "two hundred kilobytes");
+        assert_eq!(normalize_numbers("2TB drive"), "two terabytes drive");
+        assert_eq!(normalize_numbers("3PB"), "three petabytes");
+        // Lowercase/mixed-case units are left alone (avoids "10m" prose
+        // metres and millibar/tuberculosis-style abbreviation collisions).
+        assert_eq!(normalize_numbers("10mb"), "ten mb");
+        // A unit-looking suffix with more letters after it (currency code,
+        // not a byte unit) is not consumed.
+        assert_eq!(normalize_numbers("GBP 10"), "GBP ten");
+        // '~' reads "about" only at a left boundary immediately before a
+        // digit; mid-token/path use is untouched.
+        assert_eq!(normalize_numbers("~40 items"), "about forty items");
+        assert_eq!(normalize_numbers("(~5 min)"), "(about five min)");
     }
 
     #[test]
