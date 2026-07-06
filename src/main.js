@@ -2059,19 +2059,33 @@ listen('tts-timing', (event) => {
   timingCursor += n;
 });
 
+// Loose equality for anchoring: the timing spans carry piper's NORMALIZED text
+// (numbers spelled out, dashes rewritten, "Dr." expanded), while readingWords
+// holds the raw article. Case and leading/trailing punctuation must not block
+// a re-anchor, or number-heavy text never resynchronizes after a divergence.
+function anchorKey(w) {
+  return w.toLowerCase().replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, '');
+}
+
 // Find where a segment's words line up in readingWords, searching outward from
 // the expected cursor. Returns the matched start index (or the cursor unchanged
 // if no confident match), so per-segment word-count mismatches self-correct
-// each segment instead of accumulating.
+// each segment instead of accumulating. R must comfortably exceed the raw-vs-
+// normalized word-count divergence a single segment can produce (a date-heavy
+// sentence expands ~1 raw token into 5+ spoken words); the old 12 let drift
+// outrun the search on number-dense articles, leaving the highlight stuck.
 function anchorTiming(words, cursor) {
-  const R = 12;
+  const R = 40;
+  const k0 = anchorKey(words[0]);
+  if (!k0) return cursor; // punctuation-only token can't anchor
   for (let d = 0; d <= R; d++) {
     for (const cand of (d === 0 ? [cursor] : [cursor + d, cursor - d])) {
       if (cand < genBaseWord || cand >= readingWords.length || !readingWords[cand]) continue;
       // Match the first word; for a 1-word segment also require a non-ambiguous
       // hit by checking the next word, to avoid latching onto a common word.
-      if (readingWords[cand].text === words[0] &&
-          (words.length < 2 || !readingWords[cand + 1] || readingWords[cand + 1].text === words[1])) {
+      if (anchorKey(readingWords[cand].text) === k0 &&
+          (words.length < 2 || !readingWords[cand + 1] ||
+           anchorKey(readingWords[cand + 1].text) === anchorKey(words[1]))) {
         return cand;
       }
     }
@@ -3112,12 +3126,26 @@ async function importSharedText(text) {
   }
 }
 
+// A live TTS session from a previously open item must die before a reading
+// view rebinds the transport state (genId++, wordTimes reset). Left alive, its
+// events carry the old gen — filtered, so the bar and highlight go dead while
+// its audio keeps playing — and the next play layers a second generation over
+// it. Reachable via share-import landing mid-listen (and any future path that
+// leaves reading without the back button). Awaited so the backend stop lands
+// before any new speak can race it.
+async function stopLiveSession() {
+  if (!ttsStarted) return;
+  ttsStarted = false;
+  try { await invoke('tts_stop'); } catch (_) { /* nothing playing */ }
+}
+
 async function openReading(id, { autoplay = false } = {}) {
   bookState = null; // opening a plain article, not continuing a book chapter
   let item;
   try { item = await invoke('library_get', { id }); }
   catch (err) { showToast('Open failed: ' + err); return; }
   if (!item) { showToast('Text not found'); return; }
+  await stopLiveSession();
   invoke('library_mark_seen', { id }).catch(() => {});
   readingItem = item;
   readingText = item.body;
@@ -3219,6 +3247,7 @@ async function openBookChapter(item, idx, { autoplay = false } = {}) {
   let body;
   try { body = await invoke('book_chapter', { id: item.id, idx }); }
   catch (err) { showToast('Could not open chapter: ' + err); return; }
+  await stopLiveSession();
 
   const forward = idx > item.current_chapter;
   const changedChapter = idx !== item.current_chapter;
@@ -3268,6 +3297,10 @@ async function openBookChapter(item, idx, { autoplay = false } = {}) {
 document.getElementById('reading-back').addEventListener('click', () => {
   saveProgress(true);
   invoke('tts_stop');
+  // The session is dead now; without this, ttsStarted stays stale-true and
+  // anything keying off it later (mini-player keep-alive, live-session
+  // detection on the next open) reasons from a session that no longer exists.
+  resetTtsUI();
   hidePlayerBar();
   if (bookState) {
     openBook(bookState.id);
