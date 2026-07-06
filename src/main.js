@@ -73,6 +73,7 @@ const BOTTOM_NAV = {
 // Pages reachable only through the More sheet, per mode.
 const MORE_ITEMS = {
   listen: [
+    { tab: 'general', label: 'Settings', icon: 'settings' },
     { tab: 'reports', label: 'Reports', icon: 'flag' },
     { tab: 'debug', label: 'Debug', icon: 'bug_report' },
   ],
