@@ -21,8 +21,8 @@ body {
 /* Custom scrollbar */
 ::-webkit-scrollbar { width: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: #484847; border-radius: 3px; }
-::-webkit-scrollbar-thumb:hover { background: #767575; }
+::-webkit-scrollbar-thumb { background: rgb(var(--c-outline-variant)); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: rgb(var(--c-outline)); }
 
 /* Remove default input styling */
 input[type="number"]::-webkit-inner-spin-button,
@@ -44,13 +44,13 @@ select {
 .progress-bar {
   height: 6px;
   border-radius: 3px;
-  background: #262626;
+  background: rgb(var(--c-surface-container-highest));
   overflow: hidden;
 }
 .progress-bar-fill {
   height: 100%;
   border-radius: 3px;
-  background: #9ba8ff;
+  background: rgb(var(--c-primary));
   transition: width 0.3s ease;
 }
 
@@ -71,8 +71,8 @@ select {
 
 /* Reading view word highlighting */
 #reading-text .rw-active {
-  background: rgba(155, 168, 255, 0.28);
-  color: #ffffff;
+  background: rgb(var(--c-primary) / 0.28);
+  color: rgb(var(--c-on-surface));
   border-radius: 4px;
 }
 
@@ -87,6 +87,6 @@ select {
 }
 @media (hover: hover) {
   #reading-text .rw:hover {
-    background: rgba(155, 168, 255, 0.15);
+    background: rgb(var(--c-primary) / 0.15);
   }
 }

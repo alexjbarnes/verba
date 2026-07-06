@@ -7,45 +7,127 @@
   <script src="https://cdn.tailwindcss.com"></script>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
   <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --c-primary-dim: 72 99 255;
+      --c-primary: 155 168 255;
+      --c-on-primary: 0 28 141;
+      --c-primary-container: 137 153 255;
+      --c-on-primary-container: 0 20 111;
+      --c-secondary: 152 145 254;
+      --c-secondary-dim: 152 145 254;
+      --c-secondary-container: 63 54 159;
+      --c-on-secondary: 23 0 116;
+      --c-on-secondary-container: 207 203 255;
+      --c-tertiary: 255 159 227;
+      --c-tertiary-container: 246 141 218;
+      --c-error: 255 110 132;
+      --c-error-container: 167 1 56;
+      --c-on-error: 73 0 19;
+      --c-on-error-container: 255 178 185;
+      --c-surface: 14 14 14;
+      --c-surface-dim: 14 14 14;
+      --c-surface-bright: 44 44 44;
+      --c-surface-container-lowest: 0 0 0;
+      --c-surface-container-low: 19 19 19;
+      --c-surface-container: 26 26 26;
+      --c-surface-container-high: 32 32 31;
+      --c-surface-container-highest: 38 38 38;
+      --c-surface-variant: 38 38 38;
+      --c-on-surface: 255 255 255;
+      --c-on-surface-variant: 173 170 170;
+      --c-outline: 118 117 117;
+      --c-outline-variant: 72 72 71;
+      --c-inverse-surface: 252 249 248;
+      --c-inverse-on-surface: 86 85 85;
+      --c-inverse-primary: 40 73 238;
+      --c-surface-tint: 155 168 255;
+      --inset-shadow: rgba(0,0,0,0.45);
+    }
+    [data-theme="light"] {
+      --c-primary-dim: 40 73 238;
+      --c-primary: 54 82 225;
+      --c-on-primary: 255 255 255;
+      --c-primary-container: 222 224 255;
+      --c-on-primary-container: 0 20 111;
+      --c-secondary: 90 82 199;
+      --c-secondary-dim: 90 82 199;
+      --c-secondary-container: 227 223 255;
+      --c-on-secondary: 255 255 255;
+      --c-on-secondary-container: 23 0 116;
+      --c-tertiary: 168 61 138;
+      --c-tertiary-container: 255 215 240;
+      --c-error: 186 26 58;
+      --c-error-container: 255 218 221;
+      --c-on-error: 255 255 255;
+      --c-on-error-container: 64 0 18;
+      --c-surface: 250 248 255;
+      --c-surface-dim: 218 217 224;
+      --c-surface-bright: 250 248 255;
+      --c-surface-container-lowest: 255 255 255;
+      --c-surface-container-low: 244 242 250;
+      --c-surface-container: 238 236 244;
+      --c-surface-container-high: 232 230 239;
+      --c-surface-container-highest: 226 224 233;
+      --c-surface-variant: 226 224 233;
+      --c-on-surface: 26 27 33;
+      --c-on-surface-variant: 70 70 79;
+      --c-outline: 118 118 128;
+      --c-outline-variant: 199 197 208;
+      --c-inverse-surface: 47 48 54;
+      --c-inverse-on-surface: 241 240 247;
+      --c-inverse-primary: 155 168 255;
+      --c-surface-tint: 54 82 225;
+      --inset-shadow: rgba(0,0,0,0.15);
+    }
+  </style>
+  <script>
+    (function(){
+      var t = 'dark';
+      try { t = localStorage.getItem('verba-theme') || 'dark'; } catch(e) {}
+      var r = t === 'system' ? (matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark') : t;
+      if (r === 'light') document.documentElement.dataset.theme = 'light';
+    })();
+  </script>
   <script>
     tailwind.config = {
       darkMode: "class",
       theme: {
         extend: {
           colors: {
-            "primary-dim": "#4863ff",
-            "primary": "#9ba8ff",
-            "on-primary": "#001c8d",
-            "primary-container": "#8999ff",
-            "on-primary-container": "#00146f",
-            "secondary": "#9891fe",
-            "secondary-dim": "#9891fe",
-            "secondary-container": "#3f369f",
-            "on-secondary": "#170074",
-            "on-secondary-container": "#cfcbff",
-            "tertiary": "#ff9fe3",
-            "tertiary-container": "#f68dda",
-            "error": "#ff6e84",
-            "error-container": "#a70138",
-            "on-error": "#490013",
-            "on-error-container": "#ffb2b9",
-            "surface": "#0e0e0e",
-            "surface-dim": "#0e0e0e",
-            "surface-bright": "#2c2c2c",
-            "surface-container-lowest": "#000000",
-            "surface-container-low": "#131313",
-            "surface-container": "#1a1a1a",
-            "surface-container-high": "#20201f",
-            "surface-container-highest": "#262626",
-            "surface-variant": "#262626",
-            "on-surface": "#ffffff",
-            "on-surface-variant": "#adaaaa",
-            "outline": "#767575",
-            "outline-variant": "#484847",
-            "inverse-surface": "#fcf9f8",
-            "inverse-on-surface": "#565555",
-            "inverse-primary": "#2849ee",
-            "surface-tint": "#9ba8ff",
+            "primary-dim": "rgb(var(--c-primary-dim) / <alpha-value>)",
+            "primary": "rgb(var(--c-primary) / <alpha-value>)",
+            "on-primary": "rgb(var(--c-on-primary) / <alpha-value>)",
+            "primary-container": "rgb(var(--c-primary-container) / <alpha-value>)",
+            "on-primary-container": "rgb(var(--c-on-primary-container) / <alpha-value>)",
+            "secondary": "rgb(var(--c-secondary) / <alpha-value>)",
+            "secondary-dim": "rgb(var(--c-secondary-dim) / <alpha-value>)",
+            "secondary-container": "rgb(var(--c-secondary-container) / <alpha-value>)",
+            "on-secondary": "rgb(var(--c-on-secondary) / <alpha-value>)",
+            "on-secondary-container": "rgb(var(--c-on-secondary-container) / <alpha-value>)",
+            "tertiary": "rgb(var(--c-tertiary) / <alpha-value>)",
+            "tertiary-container": "rgb(var(--c-tertiary-container) / <alpha-value>)",
+            "error": "rgb(var(--c-error) / <alpha-value>)",
+            "error-container": "rgb(var(--c-error-container) / <alpha-value>)",
+            "on-error": "rgb(var(--c-on-error) / <alpha-value>)",
+            "on-error-container": "rgb(var(--c-on-error-container) / <alpha-value>)",
+            "surface": "rgb(var(--c-surface) / <alpha-value>)",
+            "surface-dim": "rgb(var(--c-surface-dim) / <alpha-value>)",
+            "surface-bright": "rgb(var(--c-surface-bright) / <alpha-value>)",
+            "surface-container-lowest": "rgb(var(--c-surface-container-lowest) / <alpha-value>)",
+            "surface-container-low": "rgb(var(--c-surface-container-low) / <alpha-value>)",
+            "surface-container": "rgb(var(--c-surface-container) / <alpha-value>)",
+            "surface-container-high": "rgb(var(--c-surface-container-high) / <alpha-value>)",
+            "surface-container-highest": "rgb(var(--c-surface-container-highest) / <alpha-value>)",
+            "surface-variant": "rgb(var(--c-surface-variant) / <alpha-value>)",
+            "on-surface": "rgb(var(--c-on-surface) / <alpha-value>)",
+            "on-surface-variant": "rgb(var(--c-on-surface-variant) / <alpha-value>)",
+            "outline": "rgb(var(--c-outline) / <alpha-value>)",
+            "outline-variant": "rgb(var(--c-outline-variant) / <alpha-value>)",
+            "inverse-surface": "rgb(var(--c-inverse-surface) / <alpha-value>)",
+            "inverse-on-surface": "rgb(var(--c-inverse-on-surface) / <alpha-value>)",
+            "inverse-primary": "rgb(var(--c-inverse-primary) / <alpha-value>)",
+            "surface-tint": "rgb(var(--c-surface-tint) / <alpha-value>)",
           },
           fontFamily: {
             "sans": ["Inter", "system-ui", "sans-serif"],
@@ -69,8 +151,8 @@
 
   <!-- Top bar: Speak / Listen selector -->
   <header class="flex items-center justify-center px-4 py-2.5 shrink-0 bg-surface-container-low border-b border-outline-variant/30" data-tauri-drag-region>
-    <div id="mode-switch" class="relative flex w-full max-w-xs p-1 rounded-full bg-surface-container shadow-[inset_0_1px_2px_rgba(0,0,0,0.45)]">
-      <span id="mode-thumb" class="absolute top-1 bottom-1 left-1 w-[calc(50%-0.25rem)] rounded-full bg-surface-bright shadow-md ring-1 ring-white/10 transition-transform duration-300 ease-[cubic-bezier(0.4,0,0.2,1)]"></span>
+    <div id="mode-switch" class="relative flex w-full max-w-xs p-1 rounded-full bg-surface-container shadow-[inset_0_1px_2px_var(--inset-shadow)]">
+      <span id="mode-thumb" class="absolute top-1 bottom-1 left-1 w-[calc(50%-0.25rem)] rounded-full bg-surface-bright shadow-md ring-1 ring-outline-variant/20 transition-transform duration-300 ease-[cubic-bezier(0.4,0,0.2,1)]"></span>
       <button class="mode-btn relative z-10 flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded-full text-sm font-semibold transition-colors text-primary" data-mode="speak">
         <span class="material-symbols-outlined text-[18px]" style="font-variation-settings:'FILL' 1">mic</span>
         Speak
@@ -111,7 +193,7 @@
         <h3 class="text-base font-bold tracking-tight text-on-surface">Whisper</h3>
         <span class="text-xs text-on-surface-variant">OpenAI</span>
       </div>
-      <div id="whisper-models" class="bg-surface-container-low rounded-xl overflow-hidden divide-y divide-white/5"></div>
+      <div id="whisper-models" class="bg-surface-container-low rounded-xl overflow-hidden divide-y divide-outline-variant/20"></div>
     </section>
 
     <!-- Parakeet section -->
@@ -121,7 +203,7 @@
         <h3 class="text-base font-bold tracking-tight text-on-surface">Parakeet</h3>
         <span class="text-xs text-on-surface-variant">NVIDIA NeMo</span>
       </div>
-      <div id="parakeet-models" class="bg-surface-container-low rounded-xl overflow-hidden divide-y divide-white/5"></div>
+      <div id="parakeet-models" class="bg-surface-container-low rounded-xl overflow-hidden divide-y divide-outline-variant/20"></div>
     </section>
 
     <!-- Zipformer section -->
@@ -131,7 +213,7 @@
         <h3 class="text-base font-bold tracking-tight text-on-surface">Zipformer</h3>
         <span class="text-xs text-on-surface-variant">k2/icefall</span>
       </div>
-      <div id="zipformer-models" class="bg-surface-container-low rounded-xl overflow-hidden divide-y divide-white/5"></div>
+      <div id="zipformer-models" class="bg-surface-container-low rounded-xl overflow-hidden divide-y divide-outline-variant/20"></div>
     </section>
 
     <!-- Conformer-CTC section -->
@@ -141,7 +223,7 @@
         <h3 class="text-base font-bold tracking-tight text-on-surface">Conformer-CTC</h3>
         <span class="text-xs text-on-surface-variant">NVIDIA NeMo</span>
       </div>
-      <div id="conformer-models" class="bg-surface-container-low rounded-xl overflow-hidden divide-y divide-white/5"></div>
+      <div id="conformer-models" class="bg-surface-container-low rounded-xl overflow-hidden divide-y divide-outline-variant/20"></div>
     </section>
   </div>
 
@@ -211,6 +293,26 @@
       </div>
     </section>
 
+    <!-- Appearance section -->
+    <section>
+      <div class="mb-4">
+        <h2 class="text-lg font-bold tracking-tight text-on-surface">Appearance</h2>
+      </div>
+      <div class="bg-surface-container-low rounded-xl p-5">
+        <div class="flex items-center justify-between">
+          <div>
+            <label class="text-sm font-medium text-on-surface">Theme</label>
+            <p class="text-xs text-on-surface-variant mt-0.5">Choose the app's color scheme</p>
+          </div>
+          <select id="theme-select" class="bg-surface-container-highest border border-outline-variant/30 rounded-lg pl-3 pr-8 py-1.5 text-sm text-on-surface focus:outline-none focus:ring-1 focus:ring-primary/50 transition-colors cursor-pointer">
+            <option value="dark">Dark</option>
+            <option value="light">Light</option>
+            <option value="system">System</option>
+          </select>
+        </div>
+      </div>
+    </section>
+
     <!-- Reading section -->
     <section>
       <div class="mb-4">
@@ -235,7 +337,7 @@
     </div>
 
     <!-- Snippet list -->
-    <div class="bg-surface-container-low rounded-xl overflow-hidden divide-y divide-white/5">
+    <div class="bg-surface-container-low rounded-xl overflow-hidden divide-y divide-outline-variant/20">
       <div id="snippet-list"></div>
       <div id="snippet-empty" class="px-5 py-8 text-center text-xs text-on-surface-variant hidden">
         No snippets yet. Add one below.
@@ -296,8 +398,8 @@
           <span class="material-symbols-outlined text-xl">queue_music</span>
           <span id="queue-badge" class="hidden absolute top-0 right-0 min-w-[16px] h-[16px] px-[3px] flex items-center justify-center rounded-full bg-primary text-on-primary text-[9px] font-bold leading-none">0</span>
         </button>
-        <div id="lib-switch" class="relative flex w-44 shrink-0 p-1 rounded-full bg-surface-container shadow-[inset_0_1px_2px_rgba(0,0,0,0.45)]">
-          <span id="lib-thumb" class="absolute top-1 bottom-1 left-1 w-[calc(50%-0.25rem)] rounded-full bg-surface-bright shadow-md ring-1 ring-white/10 transition-transform duration-300 ease-[cubic-bezier(0.4,0,0.2,1)]"></span>
+        <div id="lib-switch" class="relative flex w-44 shrink-0 p-1 rounded-full bg-surface-container shadow-[inset_0_1px_2px_var(--inset-shadow)]">
+          <span id="lib-thumb" class="absolute top-1 bottom-1 left-1 w-[calc(50%-0.25rem)] rounded-full bg-surface-bright shadow-md ring-1 ring-outline-variant/20 transition-transform duration-300 ease-[cubic-bezier(0.4,0,0.2,1)]"></span>
           <button class="lib-tab-btn relative z-10 flex-1 flex items-center justify-center py-1 rounded-full text-xs font-semibold transition-colors text-primary" data-lib="articles">Articles</button>
           <button class="lib-tab-btn relative z-10 flex-1 flex items-center justify-center py-1 rounded-full text-xs font-semibold transition-colors text-on-surface-variant" data-lib="books">Books</button>
         </div>
@@ -517,7 +619,7 @@
     <!-- Favourites: starred voices across every model -->
     <section id="voices-fav-section" class="hidden">
       <p class="text-xs font-semibold text-on-surface-variant uppercase tracking-wider mb-2">Favourites</p>
-      <div id="voices-fav-list" class="bg-surface-container-low rounded-xl overflow-hidden divide-y divide-white/5"></div>
+      <div id="voices-fav-list" class="bg-surface-container-low rounded-xl overflow-hidden divide-y divide-outline-variant/20"></div>
     </section>
 
     <!-- Catalogue: one group per voice model, with inline download -->
@@ -663,7 +765,7 @@
 
   <!-- TTS Player bar -->
   <div id="tts-player" class="fixed bottom-0 left-0 right-0 z-40 bg-surface-container-low border-t border-outline-variant/20 translate-y-full transition-transform duration-200" style="padding-bottom: env(safe-area-inset-bottom);">
-    <div id="tts-progress-track" class="relative h-1 mx-4 mt-3 rounded-full cursor-pointer" style="background: rgba(255,255,255,0.08)">
+    <div id="tts-progress-track" class="relative h-1 mx-4 mt-3 rounded-full cursor-pointer" style="background: rgb(var(--c-on-surface) / 0.08)">
       <div class="absolute inset-0 rounded-full overflow-hidden">
         <div id="tts-cache-segments" class="absolute inset-0 pointer-events-none"></div>
         <div id="tts-buffer-fill" class="absolute top-0 left-0 h-full rounded-full pointer-events-none bg-primary/20" style="width:0%"></div>

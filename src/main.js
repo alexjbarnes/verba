@@ -772,6 +772,46 @@ async function applyThreads() {
   }
 }
 
+// ── Theme ──
+
+function loadThemePref() {
+  try {
+    return localStorage.getItem('verba-theme') || 'dark';
+  } catch (_) {
+    return 'dark';
+  }
+}
+
+function saveThemePref(pref) {
+  try { localStorage.setItem('verba-theme', pref); } catch (_) { /* storage unavailable */ }
+}
+
+// Resolves 'system' against the OS setting. Mirrors the inline head script
+// that applies the theme before first paint, so this must stay idempotent.
+function applyThemePref(pref) {
+  const resolved = pref === 'system'
+    ? (matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark')
+    : pref;
+  if (resolved === 'light') document.documentElement.dataset.theme = 'light';
+  else delete document.documentElement.dataset.theme;
+}
+
+const themeSelect = document.getElementById('theme-select');
+themeSelect.addEventListener('change', () => {
+  saveThemePref(themeSelect.value);
+  applyThemePref(themeSelect.value);
+});
+// Only follow OS changes live when the user picked "System"; an explicit
+// dark/light choice should not be overridden by an OS-level flip.
+matchMedia('(prefers-color-scheme: light)').addEventListener('change', () => {
+  if (loadThemePref() === 'system') applyThemePref('system');
+});
+(function initTheme() {
+  const pref = loadThemePref();
+  themeSelect.value = pref;
+  applyThemePref(pref);
+})();
+
 // ── Reading text size ──
 
 function loadFontScale() {
@@ -1408,7 +1448,7 @@ async function loadVoices() {
   const section = (title, rows) => rows.length
     ? `<section>
         <p class="text-xs font-semibold text-on-surface-variant uppercase tracking-wider mb-2">${title}</p>
-        <div class="bg-surface-container-low rounded-xl overflow-hidden divide-y divide-white/5">${rows.map(voiceRowHtml).join('')}</div>
+        <div class="bg-surface-container-low rounded-xl overflow-hidden divide-y divide-outline-variant/20">${rows.map(voiceRowHtml).join('')}</div>
       </section>`
     : '';
   document.getElementById('voices-catalogue').innerHTML =
