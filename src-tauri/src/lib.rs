@@ -502,6 +502,57 @@ fn delete_model(id: String) -> Result<(), String> {
     models::ModelManager::global().delete(&id)
 }
 
+// ── Model packages (see MODEL_PACKAGES.md) ──
+
+#[tauri::command]
+fn packages_status() -> serde_json::Value {
+    models::ModelManager::global().packages_status()
+}
+
+/// Explicit Check-for-updates: force a manifest refetch, then report status.
+/// Fetch failures still return a status (from the current manifest) plus the
+/// error string so the UI can show "check failed" without losing state.
+#[tauri::command]
+async fn packages_check_updates() -> serde_json::Value {
+    let mgr = models::ModelManager::global();
+    let err = mgr.refresh_manifest(true).await.err();
+    let mut st = mgr.packages_status();
+    if let Some(e) = err {
+        st["check_error"] = serde_json::Value::String(e);
+    }
+    st
+}
+
+#[tauri::command]
+async fn package_install_dictation(app: tauri::AppHandle) -> Result<(), String> {
+    models::ModelManager::global().install_dictation(&app).await?;
+    // A fresh grammar download activates on the next pipeline run via
+    // init_global's retry-when-absent path; nudge it now so the very next
+    // dictation already has it loaded.
+    std::thread::Builder::new()
+        .name("grammar-reinit".into())
+        .spawn(|| postprocess::grammar_neural::init_global())
+        .ok();
+    Ok(())
+}
+
+#[tauri::command]
+fn storage_summary() -> serde_json::Value {
+    let mut s = models::ModelManager::global().storage_summary();
+    s["tts_cache"] = serde_json::json!(tts_cache::size_bytes());
+    s
+}
+
+#[tauri::command]
+fn storage_clear(category: String) -> Result<u64, String> {
+    if category == "tts_cache" {
+        let before = tts_cache::size_bytes();
+        tts_cache::clear()?;
+        return Ok(before);
+    }
+    models::ModelManager::global().storage_clear(&category)
+}
+
 #[tauri::command]
 fn get_vocab_entries() -> Vec<postprocess::vocab::VocabEntry> {
     postprocess::vocab::get_entries()
@@ -1118,6 +1169,13 @@ pub fn run() {
                 .name("grammar-init".into())
                 .spawn(|| postprocess::grammar_neural::init_global())
                 .ok();
+            // Background manifest refresh (24h-throttled inside): new voices
+            // and package versions appear without an explicit check.
+            tauri::async_runtime::spawn(async {
+                if let Err(e) = models::ModelManager::global().refresh_manifest(false).await {
+                    log::info!("manifest refresh skipped: {e}");
+                }
+            });
 
             debug_log::set_app_handle(app.handle().clone());
             share::set_app_handle(app.handle().clone());
@@ -1377,6 +1435,11 @@ pub fn run() {
             download_model,
             delete_model,
             switch_model,
+            packages_status,
+            packages_check_updates,
+            package_install_dictation,
+            storage_summary,
+            storage_clear,
             list_history,
             clear_history,
             export_history,

@@ -1,0 +1,165 @@
+{
+  "schema": 1,
+  "dictation": {
+    "version": 1,
+    "components": {
+      "asr-mobile": {
+        "version": 1,
+        "model": {
+          "id": "parakeet-tdt-0.6b-v3-int8",
+          "name": "Parakeet TDT 0.6B V3 INT8",
+          "desc": "Multilingual — quantized for mobile",
+          "engine": "parakeet",
+          "size": "~670 MB",
+          "files": [
+            { "url": "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8/resolve/main/encoder.int8.onnx", "rel_path": "parakeet/v3-int8/encoder.int8.onnx", "bytes": 652000000, "role": "encoder" },
+            { "url": "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8/resolve/main/decoder.int8.onnx", "rel_path": "parakeet/v3-int8/decoder.int8.onnx", "bytes": 12000000, "role": "decoder" },
+            { "url": "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8/resolve/main/joiner.int8.onnx", "rel_path": "parakeet/v3-int8/joiner.int8.onnx", "bytes": 6400000, "role": "joiner" },
+            { "url": "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8/resolve/main/tokens.txt", "rel_path": "parakeet/v3-int8/tokens.txt", "bytes": 94000, "role": "tokens" }
+          ]
+        }
+      },
+      "asr-desktop": {
+        "version": 1,
+        "model": {
+          "id": "parakeet-tdt-0.6b-v3",
+          "name": "Parakeet TDT 0.6B V3",
+          "desc": "Multilingual — full precision",
+          "engine": "parakeet",
+          "size": "~2.5 GB",
+          "files": [
+            { "url": "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3/resolve/main/encoder.onnx", "rel_path": "parakeet/v3/encoder.onnx", "bytes": 42000000, "role": "encoder" },
+            { "url": "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3/resolve/main/encoder.weights", "rel_path": "parakeet/v3/encoder.weights", "bytes": 2435000000, "role": "encoder_weights" },
+            { "url": "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3/resolve/main/decoder.onnx", "rel_path": "parakeet/v3/decoder.onnx", "bytes": 47000000, "role": "decoder" },
+            { "url": "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3/resolve/main/joiner.onnx", "rel_path": "parakeet/v3/joiner.onnx", "bytes": 25000000, "role": "joiner" },
+            { "url": "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3/resolve/main/tokens.txt", "rel_path": "parakeet/v3/tokens.txt", "bytes": 94000, "role": "tokens" }
+          ]
+        }
+      },
+      "vad": {
+        "version": 1,
+        "verify_bytes": true,
+        "files": [
+          { "url": "https://pub-c88baaac61224fbba973b547f1d947ca.r2.dev/models/vad/1/silero_vad.onnx", "rel_path": "vad/silero_vad.onnx", "bytes": 643854, "role": "vad" }
+        ]
+      },
+      "grammar": {
+        "version": 1,
+        "verify_bytes": true,
+        "files": [
+          { "url": "https://pub-c88baaac61224fbba973b547f1d947ca.r2.dev/models/grammar/1/cola_model_quantized.onnx", "rel_path": "grammar/cola_model.onnx", "bytes": 14051413, "role": "router_model" },
+          { "url": "https://pub-c88baaac61224fbba973b547f1d947ca.r2.dev/models/grammar/1/cola_tokenizer.json", "rel_path": "grammar/cola_tokenizer.json", "bytes": 711648, "role": "router_tokenizer" },
+          { "url": "https://pub-c88baaac61224fbba973b547f1d947ca.r2.dev/models/grammar/1/encoder_model_quantized.onnx", "rel_path": "grammar/encoder_model.onnx", "bytes": 11503627, "role": "encoder" },
+          { "url": "https://pub-c88baaac61224fbba973b547f1d947ca.r2.dev/models/grammar/1/decoder_with_past_quantized.onnx", "rel_path": "grammar/decoder_with_past.onnx", "bytes": 20340669, "role": "decoder" },
+          { "url": "https://pub-c88baaac61224fbba973b547f1d947ca.r2.dev/models/grammar/1/cross_attn_kv_weights.bin", "rel_path": "grammar/cross_attn_kv_weights.bin", "bytes": 2097152, "role": "kv_weights" },
+          { "url": "https://pub-c88baaac61224fbba973b547f1d947ca.r2.dev/models/grammar/1/t5_tokenizer.json", "rel_path": "grammar/t5_tokenizer.json", "bytes": 2422331, "role": "t5_tokenizer" },
+          { "url": "https://pub-c88baaac61224fbba973b547f1d947ca.r2.dev/models/grammar/1/config.json", "rel_path": "grammar/config.json", "bytes": 259, "role": "config" }
+        ]
+      }
+    }
+  },
+  "voices": {
+    "version": 1,
+    "list": [
+      {
+        "id": "tts-piper-alba",
+        "name": "Alba (UK)",
+        "desc": "British English voice — female, Scottish accent, ~63 MB",
+        "engine": "tts_piper_ort",
+        "size": "~63 MB",
+        "files": [
+          { "url": "https://pub-c88baaac61224fbba973b547f1d947ca.r2.dev/models/TTS/en_GB-alba-medium-dur.onnx", "rel_path": "tts/piper-alba/model_dur.onnx", "bytes": 63201318, "role": "model" },
+          { "url": "https://pub-c88baaac61224fbba973b547f1d947ca.r2.dev/models/TTS/en_GB-alba-medium.onnx.json", "rel_path": "tts/piper-alba/model.onnx.json", "bytes": 4888, "role": "config" }
+        ]
+      },
+      {
+        "id": "tts-piper-alan",
+        "name": "Alan (UK)",
+        "desc": "British English voice — male, ~63 MB",
+        "engine": "tts_piper_ort",
+        "size": "~63 MB",
+        "files": [
+          { "url": "https://pub-c88baaac61224fbba973b547f1d947ca.r2.dev/models/TTS/en_GB-alan-medium-dur.onnx", "rel_path": "tts/piper-alan/model_dur.onnx", "bytes": 63201318, "role": "model" },
+          { "url": "https://pub-c88baaac61224fbba973b547f1d947ca.r2.dev/models/TTS/en_GB-alan-medium.onnx.json", "rel_path": "tts/piper-alan/model.onnx.json", "bytes": 4888, "role": "config" }
+        ]
+      },
+      {
+        "id": "tts-piper-aru",
+        "name": "Aru (UK)",
+        "desc": "British English — 12 voices, ~77 MB",
+        "engine": "tts_piper_ort",
+        "size": "~77 MB",
+        "files": [
+          { "url": "https://pub-c88baaac61224fbba973b547f1d947ca.r2.dev/models/TTS/en_GB-aru-medium-dur.onnx", "rel_path": "tts/piper-aru/model_dur.onnx", "bytes": 76754121, "role": "model" },
+          { "url": "https://pub-c88baaac61224fbba973b547f1d947ca.r2.dev/models/TTS/en_GB-aru-medium.onnx.json", "rel_path": "tts/piper-aru/model.onnx.json", "bytes": 5048, "role": "config" }
+        ]
+      },
+      {
+        "id": "tts-piper-cori",
+        "name": "Cori (UK)",
+        "desc": "British English voice — female, ~64 MB",
+        "engine": "tts_piper_ort",
+        "size": "~64 MB",
+        "files": [
+          { "url": "https://pub-c88baaac61224fbba973b547f1d947ca.r2.dev/models/TTS/en_GB-cori-medium-dur.onnx", "rel_path": "tts/piper-cori/model_dur.onnx", "bytes": 63531403, "role": "model" },
+          { "url": "https://pub-c88baaac61224fbba973b547f1d947ca.r2.dev/models/TTS/en_GB-cori-medium.onnx.json", "rel_path": "tts/piper-cori/model.onnx.json", "bytes": 4966, "role": "config" }
+        ]
+      },
+      {
+        "id": "tts-piper-cori-high",
+        "name": "Cori HQ (UK)",
+        "desc": "British English voice — female, highest quality, ~114 MB",
+        "engine": "tts_piper_ort",
+        "size": "~114 MB",
+        "files": [
+          { "url": "https://pub-c88baaac61224fbba973b547f1d947ca.r2.dev/models/TTS/en_GB-cori-high-dur.onnx", "rel_path": "tts/piper-cori-high/model_dur.onnx", "bytes": 114219376, "role": "model" },
+          { "url": "https://pub-c88baaac61224fbba973b547f1d947ca.r2.dev/models/TTS/en_GB-cori-high.onnx.json", "rel_path": "tts/piper-cori-high/model.onnx.json", "bytes": 4963, "role": "config" }
+        ]
+      },
+      {
+        "id": "tts-piper-jenny",
+        "name": "Jenny (UK)",
+        "desc": "British English voice — female, ~63 MB",
+        "engine": "tts_piper_ort",
+        "size": "~63 MB",
+        "files": [
+          { "url": "https://pub-c88baaac61224fbba973b547f1d947ca.r2.dev/models/TTS/en_GB-jenny_dioco-medium-dur.onnx", "rel_path": "tts/piper-jenny/model_dur.onnx", "bytes": 63201318, "role": "model" },
+          { "url": "https://pub-c88baaac61224fbba973b547f1d947ca.r2.dev/models/TTS/en_GB-jenny_dioco-medium.onnx.json", "rel_path": "tts/piper-jenny/model.onnx.json", "bytes": 4895, "role": "config" }
+        ]
+      },
+      {
+        "id": "tts-piper-northern-male",
+        "name": "Northern English Male (UK)",
+        "desc": "British English voice — male, northern accent, ~63 MB",
+        "engine": "tts_piper_ort",
+        "size": "~63 MB",
+        "files": [
+          { "url": "https://pub-c88baaac61224fbba973b547f1d947ca.r2.dev/models/TTS/en_GB-northern_english_male-medium-dur.onnx", "rel_path": "tts/piper-northern-male/model_dur.onnx", "bytes": 63201318, "role": "model" },
+          { "url": "https://pub-c88baaac61224fbba973b547f1d947ca.r2.dev/models/TTS/en_GB-northern_english_male-medium.onnx.json", "rel_path": "tts/piper-northern-male/model.onnx.json", "bytes": 4847, "role": "config" }
+        ]
+      },
+      {
+        "id": "tts-piper-semaine",
+        "name": "Semaine (UK)",
+        "desc": "British English — 4 expressive voices, ~77 MB",
+        "engine": "tts_piper_ort",
+        "size": "~77 MB",
+        "files": [
+          { "url": "https://pub-c88baaac61224fbba973b547f1d947ca.r2.dev/models/TTS/en_GB-semaine-medium-dur.onnx", "rel_path": "tts/piper-semaine/model_dur.onnx", "bytes": 76737735, "role": "model" },
+          { "url": "https://pub-c88baaac61224fbba973b547f1d947ca.r2.dev/models/TTS/en_GB-semaine-medium.onnx.json", "rel_path": "tts/piper-semaine/model.onnx.json", "bytes": 5076, "role": "config" }
+        ]
+      },
+      {
+        "id": "tts-piper-southern-female",
+        "name": "Southern English Female (UK)",
+        "desc": "British English voice — female, southern accent, ~63 MB",
+        "engine": "tts_piper_ort",
+        "size": "~63 MB",
+        "files": [
+          { "url": "https://pub-c88baaac61224fbba973b547f1d947ca.r2.dev/models/TTS/en_GB-southern_english_female-low-dur.onnx", "rel_path": "tts/piper-southern-female/model_dur.onnx", "bytes": 63104550, "role": "model" },
+          { "url": "https://pub-c88baaac61224fbba973b547f1d947ca.r2.dev/models/TTS/en_GB-southern_english_female-low.onnx.json", "rel_path": "tts/piper-southern-female/model.onnx.json", "bytes": 4189, "role": "config" }
+        ]
+      }
+    ]
+  }
+}

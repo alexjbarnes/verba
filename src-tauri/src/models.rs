@@ -6,13 +6,13 @@ use std::time::Instant;
 static MODEL_MANAGER: OnceLock<ModelManager> = OnceLock::new();
 
 use futures_util::StreamExt;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::Emitter;
 use tokio::io::AsyncWriteExt;
 
 // ── Types ──
 
-#[derive(Clone)]
+#[derive(Clone, Deserialize)]
 pub struct ModelFile {
     pub url: String,
     pub rel_path: String,
@@ -20,7 +20,7 @@ pub struct ModelFile {
     pub role: String,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Deserialize)]
 pub struct ModelDef {
     pub id: String,
     pub name: String,
@@ -28,6 +28,117 @@ pub struct ModelDef {
     pub engine: String,
     pub size: String,
     pub files: Vec<ModelFile>,
+}
+
+// ── Manifest (packages + voices catalogue) ──
+//
+// The registry is no longer a Rust literal: it is derived from a manifest —
+// the freshest of (remote fetch, disk cache, embedded snapshot). The three
+// share one JSON shape (see MODEL_PACKAGES.md), so adding a voice or bumping
+// a dictation component is a server-side manifest edit, not an app release.
+
+pub const MANIFEST_URL: &str =
+    "https://pub-c88baaac61224fbba973b547f1d947ca.r2.dev/manifest/v1.json";
+/// Compiled-in fallback so a fresh offline install still has a full registry.
+const EMBEDDED_MANIFEST: &str = include_str!("../data/model-manifest.json");
+/// Background refresh cadence; an explicit "check for updates" bypasses it.
+const MANIFEST_MAX_AGE_SECS: u64 = 24 * 60 * 60;
+
+#[derive(Clone, Deserialize)]
+pub struct Manifest {
+    pub schema: u32,
+    pub dictation: DictationSpec,
+    pub voices: VoicesSpec,
+}
+
+#[derive(Clone, Deserialize)]
+pub struct DictationSpec {
+    /// Aggregate version the UI compares; bumps when any component bumps.
+    pub version: u32,
+    pub components: HashMap<String, ComponentSpec>,
+}
+
+#[derive(Clone, Deserialize)]
+pub struct ComponentSpec {
+    pub version: u32,
+    /// Present on ASR components: they double as registry entries so the
+    /// transcriber path (`model_engine`) keeps working unchanged.
+    #[serde(default)]
+    pub model: Option<ModelDef>,
+    /// Plain files for non-model components (vad, grammar).
+    #[serde(default)]
+    pub files: Vec<ModelFile>,
+    /// Verify byte counts after download. Off for ASR components whose
+    /// registry sizes are approximate.
+    #[serde(default)]
+    pub verify_bytes: bool,
+}
+
+impl ComponentSpec {
+    pub fn all_files(&self) -> Vec<ModelFile> {
+        match &self.model {
+            Some(m) => m.files.clone(),
+            None => self.files.clone(),
+        }
+    }
+}
+
+#[derive(Clone, Deserialize)]
+pub struct VoicesSpec {
+    pub version: u32,
+    pub list: Vec<ModelDef>,
+}
+
+fn parse_manifest(raw: &str) -> Result<Manifest, String> {
+    let m: Manifest = serde_json::from_str(raw).map_err(|e| format!("manifest parse: {e}"))?;
+    if m.schema != 1 {
+        return Err(format!("unsupported manifest schema {}", m.schema));
+    }
+    Ok(m)
+}
+
+/// The platform's dictation components, in install order.
+fn platform_components(m: &Manifest) -> Vec<(String, ComponentSpec)> {
+    let asr = if cfg!(target_os = "android") { "asr-mobile" } else { "asr-desktop" };
+    [asr, "vad", "grammar"]
+        .iter()
+        .filter_map(|k| m.dictation.components.get(*k).map(|c| (k.to_string(), c.clone())))
+        .collect()
+}
+
+/// Registry = voice list + the platform-relevant ASR model entries.
+/// Both ASR variants are included so a desktop install that previously
+/// downloaded the INT8 build keeps resolving it.
+fn registry_from_manifest(m: &Manifest) -> Vec<ModelDef> {
+    let mut reg: Vec<ModelDef> = m
+        .dictation
+        .components
+        .values()
+        .filter_map(|c| c.model.clone())
+        .collect();
+    reg.extend(m.voices.list.iter().cloned());
+    reg
+}
+
+/// Installed-package record (`models/packages.json`).
+#[derive(Clone, Default, Serialize, Deserialize)]
+pub struct InstalledPackages {
+    #[serde(default)]
+    pub dictation_version: u32,
+    #[serde(default)]
+    pub dictation_components: HashMap<String, u32>,
+}
+
+/// Absolute paths to the seven grammar model files, present only when every
+/// one exists on disk. `grammar_neural.rs` builds its sessions from these.
+pub struct GrammarFilePaths {
+    pub router_model: PathBuf,
+    pub router_tokenizer: PathBuf,
+    pub encoder: PathBuf,
+    pub decoder: PathBuf,
+    pub kv_weights: PathBuf,
+    pub t5_tokenizer: PathBuf,
+    pub config: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -46,7 +157,8 @@ pub struct ModelInfo {
 pub struct ModelManager {
     pub base_dir: PathBuf,
     alt_dirs: Vec<PathBuf>,
-    registry: Vec<ModelDef>,
+    manifest: Mutex<Manifest>,
+    registry: Mutex<Vec<ModelDef>>,
     progress: Mutex<HashMap<String, f64>>,
     active_model: Mutex<String>,
 }
@@ -93,12 +205,221 @@ impl ModelManager {
             let _ = std::fs::remove_dir_all(base_dir.join(stale));
         }
 
+        // Freshest usable manifest: the disk cache from a previous fetch,
+        // else the embedded snapshot. A malformed cache (interrupted write,
+        // future schema) silently falls back rather than bricking startup.
+        let embedded = parse_manifest(EMBEDDED_MANIFEST)
+            .map_err(|e| format!("embedded manifest: {e}"))?;
+        let manifest = std::fs::read_to_string(base_dir.join("manifest.json"))
+            .ok()
+            .and_then(|raw| parse_manifest(&raw).ok())
+            .unwrap_or(embedded);
+        let registry = registry_from_manifest(&manifest);
+
         Ok(Self {
             base_dir,
             alt_dirs,
-            registry: builtin_registry(),
+            manifest: Mutex::new(manifest),
+            registry: Mutex::new(registry),
             progress: Mutex::new(HashMap::new()),
             active_model: Mutex::new(active),
+        })
+    }
+
+    // ── Manifest refresh + package state ──
+
+    fn manifest_cache_path(&self) -> PathBuf {
+        self.base_dir.join("manifest.json")
+    }
+
+    fn packages_path(&self) -> PathBuf {
+        self.base_dir.join("packages.json")
+    }
+
+    pub fn installed_packages(&self) -> InstalledPackages {
+        std::fs::read_to_string(self.packages_path())
+            .ok()
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .unwrap_or_default()
+    }
+
+    fn save_installed_packages(&self, p: &InstalledPackages) -> Result<(), String> {
+        let raw = serde_json::to_string_pretty(p).map_err(|e| e.to_string())?;
+        let path = self.packages_path();
+        let tmp = path.with_extension("tmp");
+        std::fs::write(&tmp, raw).map_err(|e| format!("packages.json write: {e}"))?;
+        std::fs::rename(&tmp, &path).map_err(|e| format!("packages.json rename: {e}"))
+    }
+
+    fn manifest_age_secs(&self) -> Option<u64> {
+        std::fs::metadata(self.manifest_cache_path())
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .map(|d| d.as_secs())
+    }
+
+    /// Fetch the remote manifest and swap it in. `force` bypasses the 24 h
+    /// staleness window (the explicit Check-for-updates path). Returns true
+    /// when a fetch actually happened.
+    pub async fn refresh_manifest(&self, force: bool) -> Result<bool, String> {
+        if !force {
+            if let Some(age) = self.manifest_age_secs() {
+                if age < MANIFEST_MAX_AGE_SECS {
+                    return Ok(false);
+                }
+            }
+        }
+        let raw = reqwest::Client::new()
+            .get(MANIFEST_URL)
+            .send()
+            .await
+            .map_err(|e| format!("manifest fetch: {e}"))?
+            .error_for_status()
+            .map_err(|e| format!("manifest fetch: {e}"))?
+            .text()
+            .await
+            .map_err(|e| format!("manifest read: {e}"))?;
+        let m = parse_manifest(&raw)?;
+
+        let path = self.manifest_cache_path();
+        let tmp = path.with_extension("tmp");
+        std::fs::write(&tmp, &raw).map_err(|e| format!("manifest cache write: {e}"))?;
+        std::fs::rename(&tmp, &path).map_err(|e| format!("manifest cache rename: {e}"))?;
+
+        *self.registry.lock().unwrap() = registry_from_manifest(&m);
+        *self.manifest.lock().unwrap() = m;
+        log::info!("Model manifest refreshed from {MANIFEST_URL}");
+        Ok(true)
+    }
+
+    pub fn manifest(&self) -> Manifest {
+        self.manifest.lock().unwrap().clone()
+    }
+
+    /// Dictation package status for the UI: one aggregate version pair plus
+    /// a coarse state string. Component detail stays internal by design.
+    pub fn packages_status(&self) -> serde_json::Value {
+        let m = self.manifest();
+        let installed = self.installed_packages();
+        let components = platform_components(&m);
+        let files_complete = components
+            .iter()
+            .all(|(_, c)| c.all_files().iter().all(|f| self.find_file(&f.rel_path).is_some()));
+        let any_state = installed.dictation_version > 0
+            || components
+                .iter()
+                .any(|(_, c)| c.all_files().iter().any(|f| self.find_file(&f.rel_path).is_some()));
+        let downloading = self.progress.lock().unwrap().contains_key("pkg-dictation");
+        let versions_current = components
+            .iter()
+            .all(|(name, c)| installed.dictation_components.get(name) == Some(&c.version));
+        let state = if downloading {
+            "downloading"
+        } else if files_complete && versions_current {
+            "installed"
+        } else if any_state {
+            "update_available"
+        } else {
+            "not_installed"
+        };
+        // Bytes the install button would actually fetch (missing files only).
+        let pending_bytes: u64 = components
+            .iter()
+            .flat_map(|(_, c)| c.all_files())
+            .filter(|f| self.find_file(&f.rel_path).is_none())
+            .map(|f| f.bytes)
+            .sum();
+        serde_json::json!({
+            "dictation": {
+                "installed_version": installed.dictation_version,
+                "available_version": m.dictation.version,
+                "state": state,
+                "pending_bytes": pending_bytes,
+                "progress": self.progress.lock().unwrap().get("pkg-dictation").copied().unwrap_or(0.0),
+            },
+            "voices_version": m.voices.version,
+            "manifest_age_secs": self.manifest_age_secs(),
+        })
+    }
+
+    /// Install or update the dictation package: for each platform component,
+    /// re-download files when its version changed (stable rel_paths, so
+    /// delete-then-download replaces in place) or when files are missing.
+    /// Unchanged-and-present components cost nothing.
+    pub async fn install_dictation(&self, app: &tauri::AppHandle) -> Result<(), String> {
+        let m = self.manifest();
+        let installed = self.installed_packages();
+        let components = platform_components(&m);
+
+        let mut work: Vec<ModelFile> = Vec::new();
+        for (name, c) in &components {
+            let version_changed = installed.dictation_components.get(name) != Some(&c.version);
+            for f in c.all_files() {
+                let missing = self.find_file(&f.rel_path).is_none();
+                if version_changed || missing {
+                    if version_changed {
+                        let _ = std::fs::remove_file(self.base_dir.join(&f.rel_path));
+                    }
+                    work.push(f);
+                }
+            }
+        }
+
+        if !work.is_empty() {
+            self.download_files("pkg-dictation", &work, app).await?;
+        }
+
+        // Byte verification for the components that declare exact sizes.
+        for (_, c) in &components {
+            if !c.verify_bytes {
+                continue;
+            }
+            for f in c.all_files() {
+                let path = self.base_dir.join(&f.rel_path);
+                let actual = std::fs::metadata(&path).map(|md| md.len()).unwrap_or(0);
+                if f.bytes > 0 && actual != f.bytes {
+                    let _ = std::fs::remove_file(&path);
+                    return Err(format!(
+                        "download verification failed for {} ({} bytes, expected {})",
+                        f.rel_path, actual, f.bytes
+                    ));
+                }
+            }
+        }
+
+        let mut rec = InstalledPackages {
+            dictation_version: m.dictation.version,
+            dictation_components: HashMap::new(),
+        };
+        for (name, c) in &components {
+            rec.dictation_components.insert(name.clone(), c.version);
+        }
+        self.save_installed_packages(&rec)?;
+        log::info!("Dictation package installed at version {}", m.dictation.version);
+        Ok(())
+    }
+
+    /// Grammar model paths, only when every file is on disk. The grammar
+    /// stage treats None exactly like the old not-compiled-in state.
+    pub fn grammar_files(&self) -> Option<GrammarFilePaths> {
+        let by_role = |role: &str| -> Option<PathBuf> {
+            let m = self.manifest.lock().unwrap();
+            let c = m.dictation.components.get("grammar")?.clone();
+            drop(m);
+            c.files
+                .iter()
+                .find(|f| f.role == role)
+                .and_then(|f| self.find_file(&f.rel_path))
+        };
+        Some(GrammarFilePaths {
+            router_model: by_role("router_model")?,
+            router_tokenizer: by_role("router_tokenizer")?,
+            encoder: by_role("encoder")?,
+            decoder: by_role("decoder")?,
+            kv_weights: by_role("kv_weights")?,
+            t5_tokenizer: by_role("t5_tokenizer")?,
+            config: by_role("config")?,
         })
     }
 
@@ -149,9 +470,10 @@ impl ModelManager {
     }
 
     pub fn list(&self) -> Vec<ModelInfo> {
+        let registry = self.registry.lock().unwrap().clone();
         let progress = self.progress.lock().unwrap();
         let active = self.active_model.lock().unwrap();
-        self.registry
+        registry
             .iter()
             .map(|m| {
                 let (status, prog) = if *active == m.id && self.is_downloaded(&m.id) {
@@ -176,8 +498,8 @@ impl ModelManager {
             .collect()
     }
 
-    pub fn find(&self, id: &str) -> Option<&ModelDef> {
-        self.registry.iter().find(|m| m.id == id)
+    pub fn find(&self, id: &str) -> Option<ModelDef> {
+        self.registry.lock().unwrap().iter().find(|m| m.id == id).cloned()
     }
 
     /// Build a `ModelEngine` for a downloaded model.
@@ -269,17 +591,14 @@ impl ModelManager {
             }
         }
 
-        let preferred = [
-            "parakeet-tdt-0.6b-v3-int8",
-            "parakeet-tdt-0.6b-v2-int8",
-            "parakeet-tdt-0.6b-v3",
-            "parakeet-tdt-0.6b-v2",
-            "whisper-small.en-int8",
-            "whisper-base.en-int8",
-            "whisper-turbo-int8",
-            "whisper-medium.en-int8",
-            "whisper-large-v3-int8",
-        ];
+        // Platform-appropriate order: quantized first on Android (memory,
+        // speed), full precision first on desktop, the other as fallback so
+        // an install that downloaded the opposite variant keeps working.
+        let preferred: [&str; 2] = if cfg!(target_os = "android") {
+            ["parakeet-tdt-0.6b-v3-int8", "parakeet-tdt-0.6b-v3"]
+        } else {
+            ["parakeet-tdt-0.6b-v3", "parakeet-tdt-0.6b-v3-int8"]
+        };
         for id in preferred {
             if let Some(engine) = self.model_engine(id) {
                 return Some((id.to_string(), engine));
@@ -289,14 +608,12 @@ impl ModelManager {
     }
 
     /// Backwards-compatible wrapper for code that only needs Parakeet paths.
-    /// Checks int8 variants first (smaller, faster on mobile).
     pub fn first_downloaded_parakeet(&self) -> Option<(String, (String, String, String, String))> {
-        let preferred = [
-            "parakeet-tdt-0.6b-v3-int8",
-            "parakeet-tdt-0.6b-v2-int8",
-            "parakeet-tdt-0.6b-v3",
-            "parakeet-tdt-0.6b-v2",
-        ];
+        let preferred: [&str; 2] = if cfg!(target_os = "android") {
+            ["parakeet-tdt-0.6b-v3-int8", "parakeet-tdt-0.6b-v3"]
+        } else {
+            ["parakeet-tdt-0.6b-v3", "parakeet-tdt-0.6b-v3-int8"]
+        };
         for id in preferred {
             if let Some(crate::transcribe::ModelEngine::Transducer { encoder, decoder, joiner, tokens, .. }) =
                 self.model_engine(id)
@@ -307,28 +624,26 @@ impl ModelManager {
         None
     }
 
-    /// Path where the Silero VAD model should live.
+    /// Path where the Silero VAD model lives (vad component of the
+    /// dictation package).
     pub fn vad_model_path(&self) -> PathBuf {
-        self.base_dir.join("silero_vad.onnx")
+        self.base_dir.join("vad/silero_vad.onnx")
     }
 
-    /// Ensure the Silero VAD model exists on disk, writing it from the
-    /// embedded binary if needed. Returns the path to the ONNX file.
+    /// Resolve the Silero VAD model on disk. No longer embedded in the
+    /// binary: it downloads with the dictation package. Installs from before
+    /// the package system wrote it to the models root — honor that copy so
+    /// they keep dictating without re-downloading anything.
     pub fn ensure_vad_model(&self) -> Result<PathBuf, String> {
         let path = self.vad_model_path();
         if path.exists() {
             return Ok(path);
         }
-
-        log::info!("Writing embedded Silero VAD model to {}", path.display());
-        let tmp = path.with_extension("tmp");
-        std::fs::write(&tmp, SILERO_VAD_BYTES)
-            .map_err(|e| format!("VAD write: {e}"))?;
-        std::fs::rename(&tmp, &path)
-            .map_err(|e| format!("VAD rename: {e}"))?;
-
-        log::info!("Silero VAD model written ({} KB)", SILERO_VAD_BYTES.len() / 1024);
-        Ok(path)
+        let legacy = self.base_dir.join("silero_vad.onnx");
+        if legacy.exists() {
+            return Ok(legacy);
+        }
+        Err("Voice detection model not downloaded — install the dictation package".into())
     }
 
     pub fn delete(&self, id: &str) -> Result<(), String> {
@@ -410,17 +725,30 @@ impl ModelManager {
     }
 
     pub async fn download(&self, id: &str, app: &tauri::AppHandle) -> Result<(), String> {
-        let model = self.find(id).ok_or("unknown model")?.clone();
+        let model = self.find(id).ok_or("unknown model")?;
+        self.download_files(id, &model.files, app).await
+    }
+
+    /// Shared per-file download loop: tmp + rename, skip-if-exists, progress
+    /// events under `progress_id`. Used by both single-model downloads (the
+    /// Voices tab) and dictation package installs.
+    async fn download_files(
+        &self,
+        progress_id: &str,
+        files: &[ModelFile],
+        app: &tauri::AppHandle,
+    ) -> Result<(), String> {
+        let id = progress_id;
         let base_dir = self.base_dir.clone();
 
         // Init progress
         self.progress.lock().unwrap().insert(id.to_string(), 0.0);
 
-        let total_bytes: u64 = model.files.iter().map(|f| f.bytes).sum();
+        let total_bytes: u64 = files.iter().map(|f| f.bytes).sum();
         let mut downloaded: u64 = 0;
         let client = reqwest::Client::new();
 
-        for file in &model.files {
+        for file in files {
             let dest = base_dir.join(&file.rel_path);
             if let Some(parent) = dest.parent() {
                 tokio::fs::create_dir_all(parent)
@@ -484,339 +812,135 @@ impl ModelManager {
         let _ = app.emit("download-complete", serde_json::json!({ "id": id }));
         Ok(())
     }
+
+    // ── Storage management ──
+
+    /// Byte totals per user-facing storage category. `unclaimed` is anything
+    /// under models/ that no current registry entry, package component, or
+    /// bookkeeping file owns — legacy downloads from the old model zoo.
+    pub fn storage_summary(&self) -> serde_json::Value {
+        let m = self.manifest();
+        let mut owned: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+        let mut dictation: u64 = 0;
+        for (_, c) in platform_components(&m) {
+            for f in c.all_files() {
+                let p = self.base_dir.join(&f.rel_path);
+                dictation += std::fs::metadata(&p).map(|md| md.len()).unwrap_or(0);
+                owned.insert(p);
+            }
+        }
+        // The non-platform ASR variant is still "owned" (not legacy junk).
+        for c in m.dictation.components.values() {
+            for f in c.all_files() {
+                owned.insert(self.base_dir.join(&f.rel_path));
+            }
+        }
+        let mut voices: u64 = 0;
+        for v in &m.voices.list {
+            for f in &v.files {
+                let p = self.base_dir.join(&f.rel_path);
+                voices += std::fs::metadata(&p).map(|md| md.len()).unwrap_or(0);
+                owned.insert(p);
+            }
+        }
+        for keep in ["manifest.json", "packages.json"] {
+            owned.insert(self.base_dir.join(keep));
+        }
+        // Custom voices imported by the user live under tts/custom.
+        let custom_dir = self.base_dir.join("tts/custom");
+        let custom = dir_size(&custom_dir);
+        let mut unclaimed: u64 = 0;
+        walk_files(&self.base_dir, &mut |p, len| {
+            if !owned.contains(p) && !p.starts_with(&custom_dir) {
+                unclaimed += len;
+            }
+        });
+        serde_json::json!({
+            "dictation": dictation,
+            "voices": voices,
+            "custom_voices": custom,
+            "unclaimed": unclaimed,
+        })
+    }
+
+    /// Delete a storage category. Returns bytes reclaimed.
+    pub fn storage_clear(&self, category: &str) -> Result<u64, String> {
+        let m = self.manifest();
+        let before = self.storage_summary();
+        let take = |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+        match category {
+            "dictation" => {
+                for c in m.dictation.components.values() {
+                    for f in c.all_files() {
+                        let _ = std::fs::remove_file(self.base_dir.join(&f.rel_path));
+                    }
+                }
+                let _ = std::fs::remove_file(self.packages_path());
+                let _ = std::fs::remove_file(self.base_dir.join("silero_vad.onnx"));
+                Ok(take(&before, "dictation"))
+            }
+            "voices" => {
+                for v in &m.voices.list {
+                    for f in &v.files {
+                        let _ = std::fs::remove_file(self.base_dir.join(&f.rel_path));
+                    }
+                }
+                self.clear_active();
+                Ok(take(&before, "voices"))
+            }
+            "unclaimed" => {
+                let mut owned: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+                for c in m.dictation.components.values() {
+                    for f in c.all_files() {
+                        owned.insert(self.base_dir.join(&f.rel_path));
+                    }
+                }
+                for v in &m.voices.list {
+                    for f in &v.files {
+                        owned.insert(self.base_dir.join(&f.rel_path));
+                    }
+                }
+                for keep in ["manifest.json", "packages.json"] {
+                    owned.insert(self.base_dir.join(keep));
+                }
+                let custom_dir = self.base_dir.join("tts/custom");
+                let mut victims: Vec<PathBuf> = Vec::new();
+                walk_files(&self.base_dir, &mut |p, _| {
+                    if !owned.contains(p) && !p.starts_with(&custom_dir) {
+                        victims.push(p.to_path_buf());
+                    }
+                });
+                for v in &victims {
+                    let _ = std::fs::remove_file(v);
+                    if let Some(parent) = v.parent() {
+                        let _ = Self::remove_empty_dirs(parent, &self.base_dir);
+                    }
+                }
+                Ok(take(&before, "unclaimed"))
+            }
+            other => Err(format!("unknown storage category: {other}")),
+        }
+    }
 }
 
-// ── Registry ──
+/// Recursive size of a directory (0 if absent).
+fn dir_size(dir: &std::path::Path) -> u64 {
+    let mut total = 0u64;
+    walk_files(dir, &mut |_, len| total += len);
+    total
+}
 
-const SILERO_VAD_BYTES: &[u8] = include_bytes!("../silero_vad.onnx");
-
-const HF_WHISPER_BASE_EN: &str =
-    "https://huggingface.co/csukuangfj/sherpa-onnx-whisper-base.en/resolve/main";
-const HF_WHISPER_SMALL_EN: &str =
-    "https://huggingface.co/csukuangfj/sherpa-onnx-whisper-small.en/resolve/main";
-const HF_WHISPER_MEDIUM_EN: &str =
-    "https://huggingface.co/csukuangfj/sherpa-onnx-whisper-medium.en/resolve/main";
-const HF_WHISPER_LARGE_V3: &str =
-    "https://huggingface.co/csukuangfj/sherpa-onnx-whisper-large-v3/resolve/main";
-const HF_WHISPER_TURBO: &str =
-    "https://huggingface.co/csukuangfj/sherpa-onnx-whisper-turbo/resolve/main";
-const HF_PARAKEET_V2: &str =
-    "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2/resolve/main";
-const HF_PARAKEET_V2_INT8: &str =
-    "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8/resolve/main";
-const HF_PARAKEET_V3: &str =
-    "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3/resolve/main";
-const HF_PARAKEET_V3_INT8: &str =
-    "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8/resolve/main";
-const HF_DISTIL_WHISPER_SMALL_EN: &str =
-    "https://huggingface.co/csukuangfj/sherpa-onnx-whisper-distil-small.en/resolve/main";
-const HF_ZIPFORMER_EN: &str =
-    "https://huggingface.co/csukuangfj/sherpa-onnx-zipformer-en-2023-06-26/resolve/main";
-const HF_NEMO_CTC_SMALL: &str =
-    "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-ctc-en-conformer-small/resolve/main";
-const HF_NEMO_CTC_MEDIUM: &str =
-    "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-ctc-en-conformer-medium/resolve/main";
-// Patched Piper voice models: rhasspy exports with the VITS duration output
-// (`/Ceil_output_0`) exposed for exact word timing — see
-// scripts/patch_piper_durations.py. Hosted on our R2; the S3 API endpoint needs
-// signed auth, so the app downloads from the bucket's public r2.dev URL.
-const R2_PIPER_TTS: &str =
-    "https://pub-c88baaac61224fbba973b547f1d947ca.r2.dev/models/TTS";
-const HF_NEMO_CTC_LARGE: &str =
-    "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-ctc-en-conformer-large/resolve/main";
-
-fn builtin_registry() -> Vec<ModelDef> {
-    vec![
-        // Whisper INT8 (recommended)
-        ModelDef {
-            id: "whisper-base.en-int8".into(),
-            name: "Whisper Base EN INT8".into(),
-            desc: "English \u{2014} fastest, ~152 MB".into(),
-            engine: "whisper".into(),
-            size: "~152 MB".into(),
-            files: vec![
-                ModelFile { url: format!("{HF_WHISPER_BASE_EN}/base.en-encoder.int8.onnx"), rel_path: "whisper/base.en-int8/encoder.int8.onnx".into(), bytes: 28_000_000, role: "encoder".into() },
-                ModelFile { url: format!("{HF_WHISPER_BASE_EN}/base.en-decoder.int8.onnx"), rel_path: "whisper/base.en-int8/decoder.int8.onnx".into(), bytes: 125_000_000, role: "decoder".into() },
-                ModelFile { url: format!("{HF_WHISPER_BASE_EN}/base.en-tokens.txt"), rel_path: "whisper/base.en-int8/tokens.txt".into(), bytes: 816_000, role: "tokens".into() },
-            ],
-        },
-        ModelDef {
-            id: "whisper-small.en-int8".into(),
-            name: "Whisper Small EN INT8".into(),
-            desc: "English \u{2014} good accuracy, fast".into(),
-            engine: "whisper".into(),
-            size: "~357 MB".into(),
-            files: vec![
-                ModelFile { url: format!("{HF_WHISPER_SMALL_EN}/small.en-encoder.int8.onnx"), rel_path: "whisper/small.en-int8/encoder.int8.onnx".into(), bytes: 107_000_000, role: "encoder".into() },
-                ModelFile { url: format!("{HF_WHISPER_SMALL_EN}/small.en-decoder.int8.onnx"), rel_path: "whisper/small.en-int8/decoder.int8.onnx".into(), bytes: 250_000_000, role: "decoder".into() },
-                ModelFile { url: format!("{HF_WHISPER_SMALL_EN}/small.en-tokens.txt"), rel_path: "whisper/small.en-int8/tokens.txt".into(), bytes: 816_000, role: "tokens".into() },
-            ],
-        },
-        ModelDef {
-            id: "whisper-medium.en-int8".into(),
-            name: "Whisper Medium EN INT8".into(),
-            desc: "English \u{2014} balanced accuracy and speed".into(),
-            engine: "whisper".into(),
-            size: "~945 MB".into(),
-            files: vec![
-                ModelFile { url: format!("{HF_WHISPER_MEDIUM_EN}/medium.en-encoder.int8.onnx"), rel_path: "whisper/medium.en-int8/encoder.int8.onnx".into(), bytes: 374_000_000, role: "encoder".into() },
-                ModelFile { url: format!("{HF_WHISPER_MEDIUM_EN}/medium.en-decoder.int8.onnx"), rel_path: "whisper/medium.en-int8/decoder.int8.onnx".into(), bytes: 571_000_000, role: "decoder".into() },
-                ModelFile { url: format!("{HF_WHISPER_MEDIUM_EN}/medium.en-tokens.txt"), rel_path: "whisper/medium.en-int8/tokens.txt".into(), bytes: 816_000, role: "tokens".into() },
-            ],
-        },
-        ModelDef {
-            id: "whisper-large-v3-int8".into(),
-            name: "Whisper Large V3 INT8".into(),
-            desc: "Multilingual \u{2014} highest accuracy".into(),
-            engine: "whisper".into(),
-            size: "~1.8 GB".into(),
-            files: vec![
-                ModelFile { url: format!("{HF_WHISPER_LARGE_V3}/large-v3-encoder.int8.onnx"), rel_path: "whisper/large-v3-int8/encoder.int8.onnx".into(), bytes: 767_000_000, role: "encoder".into() },
-                ModelFile { url: format!("{HF_WHISPER_LARGE_V3}/large-v3-decoder.int8.onnx"), rel_path: "whisper/large-v3-int8/decoder.int8.onnx".into(), bytes: 1_010_000_000, role: "decoder".into() },
-                ModelFile { url: format!("{HF_WHISPER_LARGE_V3}/large-v3-tokens.txt"), rel_path: "whisper/large-v3-int8/tokens.txt".into(), bytes: 797_000, role: "tokens".into() },
-            ],
-        },
-        ModelDef {
-            id: "whisper-turbo-int8".into(),
-            name: "Whisper Turbo INT8".into(),
-            desc: "Multilingual \u{2014} near-large accuracy, 2x faster".into(),
-            engine: "whisper".into(),
-            size: "~1.0 GB".into(),
-            files: vec![
-                ModelFile { url: format!("{HF_WHISPER_TURBO}/turbo-encoder.int8.onnx"), rel_path: "whisper/turbo-int8/encoder.int8.onnx".into(), bytes: 675_000_000, role: "encoder".into() },
-                ModelFile { url: format!("{HF_WHISPER_TURBO}/turbo-decoder.int8.onnx"), rel_path: "whisper/turbo-int8/decoder.int8.onnx".into(), bytes: 361_000_000, role: "decoder".into() },
-                ModelFile { url: format!("{HF_WHISPER_TURBO}/turbo-tokens.txt"), rel_path: "whisper/turbo-int8/tokens.txt".into(), bytes: 797_000, role: "tokens".into() },
-            ],
-        },
-        // Distil-Whisper Small EN INT8
-        ModelDef {
-            id: "distil-whisper-small.en-int8".into(),
-            name: "Distil-Whisper Small EN INT8".into(),
-            desc: "English \u{2014} fast, ~299 MB".into(),
-            engine: "whisper".into(),
-            size: "~299 MB".into(),
-            files: vec![
-                ModelFile { url: format!("{HF_DISTIL_WHISPER_SMALL_EN}/distil-small.en-encoder.int8.onnx"), rel_path: "whisper/distil-small.en-int8/encoder.int8.onnx".into(), bytes: 102_961_431, role: "encoder".into() },
-                ModelFile { url: format!("{HF_DISTIL_WHISPER_SMALL_EN}/distil-small.en-decoder.int8.onnx"), rel_path: "whisper/distil-small.en-int8/decoder.int8.onnx".into(), bytes: 195_079_097, role: "decoder".into() },
-                ModelFile { url: format!("{HF_DISTIL_WHISPER_SMALL_EN}/distil-small.en-tokens.txt"), rel_path: "whisper/distil-small.en-int8/tokens.txt".into(), bytes: 835_554, role: "tokens".into() },
-            ],
-        },
-        // NeMo Conformer-CTC Small EN INT8
-        ModelDef {
-            id: "conformer-ctc-small-en-int8".into(),
-            name: "Conformer-CTC Small EN INT8".into(),
-            desc: "English \u{2014} tiny, ~46 MB".into(),
-            engine: "conformer_ctc".into(),
-            size: "~46 MB".into(),
-            files: vec![
-                ModelFile { url: format!("{HF_NEMO_CTC_SMALL}/model.int8.onnx"), rel_path: "conformer_ctc/small/model.int8.onnx".into(), bytes: 46_419_854, role: "model".into() },
-                ModelFile { url: format!("{HF_NEMO_CTC_SMALL}/tokens.txt"), rel_path: "conformer_ctc/small/tokens.txt".into(), bytes: 11_611, role: "tokens".into() },
-            ],
-        },
-        // NeMo Conformer-CTC Medium EN INT8
-        ModelDef {
-            id: "conformer-ctc-medium-en-int8".into(),
-            name: "Conformer-CTC Medium EN INT8".into(),
-            desc: "English \u{2014} balanced, ~68 MB".into(),
-            engine: "conformer_ctc".into(),
-            size: "~68 MB".into(),
-            files: vec![
-                ModelFile { url: format!("{HF_NEMO_CTC_MEDIUM}/model.int8.onnx"), rel_path: "conformer_ctc/medium/model.int8.onnx".into(), bytes: 67_632_742, role: "model".into() },
-                ModelFile { url: format!("{HF_NEMO_CTC_MEDIUM}/tokens.txt"), rel_path: "conformer_ctc/medium/tokens.txt".into(), bytes: 11_611, role: "tokens".into() },
-            ],
-        },
-        // NeMo Conformer-CTC Large EN INT8
-        ModelDef {
-            id: "conformer-ctc-large-en-int8".into(),
-            name: "Conformer-CTC Large EN INT8".into(),
-            desc: "English \u{2014} 2.2% WER, ~169 MB".into(),
-            engine: "conformer_ctc".into(),
-            size: "~169 MB".into(),
-            files: vec![
-                ModelFile { url: format!("{HF_NEMO_CTC_LARGE}/model.int8.onnx"), rel_path: "conformer_ctc/large/model.int8.onnx".into(), bytes: 169_392_184, role: "model".into() },
-                ModelFile { url: format!("{HF_NEMO_CTC_LARGE}/tokens.txt"), rel_path: "conformer_ctc/large/tokens.txt".into(), bytes: 978, role: "tokens".into() },
-            ],
-        },
-        // Zipformer EN INT8
-        ModelDef {
-            id: "zipformer-en-int8".into(),
-            name: "Zipformer EN INT8".into(),
-            desc: "English \u{2014} lightweight, ~71 MB".into(),
-            engine: "zipformer".into(),
-            size: "~71 MB".into(),
-            files: vec![
-                ModelFile { url: format!("{HF_ZIPFORMER_EN}/encoder-epoch-99-avg-1.int8.onnx"), rel_path: "zipformer/en/encoder.int8.onnx".into(), bytes: 68_778_564, role: "encoder".into() },
-                ModelFile { url: format!("{HF_ZIPFORMER_EN}/decoder-epoch-99-avg-1.int8.onnx"), rel_path: "zipformer/en/decoder.int8.onnx".into(), bytes: 1_307_236, role: "decoder".into() },
-                ModelFile { url: format!("{HF_ZIPFORMER_EN}/joiner-epoch-99-avg-1.int8.onnx"), rel_path: "zipformer/en/joiner.int8.onnx".into(), bytes: 259_335, role: "joiner".into() },
-                ModelFile { url: format!("{HF_ZIPFORMER_EN}/tokens.txt"), rel_path: "zipformer/en/tokens.txt".into(), bytes: 5_048, role: "tokens".into() },
-            ],
-        },
-        // Parakeet V3
-        ModelDef {
-            id: "parakeet-tdt-0.6b-v3".into(),
-            name: "Parakeet TDT 0.6B V3".into(),
-            desc: "Multilingual \u{2014} latest, full precision".into(),
-            engine: "parakeet".into(),
-            size: "~2.5 GB".into(),
-            files: vec![
-                ModelFile { url: format!("{HF_PARAKEET_V3}/encoder.onnx"), rel_path: "parakeet/v3/encoder.onnx".into(), bytes: 42_000_000, role: "encoder".into() },
-                ModelFile { url: format!("{HF_PARAKEET_V3}/encoder.weights"), rel_path: "parakeet/v3/encoder.weights".into(), bytes: 2_435_000_000, role: "encoder_weights".into() },
-                ModelFile { url: format!("{HF_PARAKEET_V3}/decoder.onnx"), rel_path: "parakeet/v3/decoder.onnx".into(), bytes: 47_000_000, role: "decoder".into() },
-                ModelFile { url: format!("{HF_PARAKEET_V3}/joiner.onnx"), rel_path: "parakeet/v3/joiner.onnx".into(), bytes: 25_000_000, role: "joiner".into() },
-                ModelFile { url: format!("{HF_PARAKEET_V3}/tokens.txt"), rel_path: "parakeet/v3/tokens.txt".into(), bytes: 94_000, role: "tokens".into() },
-            ],
-        },
-        // Parakeet V3 INT8
-        ModelDef {
-            id: "parakeet-tdt-0.6b-v3-int8".into(),
-            name: "Parakeet TDT 0.6B V3 INT8".into(),
-            desc: "Multilingual \u{2014} quantized, smaller download".into(),
-            engine: "parakeet".into(),
-            size: "~670 MB".into(),
-            files: vec![
-                ModelFile { url: format!("{HF_PARAKEET_V3_INT8}/encoder.int8.onnx"), rel_path: "parakeet/v3-int8/encoder.int8.onnx".into(), bytes: 652_000_000, role: "encoder".into() },
-                ModelFile { url: format!("{HF_PARAKEET_V3_INT8}/decoder.int8.onnx"), rel_path: "parakeet/v3-int8/decoder.int8.onnx".into(), bytes: 12_000_000, role: "decoder".into() },
-                ModelFile { url: format!("{HF_PARAKEET_V3_INT8}/joiner.int8.onnx"), rel_path: "parakeet/v3-int8/joiner.int8.onnx".into(), bytes: 6_400_000, role: "joiner".into() },
-                ModelFile { url: format!("{HF_PARAKEET_V3_INT8}/tokens.txt"), rel_path: "parakeet/v3-int8/tokens.txt".into(), bytes: 94_000, role: "tokens".into() },
-            ],
-        },
-        // Parakeet V2
-        ModelDef {
-            id: "parakeet-tdt-0.6b-v2".into(),
-            name: "Parakeet TDT 0.6B V2".into(),
-            desc: "English only \u{2014} fast, production-ready".into(),
-            engine: "parakeet".into(),
-            size: "~2.4 GB".into(),
-            files: vec![
-                ModelFile { url: format!("{HF_PARAKEET_V2}/encoder.onnx"), rel_path: "parakeet/v2/encoder.onnx".into(), bytes: 41_766_257, role: "encoder".into() },
-                ModelFile { url: format!("{HF_PARAKEET_V2}/encoder.weights"), rel_path: "parakeet/v2/encoder.weights".into(), bytes: 2_435_420_160, role: "encoder_weights".into() },
-                ModelFile { url: format!("{HF_PARAKEET_V2}/decoder.onnx"), rel_path: "parakeet/v2/decoder.onnx".into(), bytes: 28_883_663, role: "decoder".into() },
-                ModelFile { url: format!("{HF_PARAKEET_V2}/joiner.onnx"), rel_path: "parakeet/v2/joiner.onnx".into(), bytes: 6_907_576, role: "joiner".into() },
-                ModelFile { url: format!("{HF_PARAKEET_V2}/tokens.txt"), rel_path: "parakeet/v2/tokens.txt".into(), bytes: 9_384, role: "tokens".into() },
-            ],
-        },
-        // Parakeet V2 INT8
-        ModelDef {
-            id: "parakeet-tdt-0.6b-v2-int8".into(),
-            name: "Parakeet TDT 0.6B V2 INT8".into(),
-            desc: "English only \u{2014} quantized, smallest download".into(),
-            engine: "parakeet".into(),
-            size: "~661 MB".into(),
-            files: vec![
-                ModelFile { url: format!("{HF_PARAKEET_V2_INT8}/encoder.int8.onnx"), rel_path: "parakeet/v2-int8/encoder.int8.onnx".into(), bytes: 652_184_296, role: "encoder".into() },
-                ModelFile { url: format!("{HF_PARAKEET_V2_INT8}/decoder.int8.onnx"), rel_path: "parakeet/v2-int8/decoder.int8.onnx".into(), bytes: 7_257_753, role: "decoder".into() },
-                ModelFile { url: format!("{HF_PARAKEET_V2_INT8}/joiner.int8.onnx"), rel_path: "parakeet/v2-int8/joiner.int8.onnx".into(), bytes: 1_739_080, role: "joiner".into() },
-                ModelFile { url: format!("{HF_PARAKEET_V2_INT8}/tokens.txt"), rel_path: "parakeet/v2-int8/tokens.txt".into(), bytes: 9_384, role: "tokens".into() },
-            ],
-        },
-        // ── TTS Models ──
-        // (LibriTTS was removed from the catalogue — 904 speakers of mostly
-        // low quality drowned out the good voices. Installs that still have
-        // it on disk get the directory cleaned up in `new()`.)
-        ModelDef {
-            id: "tts-piper-alba".into(),
-            name: "Alba (UK)".into(),
-            desc: "British English voice \u{2014} female, Scottish accent, ~63 MB".into(),
-            engine: "tts_piper_ort".into(),
-            size: "~63 MB".into(),
-            files: vec![
-                // Duration-patched (/Ceil_output_0 exposed as a graph output) so
-                // exact word timing works; the sidecar's espeak.voice ("en-gb-x-rp")
-                // routes phonemization through the GB dictionary.
-                ModelFile { url: format!("{R2_PIPER_TTS}/en_GB-alba-medium-dur.onnx"), rel_path: "tts/piper-alba/model_dur.onnx".into(), bytes: 63_201_318, role: "model".into() },
-                ModelFile { url: format!("{R2_PIPER_TTS}/en_GB-alba-medium.onnx.json"), rel_path: "tts/piper-alba/model.onnx.json".into(), bytes: 4_888, role: "config".into() },
-            ],
-        },
-        // Remaining en_GB Piper voices, all duration-patched like alba.
-        ModelDef {
-            id: "tts-piper-alan".into(),
-            name: "Alan (UK)".into(),
-            desc: "British English voice \u{2014} male, ~63 MB".into(),
-            engine: "tts_piper_ort".into(),
-            size: "~63 MB".into(),
-            files: vec![
-                ModelFile { url: format!("{R2_PIPER_TTS}/en_GB-alan-medium-dur.onnx"), rel_path: "tts/piper-alan/model_dur.onnx".into(), bytes: 63_201_318, role: "model".into() },
-                ModelFile { url: format!("{R2_PIPER_TTS}/en_GB-alan-medium.onnx.json"), rel_path: "tts/piper-alan/model.onnx.json".into(), bytes: 4_888, role: "config".into() },
-            ],
-        },
-        ModelDef {
-            id: "tts-piper-aru".into(),
-            name: "Aru (UK)".into(),
-            desc: "British English \u{2014} 12 voices, ~77 MB".into(),
-            engine: "tts_piper_ort".into(),
-            size: "~77 MB".into(),
-            files: vec![
-                ModelFile { url: format!("{R2_PIPER_TTS}/en_GB-aru-medium-dur.onnx"), rel_path: "tts/piper-aru/model_dur.onnx".into(), bytes: 76_754_121, role: "model".into() },
-                ModelFile { url: format!("{R2_PIPER_TTS}/en_GB-aru-medium.onnx.json"), rel_path: "tts/piper-aru/model.onnx.json".into(), bytes: 5_048, role: "config".into() },
-            ],
-        },
-        ModelDef {
-            id: "tts-piper-cori".into(),
-            name: "Cori (UK)".into(),
-            desc: "British English voice \u{2014} female, ~64 MB".into(),
-            engine: "tts_piper_ort".into(),
-            size: "~64 MB".into(),
-            files: vec![
-                ModelFile { url: format!("{R2_PIPER_TTS}/en_GB-cori-medium-dur.onnx"), rel_path: "tts/piper-cori/model_dur.onnx".into(), bytes: 63_531_403, role: "model".into() },
-                ModelFile { url: format!("{R2_PIPER_TTS}/en_GB-cori-medium.onnx.json"), rel_path: "tts/piper-cori/model.onnx.json".into(), bytes: 4_966, role: "config".into() },
-            ],
-        },
-        ModelDef {
-            id: "tts-piper-cori-high".into(),
-            name: "Cori HQ (UK)".into(),
-            desc: "British English voice \u{2014} female, highest quality, ~114 MB".into(),
-            engine: "tts_piper_ort".into(),
-            size: "~114 MB".into(),
-            files: vec![
-                ModelFile { url: format!("{R2_PIPER_TTS}/en_GB-cori-high-dur.onnx"), rel_path: "tts/piper-cori-high/model_dur.onnx".into(), bytes: 114_219_376, role: "model".into() },
-                ModelFile { url: format!("{R2_PIPER_TTS}/en_GB-cori-high.onnx.json"), rel_path: "tts/piper-cori-high/model.onnx.json".into(), bytes: 4_963, role: "config".into() },
-            ],
-        },
-        ModelDef {
-            id: "tts-piper-jenny".into(),
-            name: "Jenny (UK)".into(),
-            desc: "British English voice \u{2014} female, ~63 MB".into(),
-            engine: "tts_piper_ort".into(),
-            size: "~63 MB".into(),
-            files: vec![
-                ModelFile { url: format!("{R2_PIPER_TTS}/en_GB-jenny_dioco-medium-dur.onnx"), rel_path: "tts/piper-jenny/model_dur.onnx".into(), bytes: 63_201_318, role: "model".into() },
-                ModelFile { url: format!("{R2_PIPER_TTS}/en_GB-jenny_dioco-medium.onnx.json"), rel_path: "tts/piper-jenny/model.onnx.json".into(), bytes: 4_895, role: "config".into() },
-            ],
-        },
-        ModelDef {
-            id: "tts-piper-northern-male".into(),
-            name: "Northern English Male (UK)".into(),
-            desc: "British English voice \u{2014} male, northern accent, ~63 MB".into(),
-            engine: "tts_piper_ort".into(),
-            size: "~63 MB".into(),
-            files: vec![
-                ModelFile { url: format!("{R2_PIPER_TTS}/en_GB-northern_english_male-medium-dur.onnx"), rel_path: "tts/piper-northern-male/model_dur.onnx".into(), bytes: 63_201_318, role: "model".into() },
-                ModelFile { url: format!("{R2_PIPER_TTS}/en_GB-northern_english_male-medium.onnx.json"), rel_path: "tts/piper-northern-male/model.onnx.json".into(), bytes: 4_847, role: "config".into() },
-            ],
-        },
-        ModelDef {
-            id: "tts-piper-semaine".into(),
-            name: "Semaine (UK)".into(),
-            desc: "British English \u{2014} 4 expressive voices, ~77 MB".into(),
-            engine: "tts_piper_ort".into(),
-            size: "~77 MB".into(),
-            files: vec![
-                ModelFile { url: format!("{R2_PIPER_TTS}/en_GB-semaine-medium-dur.onnx"), rel_path: "tts/piper-semaine/model_dur.onnx".into(), bytes: 76_737_735, role: "model".into() },
-                ModelFile { url: format!("{R2_PIPER_TTS}/en_GB-semaine-medium.onnx.json"), rel_path: "tts/piper-semaine/model.onnx.json".into(), bytes: 5_076, role: "config".into() },
-            ],
-        },
-        ModelDef {
-            id: "tts-piper-southern-female".into(),
-            name: "Southern English Female (UK)".into(),
-            desc: "British English voice \u{2014} female, southern accent, ~63 MB".into(),
-            engine: "tts_piper_ort".into(),
-            size: "~63 MB".into(),
-            files: vec![
-                ModelFile { url: format!("{R2_PIPER_TTS}/en_GB-southern_english_female-low-dur.onnx"), rel_path: "tts/piper-southern-female/model_dur.onnx".into(), bytes: 63_104_550, role: "model".into() },
-                ModelFile { url: format!("{R2_PIPER_TTS}/en_GB-southern_english_female-low.onnx.json"), rel_path: "tts/piper-southern-female/model.onnx.json".into(), bytes: 4_189, role: "config".into() },
-            ],
-        },
-    ]
+/// Depth-first file walk calling `f(path, len)` per regular file.
+fn walk_files(dir: &std::path::Path, f: &mut dyn FnMut(&std::path::Path, u64)) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            walk_files(&path, f);
+        } else if let Ok(md) = entry.metadata() {
+            f(&path, md.len());
+        }
+    }
 }
 
 #[cfg(test)]
@@ -825,28 +949,58 @@ mod tests {
     use std::fs;
 
     fn test_manager(dir: &std::path::Path) -> ModelManager {
+        let manifest = parse_manifest(EMBEDDED_MANIFEST).unwrap();
+        let registry = registry_from_manifest(&manifest);
         ModelManager {
             base_dir: dir.to_path_buf(),
             alt_dirs: vec![],
-            registry: builtin_registry(),
+            manifest: Mutex::new(manifest),
+            registry: Mutex::new(registry),
             progress: Mutex::new(HashMap::new()),
             active_model: Mutex::new(String::new()),
         }
     }
 
+    /// Write every file of a registry entry so is_downloaded() sees it.
+    fn fake_download(mgr: &ModelManager, id: &str) {
+        let model = mgr.find(id).unwrap();
+        for f in &model.files {
+            let p = mgr.base_dir.join(&f.rel_path);
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(p, b"fake").unwrap();
+        }
+    }
+
     #[test]
-    fn registry_has_whisper_and_parakeet() {
-        let registry = builtin_registry();
-        let whisper_count = registry.iter().filter(|m| m.engine == "whisper").count();
-        let parakeet_count = registry.iter().filter(|m| m.engine == "parakeet").count();
-        assert!(whisper_count >= 3, "expected at least 3 whisper models");
-        assert!(parakeet_count >= 2, "expected at least 2 parakeet models");
+    fn embedded_manifest_parses_and_is_complete() {
+        let m = parse_manifest(EMBEDDED_MANIFEST).expect("embedded manifest must parse");
+        assert_eq!(m.schema, 1);
+        for key in ["asr-mobile", "asr-desktop", "vad", "grammar"] {
+            let c = m.dictation.components.get(key).unwrap_or_else(|| panic!("missing {key}"));
+            assert!(!c.all_files().is_empty(), "{key} has no files");
+        }
+        assert_eq!(m.dictation.components["grammar"].files.len(), 7);
+        assert!(m.voices.list.len() >= 9, "voice list shrank unexpectedly");
+    }
+
+    #[test]
+    fn registry_has_parakeet_and_voices() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = test_manager(dir.path());
+        assert!(mgr.find("parakeet-tdt-0.6b-v3-int8").is_some());
+        assert!(mgr.find("parakeet-tdt-0.6b-v3").is_some());
+        assert!(mgr.find("tts-piper-alba").is_some());
+        // The old model zoo is gone.
+        assert!(mgr.find("whisper-base.en-int8").is_none());
+        assert!(mgr.find("parakeet-tdt-0.6b-v2-int8").is_none());
     }
 
     #[test]
     fn registry_ids_are_unique() {
-        let registry = builtin_registry();
-        let mut ids: Vec<&str> = registry.iter().map(|m| m.id.as_str()).collect();
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = test_manager(dir.path());
+        let list = mgr.list();
+        let mut ids: Vec<String> = list.iter().map(|m| m.id.clone()).collect();
         let original_len = ids.len();
         ids.sort();
         ids.dedup();
@@ -854,40 +1008,10 @@ mod tests {
     }
 
     #[test]
-    fn find_existing_model() {
-        let dir = tempfile::tempdir().unwrap();
-        let mgr = test_manager(dir.path());
-        assert!(mgr.find("whisper-base.en-int8").is_some());
-        assert!(mgr.find("parakeet-tdt-0.6b-v3-int8").is_some());
-    }
-
-    #[test]
-    fn find_nonexistent_model() {
-        let dir = tempfile::tempdir().unwrap();
-        let mgr = test_manager(dir.path());
-        assert!(mgr.find("nonexistent-model").is_none());
-    }
-
-    #[test]
     fn not_downloaded_when_files_missing() {
         let dir = tempfile::tempdir().unwrap();
         let mgr = test_manager(dir.path());
-        assert!(!mgr.is_downloaded("whisper-base.en-int8"));
-        assert!(!mgr.is_downloaded("parakeet-tdt-0.6b-v2-int8"));
-    }
-
-    #[test]
-    fn downloaded_when_whisper_files_exist() {
-        let dir = tempfile::tempdir().unwrap();
-        let mgr = test_manager(dir.path());
-
-        let model_dir = dir.path().join("whisper/base.en-int8");
-        fs::create_dir_all(&model_dir).unwrap();
-        fs::write(model_dir.join("encoder.int8.onnx"), b"fake").unwrap();
-        fs::write(model_dir.join("decoder.int8.onnx"), b"fake").unwrap();
-        fs::write(model_dir.join("tokens.txt"), b"fake").unwrap();
-
-        assert!(mgr.is_downloaded("whisper-base.en-int8"));
+        assert!(!mgr.is_downloaded("parakeet-tdt-0.6b-v3-int8"));
     }
 
     #[test]
@@ -895,49 +1019,21 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mgr = test_manager(dir.path());
 
-        // Create only encoder, not decoder/joiner/tokens
-        let enc_dir = dir.path().join("parakeet/v2-int8");
+        let enc_dir = dir.path().join("parakeet/v3-int8");
         fs::create_dir_all(&enc_dir).unwrap();
         fs::write(enc_dir.join("encoder.int8.onnx"), b"fake").unwrap();
+        assert!(!mgr.is_downloaded("parakeet-tdt-0.6b-v3-int8"));
 
-        assert!(!mgr.is_downloaded("parakeet-tdt-0.6b-v2-int8"));
-
-        // Add the rest
-        fs::write(enc_dir.join("decoder.int8.onnx"), b"fake").unwrap();
-        fs::write(enc_dir.join("joiner.int8.onnx"), b"fake").unwrap();
-        fs::write(enc_dir.join("tokens.txt"), b"fake").unwrap();
-
-        assert!(mgr.is_downloaded("parakeet-tdt-0.6b-v2-int8"));
-    }
-
-    #[test]
-    fn model_engine_returns_whisper() {
-        let dir = tempfile::tempdir().unwrap();
-        let mgr = test_manager(dir.path());
-
-        let model_dir = dir.path().join("whisper/base.en-int8");
-        fs::create_dir_all(&model_dir).unwrap();
-        fs::write(model_dir.join("encoder.int8.onnx"), b"fake").unwrap();
-        fs::write(model_dir.join("decoder.int8.onnx"), b"fake").unwrap();
-        fs::write(model_dir.join("tokens.txt"), b"fake").unwrap();
-
-        let engine = mgr.model_engine("whisper-base.en-int8").unwrap();
-        assert!(matches!(engine, crate::transcribe::ModelEngine::Whisper { .. }));
+        fake_download(&mgr, "parakeet-tdt-0.6b-v3-int8");
+        assert!(mgr.is_downloaded("parakeet-tdt-0.6b-v3-int8"));
     }
 
     #[test]
     fn model_engine_returns_transducer() {
         let dir = tempfile::tempdir().unwrap();
         let mgr = test_manager(dir.path());
-
-        let enc_dir = dir.path().join("parakeet/v2-int8");
-        fs::create_dir_all(&enc_dir).unwrap();
-        fs::write(enc_dir.join("encoder.int8.onnx"), b"fake").unwrap();
-        fs::write(enc_dir.join("decoder.int8.onnx"), b"fake").unwrap();
-        fs::write(enc_dir.join("joiner.int8.onnx"), b"fake").unwrap();
-        fs::write(enc_dir.join("tokens.txt"), b"fake").unwrap();
-
-        let engine = mgr.model_engine("parakeet-tdt-0.6b-v2-int8").unwrap();
+        fake_download(&mgr, "parakeet-tdt-0.6b-v3-int8");
+        let engine = mgr.model_engine("parakeet-tdt-0.6b-v3-int8").unwrap();
         assert!(matches!(engine, crate::transcribe::ModelEngine::Transducer { .. }));
     }
 
@@ -945,63 +1041,124 @@ mod tests {
     fn set_active_requires_downloaded() {
         let dir = tempfile::tempdir().unwrap();
         let mgr = test_manager(dir.path());
-        assert!(mgr.set_active("whisper-base.en-int8").is_err());
-    }
-
-    #[test]
-    fn list_shows_all_models() {
-        let dir = tempfile::tempdir().unwrap();
-        let mgr = test_manager(dir.path());
-        let list = mgr.list();
-        assert_eq!(list.len(), builtin_registry().len());
-        assert!(list.iter().all(|m| m.status == "not_downloaded"));
+        assert!(mgr.set_active("parakeet-tdt-0.6b-v3-int8").is_err());
     }
 
     #[test]
     fn list_shows_downloaded_status() {
         let dir = tempfile::tempdir().unwrap();
         let mgr = test_manager(dir.path());
-
-        let model_dir = dir.path().join("whisper/base.en-int8");
-        fs::create_dir_all(&model_dir).unwrap();
-        fs::write(model_dir.join("encoder.int8.onnx"), b"fake").unwrap();
-        fs::write(model_dir.join("decoder.int8.onnx"), b"fake").unwrap();
-        fs::write(model_dir.join("tokens.txt"), b"fake").unwrap();
-
+        fake_download(&mgr, "tts-piper-alba");
         let list = mgr.list();
-        let base = list.iter().find(|m| m.id == "whisper-base.en-int8").unwrap();
-        assert_eq!(base.status, "downloaded");
+        let alba = list.iter().find(|m| m.id == "tts-piper-alba").unwrap();
+        assert_eq!(alba.status, "downloaded");
     }
 
     #[test]
-    fn vad_model_path() {
+    fn vad_prefers_component_path_then_legacy() {
         let dir = tempfile::tempdir().unwrap();
         let mgr = test_manager(dir.path());
-        assert_eq!(mgr.vad_model_path(), dir.path().join("silero_vad.onnx"));
+        assert!(mgr.ensure_vad_model().is_err());
+
+        // Legacy location (pre-package installs).
+        fs::write(dir.path().join("silero_vad.onnx"), b"fake").unwrap();
+        assert_eq!(mgr.ensure_vad_model().unwrap(), dir.path().join("silero_vad.onnx"));
+
+        // Component location wins once present.
+        fs::create_dir_all(dir.path().join("vad")).unwrap();
+        fs::write(dir.path().join("vad/silero_vad.onnx"), b"fake").unwrap();
+        assert_eq!(mgr.ensure_vad_model().unwrap(), dir.path().join("vad/silero_vad.onnx"));
     }
 
     #[test]
-    fn first_downloaded_parakeet_prefers_int8() {
+    fn grammar_files_requires_all_seven() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = test_manager(dir.path());
+        assert!(mgr.grammar_files().is_none());
+
+        let m = mgr.manifest();
+        let files = m.dictation.components["grammar"].files.clone();
+        for (i, f) in files.iter().enumerate() {
+            let p = dir.path().join(&f.rel_path);
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(p, b"fake").unwrap();
+            if i + 1 < files.len() {
+                assert!(mgr.grammar_files().is_none(), "partial grammar must be None");
+            }
+        }
+        assert!(mgr.grammar_files().is_some());
+    }
+
+    #[test]
+    fn packages_status_states() {
         let dir = tempfile::tempdir().unwrap();
         let mgr = test_manager(dir.path());
 
-        // Create v2 (non-int8)
-        let v2_dir = dir.path().join("parakeet/v2");
-        fs::create_dir_all(&v2_dir).unwrap();
-        fs::write(v2_dir.join("encoder.onnx"), b"fake").unwrap();
-        fs::write(v2_dir.join("decoder.onnx"), b"fake").unwrap();
-        fs::write(v2_dir.join("joiner.onnx"), b"fake").unwrap();
-        fs::write(v2_dir.join("tokens.txt"), b"fake").unwrap();
+        let st = mgr.packages_status();
+        assert_eq!(st["dictation"]["state"], "not_installed");
 
-        // Create v2-int8
-        let v2i_dir = dir.path().join("parakeet/v2-int8");
-        fs::create_dir_all(&v2i_dir).unwrap();
-        fs::write(v2i_dir.join("encoder.int8.onnx"), b"fake").unwrap();
-        fs::write(v2i_dir.join("decoder.int8.onnx"), b"fake").unwrap();
-        fs::write(v2i_dir.join("joiner.int8.onnx"), b"fake").unwrap();
-        fs::write(v2i_dir.join("tokens.txt"), b"fake").unwrap();
+        // Some files present but no recorded install -> update_available.
+        fake_download(&mgr, if cfg!(target_os = "android") { "parakeet-tdt-0.6b-v3-int8" } else { "parakeet-tdt-0.6b-v3" });
+        let st = mgr.packages_status();
+        assert_eq!(st["dictation"]["state"], "update_available");
 
+        // Everything present + versions recorded -> installed.
+        let m = mgr.manifest();
+        let mut rec = InstalledPackages { dictation_version: m.dictation.version, dictation_components: HashMap::new() };
+        for (name, c) in platform_components(&m) {
+            for f in c.all_files() {
+                let p = dir.path().join(&f.rel_path);
+                fs::create_dir_all(p.parent().unwrap()).unwrap();
+                fs::write(p, b"fake").unwrap();
+            }
+            rec.dictation_components.insert(name, c.version);
+        }
+        mgr.save_installed_packages(&rec).unwrap();
+        let st = mgr.packages_status();
+        assert_eq!(st["dictation"]["state"], "installed");
+        assert_eq!(st["dictation"]["pending_bytes"], 0);
+
+        // A component version bump flips it back to update_available.
+        let mut stale = rec.clone();
+        stale.dictation_components.insert("grammar".into(), 0);
+        mgr.save_installed_packages(&stale).unwrap();
+        let st = mgr.packages_status();
+        assert_eq!(st["dictation"]["state"], "update_available");
+    }
+
+    #[test]
+    fn storage_summary_counts_and_clears_unclaimed() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = test_manager(dir.path());
+        fake_download(&mgr, "tts-piper-alba");
+
+        // A legacy whisper file no registry entry owns.
+        let legacy = dir.path().join("whisper/base.en-int8");
+        fs::create_dir_all(&legacy).unwrap();
+        fs::write(legacy.join("encoder.int8.onnx"), vec![0u8; 1000]).unwrap();
+
+        let s = mgr.storage_summary();
+        assert!(s["voices"].as_u64().unwrap() > 0);
+        assert_eq!(s["unclaimed"].as_u64().unwrap(), 1000);
+
+        let freed = mgr.storage_clear("unclaimed").unwrap();
+        assert_eq!(freed, 1000);
+        assert!(!legacy.join("encoder.int8.onnx").exists());
+        // Owned voice files survive an unclaimed clear.
+        assert!(mgr.is_downloaded("tts-piper-alba"));
+    }
+
+    #[test]
+    fn first_downloaded_parakeet_platform_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = test_manager(dir.path());
+        fake_download(&mgr, "parakeet-tdt-0.6b-v3-int8");
+        fake_download(&mgr, "parakeet-tdt-0.6b-v3");
         let (id, _) = mgr.first_downloaded_parakeet().unwrap();
-        assert_eq!(id, "parakeet-tdt-0.6b-v2-int8");
+        if cfg!(target_os = "android") {
+            assert_eq!(id, "parakeet-tdt-0.6b-v3-int8");
+        } else {
+            assert_eq!(id, "parakeet-tdt-0.6b-v3");
+        }
     }
 }

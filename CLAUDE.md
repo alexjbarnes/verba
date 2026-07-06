@@ -53,10 +53,9 @@ Five stages run sequentially. Pipeline returns `PipelineResult` with intermediat
 - Needs-repair router (ELECTRA-small, 14MB ONNX INT8) scores P(acceptable); below threshold (0.7, from `data/grammar/config.0.0.1.json`) routes to the T5 corrector (T5-efficient-tiny, 30MB ONNX INT8)
 - Both models are FINE-TUNED on synthetic spoken-register corruption pairs (see the fine-tuning pipeline below); the upstream stock checkpoints measure far worse on ASR output
 - Per-sentence splitting and correction with negation/contraction guard (prevents meaning inversion; same-type contraction replacements like "me've" -> "I've" are allowed) and case-insensitive task-prefix strip
-- `build.rs` sets `grammar_neural_bundled` cfg flag only if ALL 7 model files exist; otherwise it prints a warning and the stage is a NO-OP in that build
-- Model files are gitignored (except config + KV weights). After a fresh checkout regenerate them with the fine-tuning pipeline: `fetch_blog_corpus.py` -> `make_grammar_pairs.py` -> `finetune_grammar_router.py` + `finetune_grammar_t5.py` -> `export_finetuned_grammar.py`, then copy the exports over the 0.0.1 names. `download_t5_grammar_onnx.py` restores the STOCK models only (placebo-grade on ASR output — use for baselines, not shipping)
+- Models are NOT embedded: they download at runtime as the `grammar` component of the dictation package (see MODEL_PACKAGES.md), load via `commit_from_file` from `models/grammar/`, and the stage silently no-ops until downloaded. `init_global()` retries cheaply when absent, so grammar activates on the first pipeline run after the download — no restart
+- Source model files in `data/grammar/` are gitignored (except config + KV weights); they exist for fine-tuning and R2 staging (`r2-staging/`), not for builds. After a fresh checkout regenerate with: `fetch_blog_corpus.py` -> `make_grammar_pairs.py` -> `finetune_grammar_router.py` + `finetune_grammar_t5.py` -> `export_finetuned_grammar.py`, then copy the exports over the 0.0.1 names. `download_t5_grammar_onnx.py` restores the STOCK models only (placebo-grade on ASR output — use for baselines, not shipping)
 - Measure any model change with `scripts/grammar_bench.py` (sentence-level) and `scripts/stt_grammar_probe.py` (round-trip article probe)
-- Models embedded at compile time via `include_bytes!()`
 
 ### Snippets (`src-tauri/src/snippets.rs`)
 
@@ -71,7 +70,7 @@ Text expansion system for common phrases:
 - `dictation.rs` - `DictationManager` orchestrates record/transcribe/deliver cycle. Holds `Mutex<Option<AudioRecorder>>` and `Mutex<Option<Transcriber>>`, both lazily initialized on Android
 - `transcribe.rs` - Dedicated worker thread owns the ONNX recognizer. Sends requests via mpsc channel. On Android, uses `fork()` for process isolation against native crashes
 - `recorder.rs` - Audio capture with VAD-based segmentation. Resamples from device rate to 16kHz. Prefill buffer (300ms) prevents word clipping
-- `models.rs` - `ModelManager` with built-in registry of Whisper/Parakeet models. Handles download, deletion, active model selection. `first_downloaded_model()` respects active selection
+- `models.rs` - `ModelManager` with a manifest-derived registry (remote R2 manifest -> disk cache -> embedded `data/model-manifest.json` snapshot; one JSON shape, see MODEL_PACKAGES.md). Dictation is one package (Parakeet v3: INT8 on Android, fp32 on desktop, + VAD + grammar components with per-component versions); voices are a manifest-driven list. Handles download, deletion, package install/update (`install_dictation`), storage accounting (`storage_summary`/`storage_clear`). `first_downloaded_model()` prefers the platform-appropriate variant
 - `coordinator.rs` - State machine for shortcut debouncing (30ms window). Serializes press/release into Start/Stop/Cancel commands
 - `android_ime.rs` - JNI exports for `VerbaAccessibilityService`. Has its own `OVERLAY_STATE` with separate recorder/transcriber instances. Writes to same history file but via separate `History` instance
 - `history.rs` - JSON persistence. `list()` reloads from disk each call to pick up entries from IME path
@@ -87,7 +86,7 @@ Desktop-only deps (arboard, enigo, global-shortcut) gated with `cfg(not(target_o
 
 Three files: `index.html`, `main.js`, `styles.css`. No build step, no framework. Uses Tailwind CDK + Material Symbols icons. Communicates with Rust via `window.__TAURI__.core.invoke()` and `window.__TAURI__.event.listen()`. Tauri embeds these at compile time via `generate_context!()`.
 
-Navigation: collapsible sidebar (hamburger menu) with pages for History, Models, Audio, Snippets, Settings, Debug.
+Navigation: Speak/Listen mode pill in the header; bottom nav per mode (speak: History, Snippets, Settings, More; listen: Library, Feeds, Add, Voices, More). Settings is one shared page grouped into General (Appearance, Updates, Storage) / Speak / Listen sections. There is no Models page — the dictation package installs from Settings > Updates. Android back gestures route through `window.verbaHandleBack()` (main.js) via MainActivity's OnBackPressedCallback.
 
 ### Android overlay visibility (`VerbaAccessibilityService.kt`)
 
