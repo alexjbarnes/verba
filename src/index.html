@@ -178,6 +178,16 @@
 
   <!-- History tab -->
   <div id="history" class="tab-panel flex-1 overflow-y-auto px-5 py-6 flex flex-col">
+    <!-- Dismissable nudge to install the dictation package. Visibility driven by
+         packages_status.dictation.state in main.js (renderDictationBanner). -->
+    <div id="dictation-banner" class="hidden items-center gap-3 bg-primary/10 border border-primary/20 rounded-xl px-4 py-3 mb-4">
+      <span class="material-symbols-outlined text-primary text-xl shrink-0">cloud_download</span>
+      <p class="text-xs text-on-surface flex-1">Dictation models not downloaded</p>
+      <button id="dictation-banner-action" class="text-xs font-semibold text-primary shrink-0 cursor-pointer">Settings</button>
+      <button id="dictation-banner-dismiss" class="text-on-surface-variant/60 hover:text-on-surface shrink-0 cursor-pointer p-1">
+        <span class="material-symbols-outlined text-base">close</span>
+      </button>
+    </div>
     <div class="flex items-center justify-between mb-4">
       <div>
         <h2 class="text-lg font-bold tracking-tight text-on-surface">History</h2>
@@ -196,49 +206,6 @@
     </div>
   </div>
 
-  <!-- Models tab -->
-  <div id="models" class="tab-panel hidden flex-1 overflow-y-auto px-5 py-6 space-y-8">
-    <!-- Whisper section -->
-    <section>
-      <div class="flex items-center gap-2.5 mb-4">
-        <div class="w-1 h-5 bg-primary rounded-full"></div>
-        <h3 class="text-base font-bold tracking-tight text-on-surface">Whisper</h3>
-        <span class="text-xs text-on-surface-variant">OpenAI</span>
-      </div>
-      <div id="whisper-models" class="bg-surface-container-low rounded-xl overflow-hidden divide-y divide-outline-variant/20"></div>
-    </section>
-
-    <!-- Parakeet section -->
-    <section>
-      <div class="flex items-center gap-2.5 mb-4">
-        <div class="w-1 h-5 bg-secondary rounded-full"></div>
-        <h3 class="text-base font-bold tracking-tight text-on-surface">Parakeet</h3>
-        <span class="text-xs text-on-surface-variant">NVIDIA NeMo</span>
-      </div>
-      <div id="parakeet-models" class="bg-surface-container-low rounded-xl overflow-hidden divide-y divide-outline-variant/20"></div>
-    </section>
-
-    <!-- Zipformer section -->
-    <section>
-      <div class="flex items-center gap-2.5 mb-4">
-        <div class="w-1 h-5 bg-tertiary rounded-full"></div>
-        <h3 class="text-base font-bold tracking-tight text-on-surface">Zipformer</h3>
-        <span class="text-xs text-on-surface-variant">k2/icefall</span>
-      </div>
-      <div id="zipformer-models" class="bg-surface-container-low rounded-xl overflow-hidden divide-y divide-outline-variant/20"></div>
-    </section>
-
-    <!-- Conformer-CTC section -->
-    <section>
-      <div class="flex items-center gap-2.5 mb-4">
-        <div class="w-1 h-5 bg-emerald-400 rounded-full"></div>
-        <h3 class="text-base font-bold tracking-tight text-on-surface">Conformer-CTC</h3>
-        <span class="text-xs text-on-surface-variant">NVIDIA NeMo</span>
-      </div>
-      <div id="conformer-models" class="bg-surface-container-low rounded-xl overflow-hidden divide-y divide-outline-variant/20"></div>
-    </section>
-  </div>
-
   <!-- Audio tab -->
   <div id="audio" class="tab-panel hidden flex-1 overflow-y-auto px-5 py-6">
     <div class="mb-6">
@@ -254,90 +221,139 @@
   </div>
 
   <!-- General tab -->
-  <div id="general" class="tab-panel hidden flex-1 overflow-y-auto px-5 py-6 space-y-6">
-    <!-- Dictation section -->
-    <section>
-      <div class="mb-4">
-        <h2 class="text-lg font-bold tracking-tight text-on-surface">Dictation</h2>
-      </div>
-      <div class="bg-surface-container-low rounded-xl p-5 space-y-4">
-        <div id="hotkey-row" class="hidden">
-          <div class="flex items-center justify-between">
-            <div>
-              <label class="text-sm font-medium text-on-surface">Hotkey</label>
-              <p class="text-xs text-on-surface-variant mt-0.5">Press and hold to dictate</p>
+  <div id="general" class="tab-panel hidden flex-1 overflow-y-auto px-5 py-6 space-y-8">
+
+    <!-- General group: Appearance, Updates, Storage -->
+    <div>
+      <p class="text-xs font-semibold text-on-surface-variant uppercase tracking-wider mb-3">General</p>
+      <div class="space-y-6">
+        <!-- Appearance section -->
+        <section>
+          <div class="mb-4">
+            <h2 class="text-lg font-bold tracking-tight text-on-surface">Appearance</h2>
+          </div>
+          <div class="bg-surface-container-low rounded-xl p-5">
+            <div class="flex items-center justify-between">
+              <div>
+                <label class="text-sm font-medium text-on-surface">Theme</label>
+                <p class="text-xs text-on-surface-variant mt-0.5">Choose the app's color scheme</p>
+              </div>
+              <select id="theme-select" class="bg-surface-container-highest border border-outline-variant/30 rounded-lg pl-3 pr-8 py-1.5 text-sm text-on-surface focus:outline-none focus:ring-1 focus:ring-primary/50 transition-colors cursor-pointer">
+                <option value="dark">Dark</option>
+                <option value="light">Light</option>
+                <option value="system">System</option>
+              </select>
             </div>
-            <span class="font-mono text-xs text-on-surface-variant bg-surface-container-highest border border-outline-variant/30 px-3 py-1.5 rounded-lg">&#8984; &#8679; Space</span>
           </div>
-          <div class="border-t border-outline-variant/20 mt-4"></div>
-        </div>
-        <div class="flex items-center justify-between">
-          <div>
-            <label class="text-sm font-medium text-on-surface">Haptic Feedback</label>
-            <p class="text-xs text-on-surface-variant mt-0.5">Vibrate on recording start and stop</p>
-          </div>
-          <label class="relative inline-flex items-center cursor-pointer">
-            <input id="cfg-haptic" type="checkbox" checked class="sr-only peer" />
-            <div class="w-9 h-5 bg-outline-variant/40 rounded-full peer peer-checked:bg-primary transition-colors after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:translate-x-full"></div>
-          </label>
-        </div>
-      </div>
-    </section>
+        </section>
 
-    <!-- Vocabulary section -->
-    <section>
-      <div class="mb-4">
-        <h2 class="text-lg font-bold tracking-tight text-on-surface">Vocabulary</h2>
-        <p class="text-xs text-on-surface-variant mt-0.5">Correct words the model consistently gets wrong</p>
-      </div>
-      <div class="bg-surface-container-low rounded-xl p-5 space-y-4">
-        <div id="vocab-list" class="space-y-2"></div>
-        <div id="vocab-empty" class="text-xs text-on-surface-variant hidden">No corrections added yet.</div>
-        <div class="border-t border-outline-variant/20 pt-4">
-          <p class="text-xs font-semibold text-on-surface-variant uppercase tracking-wider mb-3">Add correction</p>
-          <p class="text-xs text-on-surface-variant/60 mb-3">Matching is case-insensitive, but the replacement is used exactly as typed. Type the replacement as you want it to appear in your text.</p>
-          <div class="space-y-2">
-            <input id="vocab-from" type="text" placeholder="Heard (e.g. maine)" class="w-full bg-surface-container-highest border border-outline-variant/30 rounded-lg px-3 py-2 text-sm text-on-surface placeholder:text-on-surface-variant/50 focus:outline-none focus:ring-1 focus:ring-primary/50 transition-colors" />
-            <input id="vocab-to" type="text" placeholder="Intended (e.g. main)" class="w-full bg-surface-container-highest border border-outline-variant/30 rounded-lg px-3 py-2 text-sm text-on-surface placeholder:text-on-surface-variant/50 focus:outline-none focus:ring-1 focus:ring-primary/50 transition-colors" />
-            <button id="vocab-add-btn" class="w-full bg-primary text-on-primary text-xs font-bold px-3 py-2.5 rounded-lg hover:brightness-110 transition-all active:scale-[0.98] cursor-pointer">Add</button>
+        <!-- Updates section: one Dictation-models row (see MODEL_PACKAGES.md) -->
+        <section>
+          <div class="mb-4">
+            <h2 class="text-lg font-bold tracking-tight text-on-surface">Updates</h2>
           </div>
-        </div>
-      </div>
-    </section>
-
-    <!-- Appearance section -->
-    <section>
-      <div class="mb-4">
-        <h2 class="text-lg font-bold tracking-tight text-on-surface">Appearance</h2>
-      </div>
-      <div class="bg-surface-container-low rounded-xl p-5">
-        <div class="flex items-center justify-between">
-          <div>
-            <label class="text-sm font-medium text-on-surface">Theme</label>
-            <p class="text-xs text-on-surface-variant mt-0.5">Choose the app's color scheme</p>
+          <div class="bg-surface-container-low rounded-xl p-5 space-y-4">
+            <div class="flex items-center justify-between gap-3">
+              <div class="min-w-0">
+                <label class="text-sm font-medium text-on-surface">Dictation models</label>
+                <p id="pkg-dictation-status" class="text-xs text-on-surface-variant mt-0.5">Checking…</p>
+              </div>
+              <button id="pkg-dictation-btn" class="text-xs font-semibold px-4 py-2 bg-primary text-on-primary rounded-lg hover:brightness-110 transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed shrink-0">Download</button>
+            </div>
+            <div id="pkg-dictation-progress" class="hidden">
+              <div class="progress-bar"><div id="pkg-dictation-fill" class="progress-bar-fill" style="width:0%"></div></div>
+            </div>
+            <div class="border-t border-outline-variant/20 pt-4">
+              <button id="check-updates-btn" class="w-full text-xs font-semibold px-3 py-2.5 border border-outline-variant/30 text-on-surface rounded-lg hover:bg-surface-container-highest transition-colors cursor-pointer">Check for updates</button>
+            </div>
           </div>
-          <select id="theme-select" class="bg-surface-container-highest border border-outline-variant/30 rounded-lg pl-3 pr-8 py-1.5 text-sm text-on-surface focus:outline-none focus:ring-1 focus:ring-primary/50 transition-colors cursor-pointer">
-            <option value="dark">Dark</option>
-            <option value="light">Light</option>
-            <option value="system">System</option>
-          </select>
-        </div>
-      </div>
-    </section>
+        </section>
 
-    <!-- Reading section -->
-    <section>
-      <div class="mb-4">
-        <h2 class="text-lg font-bold tracking-tight text-on-surface">Reading</h2>
+        <!-- Storage section: byte totals per category, populated by loadStorage() -->
+        <section>
+          <div class="mb-4">
+            <h2 class="text-lg font-bold tracking-tight text-on-surface">Storage</h2>
+          </div>
+          <div id="storage-list" class="bg-surface-container-low rounded-xl overflow-hidden divide-y divide-outline-variant/20"></div>
+        </section>
       </div>
-      <div class="bg-surface-container-low rounded-xl p-5">
-        <div class="flex items-center justify-between mb-2">
-          <label class="text-sm font-medium text-on-surface">Reading text size</label>
-          <span id="font-scale-label" class="text-xs font-mono text-on-surface-variant">100%</span>
-        </div>
-        <input id="font-scale-range" type="range" min="85" max="140" step="5" value="100" class="w-full accent-primary" />
+    </div>
+
+    <!-- Speak group: Dictation, Vocabulary -->
+    <div>
+      <p class="text-xs font-semibold text-on-surface-variant uppercase tracking-wider mb-3">Speak</p>
+      <div class="space-y-6">
+        <!-- Dictation section -->
+        <section>
+          <div class="mb-4">
+            <h2 class="text-lg font-bold tracking-tight text-on-surface">Dictation</h2>
+          </div>
+          <div class="bg-surface-container-low rounded-xl p-5 space-y-4">
+            <div id="hotkey-row" class="hidden">
+              <div class="flex items-center justify-between">
+                <div>
+                  <label class="text-sm font-medium text-on-surface">Hotkey</label>
+                  <p class="text-xs text-on-surface-variant mt-0.5">Press and hold to dictate</p>
+                </div>
+                <span class="font-mono text-xs text-on-surface-variant bg-surface-container-highest border border-outline-variant/30 px-3 py-1.5 rounded-lg">&#8984; &#8679; Space</span>
+              </div>
+              <div class="border-t border-outline-variant/20 mt-4"></div>
+            </div>
+            <div class="flex items-center justify-between">
+              <div>
+                <label class="text-sm font-medium text-on-surface">Haptic Feedback</label>
+                <p class="text-xs text-on-surface-variant mt-0.5">Vibrate on recording start and stop</p>
+              </div>
+              <label class="relative inline-flex items-center cursor-pointer">
+                <input id="cfg-haptic" type="checkbox" checked class="sr-only peer" />
+                <div class="w-9 h-5 bg-outline-variant/40 rounded-full peer peer-checked:bg-primary transition-colors after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:translate-x-full"></div>
+              </label>
+            </div>
+          </div>
+        </section>
+
+        <!-- Vocabulary section -->
+        <section>
+          <div class="mb-4">
+            <h2 class="text-lg font-bold tracking-tight text-on-surface">Vocabulary</h2>
+            <p class="text-xs text-on-surface-variant mt-0.5">Correct words the model consistently gets wrong</p>
+          </div>
+          <div class="bg-surface-container-low rounded-xl p-5 space-y-4">
+            <div id="vocab-list" class="space-y-2"></div>
+            <div id="vocab-empty" class="text-xs text-on-surface-variant hidden">No corrections added yet.</div>
+            <div class="border-t border-outline-variant/20 pt-4">
+              <p class="text-xs font-semibold text-on-surface-variant uppercase tracking-wider mb-3">Add correction</p>
+              <p class="text-xs text-on-surface-variant/60 mb-3">Matching is case-insensitive, but the replacement is used exactly as typed. Type the replacement as you want it to appear in your text.</p>
+              <div class="space-y-2">
+                <input id="vocab-from" type="text" placeholder="Heard (e.g. maine)" class="w-full bg-surface-container-highest border border-outline-variant/30 rounded-lg px-3 py-2 text-sm text-on-surface placeholder:text-on-surface-variant/50 focus:outline-none focus:ring-1 focus:ring-primary/50 transition-colors" />
+                <input id="vocab-to" type="text" placeholder="Intended (e.g. main)" class="w-full bg-surface-container-highest border border-outline-variant/30 rounded-lg px-3 py-2 text-sm text-on-surface placeholder:text-on-surface-variant/50 focus:outline-none focus:ring-1 focus:ring-primary/50 transition-colors" />
+                <button id="vocab-add-btn" class="w-full bg-primary text-on-primary text-xs font-bold px-3 py-2.5 rounded-lg hover:brightness-110 transition-all active:scale-[0.98] cursor-pointer">Add</button>
+              </div>
+            </div>
+          </div>
+        </section>
       </div>
-    </section>
+    </div>
+
+    <!-- Listen group: Reading -->
+    <div>
+      <p class="text-xs font-semibold text-on-surface-variant uppercase tracking-wider mb-3">Listen</p>
+      <div class="space-y-6">
+        <!-- Reading section -->
+        <section>
+          <div class="mb-4">
+            <h2 class="text-lg font-bold tracking-tight text-on-surface">Reading</h2>
+          </div>
+          <div class="bg-surface-container-low rounded-xl p-5">
+            <div class="flex items-center justify-between mb-2">
+              <label class="text-sm font-medium text-on-surface">Reading text size</label>
+              <span id="font-scale-label" class="text-xs font-mono text-on-surface-variant">100%</span>
+            </div>
+            <input id="font-scale-range" type="range" min="85" max="140" step="5" value="100" class="w-full accent-primary" />
+          </div>
+        </section>
+      </div>
+    </div>
 
   </div>
 
@@ -721,7 +737,16 @@
     <div id="queue-sheet-overlay" class="absolute inset-0 bg-black/50"></div>
     <div class="absolute bottom-0 left-0 right-0 bg-surface-container-high rounded-t-2xl shadow-xl border-t border-outline-variant/20 max-h-[70vh] flex flex-col" style="padding-bottom: max(1.25rem, env(safe-area-inset-bottom));">
       <div class="w-10 h-1 bg-outline-variant/40 rounded-full mx-auto mt-3 mb-4 shrink-0"></div>
-      <p class="text-sm font-bold text-on-surface px-5 mb-2 shrink-0">Queue</p>
+      <div class="flex items-center justify-between px-5 mb-2 shrink-0">
+        <p class="text-sm font-bold text-on-surface">Queue</p>
+        <label class="flex items-center gap-2 cursor-pointer">
+          <span class="text-xs font-medium text-on-surface-variant">Autoplay</span>
+          <span class="relative inline-flex items-center">
+            <input id="queue-autoplay" type="checkbox" checked class="sr-only peer" />
+            <div class="w-9 h-5 bg-outline-variant/40 rounded-full peer peer-checked:bg-primary transition-colors after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:translate-x-full"></div>
+          </span>
+        </label>
+      </div>
       <div id="queue-sheet-list" class="overflow-y-auto px-3 pb-2"></div>
     </div>
   </div>

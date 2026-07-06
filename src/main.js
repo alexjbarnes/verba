@@ -65,7 +65,6 @@ const BOTTOM_NAV = {
   speak: [
     { tab: 'history', label: 'History', icon: 'history' },
     { tab: 'snippets', label: 'Snippets', icon: 'sticky_note_2' },
-    { tab: 'models', label: 'Models', icon: 'layers' },
     { tab: 'general', label: 'Settings', icon: 'settings' },
     { overflow: true, label: 'More', icon: 'more_horiz' },
   ],
@@ -88,9 +87,10 @@ const moreSheet = document.getElementById('nav-more-sheet');
 
 // Per-tab data refreshers, run when a tab is shown.
 const TAB_LOADERS = {
-  history: () => loadHistory(),
-  models: () => loadModels(),
-  general: () => loadVocab(),
+  // Re-check the dictation-package banner condition every time History is
+  // shown, not just at boot (state changes when the user installs it).
+  history: () => { loadHistory(); loadPackagesStatus(); },
+  general: () => { loadVocab(); loadPackagesStatus(); loadStorage(); },
   snippets: () => loadSnippets(),
   library: () => loadLibrary(),
   feeds: () => loadFeeds(),
@@ -508,120 +508,158 @@ document.getElementById('clear-reports').addEventListener('click', async () => {
   }
 });
 
-// ── Models tab ──
+// ── Dictation package status (Settings > Updates, History banner) ──
+//
+// One package covers the ASR model, VAD, and grammar correction (see
+// MODEL_PACKAGES.md) — packages_status() is the source of truth for both the
+// Settings row and the History banner nudging an uninstalled user to fetch it.
 
-function renderModelRow(model) {
-  const isActive = model.status === 'active';
-  const isDownloaded = model.status === 'downloaded';
-  const isDownloading = model.status === 'downloading';
-
-  const deleteBtn = `<button class="del-btn text-on-surface-variant hover:text-error transition-colors cursor-pointer p-1.5 rounded-lg hover:bg-error/10" data-id="${model.id}" title="Delete"><span class="material-symbols-outlined text-base">delete</span></button>`;
-
-  let actionHtml;
-  if (isActive) {
-    actionHtml = `<span class="text-xs text-primary font-semibold px-3 py-1.5 bg-primary/10 rounded-lg">Active</span>${deleteBtn}`;
-  } else if (isDownloaded) {
-    actionHtml = `<button class="use-btn text-xs font-semibold px-3 py-1.5 bg-primary text-on-primary rounded-lg hover:brightness-110 transition-all cursor-pointer" data-id="${model.id}">Use</button>${deleteBtn}`;
-  } else if (isDownloading) {
-    const pct = Math.round(model.progress * 100);
-    actionHtml = `
-      <div class="w-28" id="progress-${model.id}">
-        <div class="progress-bar"><div class="progress-bar-fill" style="width:${pct}%"></div></div>
-        <span class="text-[10px] text-on-surface-variant mt-1 block text-right">${pct}%</span>
-      </div>`;
-  } else {
-    actionHtml = `<button class="dl-btn text-xs font-semibold px-3 py-1.5 border border-outline-variant/30 text-on-surface rounded-lg hover:bg-surface-container-highest transition-colors cursor-pointer" data-id="${model.id}">Download</button>`;
-  }
-
-  return `
-    <div class="flex items-center justify-between px-4 py-3" data-model-id="${model.id}">
-      <div class="flex items-center gap-3 min-w-0 flex-1 mr-4">
-        <span class="material-symbols-outlined text-lg ${isActive ? 'text-primary' : 'text-on-surface-variant'}">layers</span>
-        <div class="min-w-0">
-          <div class="text-sm font-medium ${isActive ? 'text-primary' : 'text-on-surface'}">${model.name}</div>
-          <div class="text-xs text-on-surface-variant mt-0.5">${model.desc}</div>
-        </div>
-      </div>
-      <div class="flex items-center gap-3 shrink-0">
-        <span class="text-xs font-mono text-on-surface-variant">${model.size}</span>
-        ${actionHtml}
-      </div>
-    </div>`;
+// Human-readable byte size (binary units).
+function fmtBytes(bytes) {
+  if (!bytes || bytes <= 0) return '0 MB';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let n = bytes, i = 0;
+  while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+  return `${n.toFixed(n < 10 && i > 0 ? 1 : 0)} ${units[i]}`;
 }
 
-async function loadModels() {
-  const models = await invoke('list_models');
+let pkgStatus = null; // last packages_status()/packages_check_updates() result
+// Session-only: hides the History banner once tapped even if the package is
+// still missing on the next tab load. Reset on a fresh app launch.
+let dictationBannerDismissed = false;
 
-  document.getElementById('whisper-models').innerHTML = models
-    .filter(m => m.engine === 'whisper')
-    .map(renderModelRow)
+function pkgDictationStatusLine(d) {
+  if (d.state === 'downloading') return `Downloading… ${Math.round((d.progress || 0) * 100)}%`;
+  if (d.state === 'installed') return `Installed - v${d.installed_version}`;
+  if (d.state === 'update_available') return `Update available - v${d.installed_version} -> v${d.available_version}`;
+  return `Not downloaded - ${fmtBytes(d.pending_bytes)}`;
+}
+
+function renderPkgDictation() {
+  if (!pkgStatus) return;
+  const d = pkgStatus.dictation;
+  const btn = document.getElementById('pkg-dictation-btn');
+  const progress = document.getElementById('pkg-dictation-progress');
+  document.getElementById('pkg-dictation-status').textContent = pkgDictationStatusLine(d);
+  progress.classList.toggle('hidden', d.state !== 'downloading');
+  if (d.state === 'downloading') {
+    document.getElementById('pkg-dictation-fill').style.width = `${Math.round((d.progress || 0) * 100)}%`;
+    btn.disabled = true;
+    btn.textContent = `${Math.round((d.progress || 0) * 100)}%`;
+  } else if (d.state === 'installed') {
+    btn.disabled = true;
+    btn.textContent = 'Installed';
+  } else {
+    btn.disabled = false;
+    btn.textContent = d.state === 'update_available' ? 'Update' : 'Download';
+  }
+}
+
+function renderDictationBanner() {
+  const banner = document.getElementById('dictation-banner');
+  if (!banner) return;
+  const show = !!pkgStatus && pkgStatus.dictation.state === 'not_installed' && !dictationBannerDismissed;
+  banner.classList.toggle('hidden', !show);
+  banner.classList.toggle('flex', show);
+}
+
+async function loadPackagesStatus() {
+  try {
+    pkgStatus = await invoke('packages_status');
+    renderPkgDictation();
+    renderDictationBanner();
+  } catch (err) {
+    console.error('Failed to load package status:', err);
+  }
+}
+
+document.getElementById('pkg-dictation-btn').addEventListener('click', async () => {
+  const btn = document.getElementById('pkg-dictation-btn');
+  btn.disabled = true;
+  try {
+    await invoke('package_install_dictation');
+  } catch (err) {
+    showToast('Install failed: ' + err);
+  }
+  await loadPackagesStatus();
+});
+
+document.getElementById('check-updates-btn').addEventListener('click', async () => {
+  const btn = document.getElementById('check-updates-btn');
+  btn.disabled = true;
+  btn.textContent = 'Checking…';
+  try {
+    pkgStatus = await invoke('packages_check_updates');
+    renderPkgDictation();
+    renderDictationBanner();
+    if (pkgStatus.check_error) showToast('Check failed: ' + pkgStatus.check_error);
+    else if (pkgStatus.dictation.state === 'update_available') showToast('Update available');
+    else showToast('Up to date');
+    // The manifest refetch also covers the voices list.
+    if (!document.getElementById('voices').classList.contains('hidden')) loadVoices();
+  } catch (err) {
+    showToast('Check failed: ' + err);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Check for updates';
+  }
+});
+
+document.getElementById('dictation-banner-dismiss').addEventListener('click', () => {
+  dictationBannerDismissed = true;
+  renderDictationBanner();
+});
+document.getElementById('dictation-banner-action').addEventListener('click', () => {
+  navigateTo('general');
+});
+
+// ── Storage (Settings > General) ──
+
+const STORAGE_ROWS = [
+  { key: 'dictation', label: 'Dictation models', category: 'dictation',
+    warn: 'Clear downloaded dictation models? Voice typing and grammar correction stop working until you download them again.' },
+  { key: 'voices', label: 'Voices', category: 'voices',
+    warn: 'Clearing voices deletes downloaded voice models; they can be re-downloaded.' },
+  { key: 'custom_voices', label: 'Custom voices', category: null },
+  { key: 'tts_cache', label: 'Generated audio cache', category: 'tts_cache',
+    warn: 'Clear the generated audio cache? Playback regenerates audio as needed, using more data next time you listen.' },
+  { key: 'unclaimed', label: 'Legacy files', category: 'unclaimed',
+    warn: "Delete files left over from removed models? Nothing on this device uses them." },
+];
+
+async function loadStorage() {
+  let summary;
+  try {
+    summary = await invoke('storage_summary');
+  } catch (err) {
+    console.error('Failed to load storage summary:', err);
+    return;
+  }
+  const list = document.getElementById('storage-list');
+  list.innerHTML = STORAGE_ROWS
+    .filter(r => r.key !== 'unclaimed' || summary[r.key] > 0)
+    .map(r => `
+      <div class="flex items-center justify-between gap-3 px-4 py-3">
+        <div class="min-w-0">
+          <p class="text-sm font-medium text-on-surface">${r.label}</p>
+          <p class="text-xs text-on-surface-variant mt-0.5">${fmtBytes(summary[r.key])}</p>
+        </div>
+        ${r.category ? `<button class="storage-clear-btn shrink-0 text-xs font-semibold text-on-surface-variant hover:text-error transition-colors px-3 py-1.5 rounded-lg hover:bg-error/10 cursor-pointer" data-category="${r.category}">Clear</button>` : ''}
+      </div>`)
     .join('');
-
-  document.getElementById('parakeet-models').innerHTML = models
-    .filter(m => m.engine === 'parakeet')
-    .map(renderModelRow)
-    .join('');
-
-  document.getElementById('zipformer-models').innerHTML = models
-    .filter(m => m.engine === 'zipformer')
-    .map(renderModelRow)
-    .join('');
-
-  document.getElementById('conformer-models').innerHTML = models
-    .filter(m => m.engine === 'conformer_ctc')
-    .map(renderModelRow)
-    .join('');
-
-  // Attach download button handlers
-  document.querySelectorAll('.dl-btn').forEach(btn => {
+  list.querySelectorAll('.storage-clear-btn').forEach(btn => {
     btn.addEventListener('click', async () => {
-      const id = btn.dataset.id;
-      btn.disabled = true;
-      btn.textContent = 'Starting...';
-      btn.classList.add('opacity-50');
-
+      const row = STORAGE_ROWS.find(r => r.category === btn.dataset.category);
+      if (!await showConfirm(row.warn, { okLabel: 'Clear' })) return;
       try {
-        await invoke('download_model', { id });
+        const freed = await invoke('storage_clear', { category: row.category });
+        showToast(`Freed ${fmtBytes(freed)}`);
+        await loadStorage();
+        if (row.category === 'dictation') await loadPackagesStatus();
+        if (row.category === 'voices' && !document.getElementById('voices').classList.contains('hidden')) loadVoices();
       } catch (err) {
-        console.error('Download failed:', err);
-        showToast(`Download failed: ${err}`);
+        showToast('Clear failed: ' + err);
       }
-
-      // Refresh model list after download completes or fails
-      await loadModels();
-    });
-  });
-
-  // Attach use button handlers
-  document.querySelectorAll('.use-btn').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      if (!engineReady) {
-        showToast('Engine still loading...');
-        return;
-      }
-      const id = btn.dataset.id;
-      try {
-        await invoke('switch_model', { id });
-        await loadModels();
-      } catch (err) {
-        console.error('Switch failed:', err);
-        showToast('Failed to switch model: ' + err);
-      }
-    });
-  });
-
-  // Attach delete button handlers
-  document.querySelectorAll('.del-btn').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      const id = btn.dataset.id;
-      if (!await showConfirm(`Delete model ${id}?`)) return;
-      try {
-        await invoke('delete_model', { id });
-      } catch (err) {
-        console.error('Delete failed:', err);
-        showToast(`Failed to delete model: ${err}`);
-      }
-      await loadModels();
     });
   });
 }
@@ -645,33 +683,23 @@ listen('download-progress', (event) => {
     el.textContent = `${pct}%`;
   });
 
-  const container = document.querySelector(`[data-model-id="${id}"]`);
-  if (!container) return;
-
-  // Replace button with progress bar if not already showing
-  let progressEl = document.getElementById(`progress-${id}`);
-  if (!progressEl) {
-    const actionArea = container.querySelector('.dl-btn, .use-btn');
-    if (actionArea) {
-      const wrapper = document.createElement('div');
-      wrapper.className = 'w-28';
-      wrapper.id = `progress-${id}`;
-      wrapper.innerHTML = `
-        <div class="progress-bar"><div class="progress-bar-fill" style="width:${pct}%"></div></div>
-        <span class="text-[10px] text-on-surface-variant mt-1 block text-right">${pct}%</span>`;
-      actionArea.replaceWith(wrapper);
-      progressEl = wrapper;
-    }
-  } else {
-    const fill = progressEl.querySelector('.progress-bar-fill');
-    const label = progressEl.querySelector('span');
-    if (fill) fill.style.width = `${pct}%`;
-    if (label) label.textContent = `${pct}%`;
+  // Settings > Updates: the dictation package's own progress bar/button.
+  if (id === 'pkg-dictation') {
+    document.getElementById('pkg-dictation-progress').classList.remove('hidden');
+    document.getElementById('pkg-dictation-fill').style.width = `${pct}%`;
+    document.getElementById('pkg-dictation-status').textContent = `Downloading… ${pct}%`;
+    const btn = document.getElementById('pkg-dictation-btn');
+    btn.disabled = true;
+    btn.textContent = `${pct}%`;
   }
 });
 
-listen('download-complete', async () => {
-  await loadModels();
+listen('download-complete', async (event) => {
+  if (event.payload?.id === 'pkg-dictation') {
+    await loadPackagesStatus();
+    showToast('Dictation models installed');
+    return;
+  }
   await updateTtsPanel();
   if (!document.getElementById('voices').classList.contains('hidden')) loadVoices();
 });
@@ -688,14 +716,12 @@ listen('model-loaded', (event) => {
   if (!event.payload?.native_toast) {
     showToast(`Model ready: ${event.payload?.id || ''}`);
   }
-  loadModels();
 });
 
 listen('model-error', (event) => {
   if (!event.payload?.native_toast) {
     showToast('Model load failed: ' + (event.payload?.error || 'unknown error'));
   }
-  loadModels();
 });
 
 // ── Audio tab ──
@@ -2938,6 +2964,22 @@ function saveQueue(q) {
   try { localStorage.setItem('verba-queue', JSON.stringify(q)); } catch (_) { /* storage unavailable */ }
 }
 
+// Whether finishing an item auto-plays the next queued one. Defaults on;
+// only an explicit '0' (the user flipped the switch) turns it off.
+function loadQueueAutoplay() {
+  try {
+    return localStorage.getItem('verba-queue-autoplay') !== '0';
+  } catch (_) {
+    return true;
+  }
+}
+
+function saveQueueAutoplay(on) {
+  try { localStorage.setItem('verba-queue-autoplay', on ? '1' : '0'); } catch (_) { /* storage unavailable */ }
+}
+
+let queueAutoplay = loadQueueAutoplay();
+
 function renderQueueBadge() {
   const badge = document.getElementById('queue-badge');
   if (!badge) return;
@@ -2982,8 +3024,17 @@ function renderQueueSheet() {
     list.innerHTML = '<p class="text-sm text-on-surface-variant px-3 py-6 text-center">Queue is empty</p>';
     return;
   }
+  const last = q.length - 1;
   list.innerHTML = q.map((entry, i) => `
     <div class="flex items-center gap-2 px-3 py-2.5" data-i="${i}">
+      <div class="flex flex-col shrink-0 -my-1">
+        <button class="queue-row-up p-0.5 text-on-surface-variant hover:text-primary transition-colors cursor-pointer disabled:opacity-25 disabled:pointer-events-none" data-i="${i}" ${i === 0 ? 'disabled' : ''}>
+          <span class="material-symbols-outlined text-base">keyboard_arrow_up</span>
+        </button>
+        <button class="queue-row-down p-0.5 text-on-surface-variant hover:text-primary transition-colors cursor-pointer disabled:opacity-25 disabled:pointer-events-none" data-i="${i}" ${i === last ? 'disabled' : ''}>
+          <span class="material-symbols-outlined text-base">keyboard_arrow_down</span>
+        </button>
+      </div>
       <button class="queue-row-play min-w-0 flex-1 text-left text-sm text-on-surface truncate cursor-pointer hover:text-primary transition-colors">${escapeHtml(queueEntryLabel(entry))}</button>
       <button class="queue-row-remove shrink-0 text-on-surface-variant hover:text-error transition-colors p-1 cursor-pointer" data-i="${i}">
         <span class="material-symbols-outlined text-lg">close</span>
@@ -2994,17 +3045,37 @@ function renderQueueSheet() {
 
 function openQueueSheet() {
   renderQueueSheet();
+  const autoplayCb = document.getElementById('queue-autoplay');
+  if (autoplayCb) autoplayCb.checked = queueAutoplay;
   queueSheet.classList.remove('hidden');
 }
 function closeQueueSheet() { queueSheet.classList.add('hidden'); }
 
 document.getElementById('queue-btn').addEventListener('click', openQueueSheet);
 document.getElementById('queue-sheet-overlay').addEventListener('click', closeQueueSheet);
+document.getElementById('queue-autoplay').addEventListener('change', (e) => {
+  queueAutoplay = e.target.checked;
+  saveQueueAutoplay(queueAutoplay);
+});
 document.getElementById('queue-sheet-list').addEventListener('click', (e) => {
   if (e.target.closest('#queue-clear-btn')) {
     saveQueue([]);
     renderQueueBadge();
     renderQueueSheet();
+    return;
+  }
+  const upBtn = e.target.closest('.queue-row-up');
+  if (upBtn) {
+    const i = Number(upBtn.dataset.i);
+    const q = loadQueue();
+    if (i > 0) { [q[i - 1], q[i]] = [q[i], q[i - 1]]; saveQueue(q); renderQueueSheet(); }
+    return;
+  }
+  const downBtn = e.target.closest('.queue-row-down');
+  if (downBtn) {
+    const i = Number(downBtn.dataset.i);
+    const q = loadQueue();
+    if (i < q.length - 1) { [q[i + 1], q[i]] = [q[i], q[i + 1]]; saveQueue(q); renderQueueSheet(); }
     return;
   }
   const removeBtn = e.target.closest('.queue-row-remove');
@@ -3057,6 +3128,7 @@ async function playQueueEntry(entry) {
 // entries until one actually plays, skipping any that fail to resolve (e.g. a
 // queued item deleted before its turn), until the queue is empty.
 async function playNextInQueue() {
+  if (!queueAutoplay) return;
   const q = loadQueue();
   while (q.length) {
     const entry = q.shift();
@@ -3253,12 +3325,19 @@ async function openBook(id) {
     const doneIcon = done
       ? '<span class="material-symbols-outlined text-lg text-primary shrink-0">check_circle</span>'
       : '';
+    // Per-chapter completion: 100% once finished; for the chapter in progress,
+    // the character offset within it (ch.chars comes from ChapterMeta, so no
+    // chapter body needs loading just to render this list); other chapters
+    // (not yet visited, or merely jumped past) show nothing.
+    let pct = '';
+    if (done) pct = '100%';
+    else if (current && ch.chars > 0) pct = `${Math.round(Math.min(1, item.progress / ch.chars) * 100)}%`;
     return `
     <div class="lib-item book-chapter-row flex items-center justify-between gap-3 bg-surface-container-low rounded-xl px-4 py-3 cursor-pointer hover:bg-surface-container-high transition-colors" data-idx="${idx}">
       <div class="min-w-0 flex-1">
         <div class="text-sm font-medium text-on-surface truncate">${idx + 1}. ${escapeHtml(ch.title || `Chapter ${idx + 1}`)}</div>
         <div class="flex items-center justify-between mt-1">
-          <span class="text-[11px] text-on-surface-variant tabular-nums">${fmtMins(estMsForWords(ch.words, ttsSpeed))}</span>
+          <span class="text-[11px] text-on-surface-variant tabular-nums">${fmtMins(estMsForWords(ch.words, ttsSpeed))}${pct ? ` · ${pct}` : ''}</span>
           ${currentChip}
         </div>
       </div>
@@ -4417,6 +4496,57 @@ document.getElementById('copy-logs').addEventListener('click', () => {
     });
 });
 
+// ── Native back button (Android) ──
+//
+// MainActivity's OnBackPressedCallback evaluates window.verbaHandleBack() on
+// every back press (gesture or button) and only backgrounds the app when it
+// returns false — see MainActivity.kt. main.js is a module, so a top-level
+// `function verbaHandleBack` would be module-scoped, not a global the native
+// side can reach; it must be assigned onto `window` explicitly.
+//
+// Checked in order: any open overlay (closed with its own existing close
+// function), then which detail panel is on screen. The detail-panel checks
+// read the DOM directly rather than `activeTab` — openReading/openBook/
+// openFeedEntries call showPanel() directly and never update `activeTab`
+// (only navigateTo does), so it does not track these views.
+const BACK_OVERLAYS = [
+  { el: document.getElementById('confirm-dialog'), close: () => document.getElementById('confirm-cancel').click() },
+  { el: queueSheet, close: closeQueueSheet },
+  { el: libActionSheet, close: closeLibActionSheet },
+  { el: voiceSheet, close: closeVoiceSheet },
+  { el: speedSheet, close: closeSpeedSheet },
+  { el: moreSheet, close: closeMoreSheet },
+  { el: addChooserModal, close: () => closeModal(addChooserModal) },
+  { el: libAddModal, close: closeAddModal },
+  { el: addUrlModal, close: closeUrlModal },
+  { el: feedAddModal, close: closeFeedAddModal },
+  { el: feedEditModal, close: closeFeedEditModal },
+  { el: document.getElementById('snippet-picker'), close: closeSnippetPicker },
+  { el: document.getElementById('snippet-wizard'), close: () => document.getElementById('wiz-cancel').click() },
+];
+
+window.verbaHandleBack = function () {
+  for (const overlay of BACK_OVERLAYS) {
+    if (overlay.el && !overlay.el.classList.contains('hidden')) {
+      overlay.close();
+      return true;
+    }
+  }
+  if (!document.getElementById('reading').classList.contains('hidden')) {
+    document.getElementById('reading-back').click();
+    return true;
+  }
+  if (!document.getElementById('book-chapters').classList.contains('hidden')) {
+    navigateTo('library');
+    return true;
+  }
+  if (!document.getElementById('feed-entries').classList.contains('hidden')) {
+    navigateTo('feeds');
+    return true;
+  }
+  return false;
+};
+
 // ── Init ──
 
 document.addEventListener('DOMContentLoaded', async () => {
@@ -4426,7 +4556,6 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   await loadHistory();
-  await loadModels();
   await loadAudioDevices();
   await loadConfig();
   await loadVocab();
