@@ -54,6 +54,19 @@ select {
   transition: width 0.3s ease;
 }
 
+/* Pill switch track + thumb (Speak/Listen, Articles/Books). The shadows are
+   per-theme variables (see index.html palettes): dark builds its recess from a
+   translucent black well + lip highlight since black inset shadows vanish on
+   near-black surfaces. */
+.pill-track {
+  background: var(--pill-track-bg);
+  box-shadow: var(--pill-track-shadow);
+}
+.pill-thumb {
+  background: var(--pill-thumb-bg);
+  box-shadow: var(--pill-thumb-shadow);
+}
+
 /* Mobile: disable drag region */
 @media (max-width: 640px) {
   [data-tauri-drag-region] {

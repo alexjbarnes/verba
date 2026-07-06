@@ -42,7 +42,15 @@
       --c-inverse-on-surface: 86 85 85;
       --c-inverse-primary: 40 73 238;
       --c-surface-tint: 155 168 255;
-      --inset-shadow: rgba(0,0,0,0.45);
+      /* Pill switches (Speak/Listen, Articles/Books): a recessed track with a
+         raised thumb. Dark needs different physics than light — a black inset
+         shadow is invisible on near-black, so the recess comes from a
+         translucent black well, a bottom lip highlight, and a top sheen +
+         drop shadow lifting the thumb. */
+      --pill-track-bg: rgb(0 0 0 / 0.55);
+      --pill-track-shadow: inset 0 1px 3px rgba(0,0,0,0.85), inset 0 -1px 0 rgba(255,255,255,0.05);
+      --pill-thumb-bg: rgb(var(--c-surface-bright));
+      --pill-thumb-shadow: 0 2px 6px rgba(0,0,0,0.5), inset 0 1px 0 rgba(255,255,255,0.07);
     }
     [data-theme="light"] {
       --c-primary-dim: 40 73 238;
@@ -78,7 +86,11 @@
       --c-inverse-on-surface: 241 240 247;
       --c-inverse-primary: 155 168 255;
       --c-surface-tint: 54 82 225;
-      --inset-shadow: rgba(0,0,0,0.15);
+      /* Light: the look the dark treatment is matching — keep as-is. */
+      --pill-track-bg: rgb(var(--c-surface-container));
+      --pill-track-shadow: inset 0 1px 2px rgba(0,0,0,0.15);
+      --pill-thumb-bg: rgb(var(--c-surface-bright));
+      --pill-thumb-shadow: 0 4px 6px -1px rgba(0,0,0,0.1), 0 2px 4px -2px rgba(0,0,0,0.1);
     }
   </style>
   <script>
@@ -151,8 +163,8 @@
 
   <!-- Top bar: Speak / Listen selector -->
   <header class="flex items-center justify-center px-4 py-2.5 shrink-0 bg-surface-container-low border-b border-outline-variant/30" data-tauri-drag-region>
-    <div id="mode-switch" class="relative flex w-full max-w-xs p-1 rounded-full bg-surface-container shadow-[inset_0_1px_2px_var(--inset-shadow)]">
-      <span id="mode-thumb" class="absolute top-1 bottom-1 left-1 w-[calc(50%-0.25rem)] rounded-full bg-surface-bright shadow-md ring-1 ring-outline-variant/20 transition-transform duration-300 ease-[cubic-bezier(0.4,0,0.2,1)]"></span>
+    <div id="mode-switch" class="pill-track relative flex w-full max-w-xs p-1 rounded-full">
+      <span id="mode-thumb" class="pill-thumb absolute top-1 bottom-1 left-1 w-[calc(50%-0.25rem)] rounded-full ring-1 ring-outline-variant/20 transition-transform duration-300 ease-[cubic-bezier(0.4,0,0.2,1)]"></span>
       <button class="mode-btn relative z-10 flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded-full text-sm font-semibold transition-colors text-primary" data-mode="speak">
         <span class="material-symbols-outlined text-[18px]" style="font-variation-settings:'FILL' 1">mic</span>
         Speak
@@ -398,8 +410,8 @@
           <span class="material-symbols-outlined text-xl">queue_music</span>
           <span id="queue-badge" class="hidden absolute top-0 right-0 min-w-[16px] h-[16px] px-[3px] flex items-center justify-center rounded-full bg-primary text-on-primary text-[9px] font-bold leading-none">0</span>
         </button>
-        <div id="lib-switch" class="relative flex w-44 shrink-0 p-1 rounded-full bg-surface-container shadow-[inset_0_1px_2px_var(--inset-shadow)]">
-          <span id="lib-thumb" class="absolute top-1 bottom-1 left-1 w-[calc(50%-0.25rem)] rounded-full bg-surface-bright shadow-md ring-1 ring-outline-variant/20 transition-transform duration-300 ease-[cubic-bezier(0.4,0,0.2,1)]"></span>
+        <div id="lib-switch" class="pill-track relative flex w-44 shrink-0 p-1 rounded-full">
+          <span id="lib-thumb" class="pill-thumb absolute top-1 bottom-1 left-1 w-[calc(50%-0.25rem)] rounded-full ring-1 ring-outline-variant/20 transition-transform duration-300 ease-[cubic-bezier(0.4,0,0.2,1)]"></span>
           <button class="lib-tab-btn relative z-10 flex-1 flex items-center justify-center py-1 rounded-full text-xs font-semibold transition-colors text-primary" data-lib="articles">Articles</button>
           <button class="lib-tab-btn relative z-10 flex-1 flex items-center justify-center py-1 rounded-full text-xs font-semibold transition-colors text-on-surface-variant" data-lib="books">Books</button>
         </div>
