@@ -11,9 +11,15 @@ import android.widget.FrameLayout
 import android.widget.TextView
 import android.widget.ScrollView
 import android.util.TypedValue
+import androidx.activity.OnBackPressedCallback
 import androidx.activity.enableEdgeToEdge
 
 class MainActivity : TauriActivity() {
+  // Captured in setContentView() below, where Wry hands us the WebView
+  // instance. Used by the back-gesture callback to reach the page; null
+  // means there's nothing to route the press to.
+  private var webView: WebView? = null
+
   override fun onCreate(savedInstanceState: Bundle?) {
     val err = VerbaApp.nativeLoadError
     if (err != null) {
@@ -25,6 +31,8 @@ class MainActivity : TauriActivity() {
       tv.text = "Native library failed to load:\n\n$err"
       sv.addView(tv)
       setContentView(sv)
+      // No webview on this path -- skip registering the back callback below
+      // so the system default (finish/background) handles the press.
       return
     }
     enableEdgeToEdge()
@@ -34,6 +42,39 @@ class MainActivity : TauriActivity() {
     // (and its `shared-text` listener) isn't ready yet, so the text is stashed
     // in Rust and the frontend pulls it once it initializes.
     handleSharedIntent(intent)
+
+    // Route back presses/gestures into in-app JS navigation (e.g. article
+    // view -> library) before falling back to backgrounding the app.
+    // TauriActivity sets handleBackNavigation = false, so Wry's own
+    // canGoBack()/goBack() callback (WryActivity.setWebView) never gets
+    // registered -- this is the only back handler on this activity.
+    //
+    // evaluateJavascript() is async and a back dispatch can't block waiting
+    // on it, so the callback consumes the press up front (enabled=true,
+    // never toggled) and decides moveTaskToBack() once the JS result comes
+    // back. Tradeoff: a predictive-back swipe preview couldn't show an
+    // "app closing" hint mid-gesture, since the outcome isn't known until
+    // after the gesture finishes. Moot for now -- enableOnBackInvokedCallback
+    // isn't set in AndroidManifest.xml, so predictive back isn't opted into
+    // and no preview is shown regardless.
+    onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+      override fun handleOnBackPressed() {
+        val wv = webView
+        if (wv == null) {
+          moveTaskToBack(true)
+          return
+        }
+        wv.evaluateJavascript("window.verbaHandleBack ? window.verbaHandleBack() : false") { result ->
+          // "true" means JS already navigated in-app. Anything else --
+          // "false", a torn-down page returning null, etc. -- backgrounds
+          // the app instead of letting the activity finish, so state isn't
+          // lost the way finish() would lose it.
+          if (result != "true") {
+            moveTaskToBack(true)
+          }
+        }
+      }
+    })
   }
 
   // singleTask launch mode: a share while the app is already running arrives
@@ -75,6 +116,7 @@ class MainActivity : TauriActivity() {
   // it to override startActionMode directly — the parent hook is the way in.
   override fun setContentView(view: View?) {
     if (view is WebView) {
+      webView = view
       val wrapper = SelectionReportLayout(this)
       wrapper.webView = view
       wrapper.addView(
