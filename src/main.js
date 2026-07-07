@@ -146,6 +146,9 @@ bottomNav.addEventListener('click', (e) => {
   if (slot.dataset.tab) navigateTo(slot.dataset.tab);
 });
 
+// Empty-library call to action mirrors the nav's Add button.
+document.getElementById('lib-empty-add').addEventListener('click', () => openAddModal());
+
 // ── More sheet ──
 
 function openMoreSheet() {
@@ -343,47 +346,63 @@ function renderHistory(entries) {
   }
   for (const entry of [...entries].reverse()) {
     const card = document.createElement('div');
-    card.className = 'bg-surface-container-low rounded-xl border border-outline-variant/20 p-4';
+    card.className = 'bg-surface-container rounded-xl p-4';
 
     const hasStages = entry.pipeline_stages && entry.pipeline_stages.length > 1;
     const hasChunks = entry.chunk_timings && entry.chunk_timings.length > 0;
     const hasDetails = hasStages || hasChunks;
 
-    const stats = [
+    // The default card is for the USER: their words, when, how long they
+    // spoke. Engine telemetry (transcribe ms, postprocess ms, RTF, model id)
+    // is developer detail — it lives behind the Details toggle with the
+    // pipeline stages, not on every card.
+    const meta = [
       formatTimestamp(entry.timestamp),
       formatAudioDuration(entry.audio_duration_ms),
+    ].filter(Boolean).join(' · ');
+    const telemetry = [
       formatDuration(entry.duration_ms) + ' to transcribe',
       entry.postprocess_ms ? entry.postprocess_ms + 'ms postprocess' : null,
       formatSpeed(entry),
       escapeHtml(entry.model_id),
     ].filter(Boolean);
 
-    const toggleBtn = hasDetails
-      ? '<button class="pipeline-toggle text-[10px] font-semibold text-primary/70 hover:text-primary transition-colors cursor-pointer">Details</button>'
-      : '';
+    const toggleBtn =
+      '<button class="pipeline-toggle text-xs font-semibold text-on-surface-variant hover:text-primary transition-colors cursor-pointer min-h-8 px-1">Details</button>';
 
     card.innerHTML = `
-      <p class="text-sm text-on-surface leading-relaxed mb-2 select-text">${escapeHtml(entry.text)}</p>
-      <div class="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-on-surface-variant">
-        ${stats.map(s => '<span>' + s + '</span>').join('')}
+      <div class="flex items-start gap-3">
+        <p class="text-[15px] text-on-surface leading-relaxed select-text flex-1 min-w-0">${escapeHtml(entry.text)}</p>
+        <button class="copy-entry-btn shrink-0 -mt-1 -mr-1 w-9 h-9 flex items-center justify-center rounded-lg text-on-surface-variant hover:text-primary hover:bg-primary/10 transition-colors cursor-pointer">
+          <span class="material-symbols-outlined text-[18px]">content_copy</span>
+        </button>
+      </div>
+      <div class="flex items-center gap-x-3 text-xs text-on-surface-variant mt-2">
+        <span class="tabular-nums">${meta}</span>
         ${toggleBtn}
-        <button class="copy-entry-btn text-[10px] font-semibold text-primary/70 hover:text-primary transition-colors cursor-pointer">Copy</button>
+      </div>
+      <div class="pipeline-telemetry hidden flex-wrap items-center gap-x-4 gap-y-1 text-xs text-on-surface-variant/80 mt-2">
+        ${telemetry.map(s => '<span>' + s + '</span>').join('')}
       </div>
       ${renderPipelineStages(entry.pipeline_stages, entry.chunk_timings)}`;
 
-    if (hasDetails) {
-      card.querySelector('.pipeline-toggle').addEventListener('click', (e) => {
-        const stagesEl = card.querySelector('.pipeline-stages');
-        stagesEl.classList.toggle('hidden');
-        e.target.textContent = stagesEl.classList.contains('hidden') ? 'Details' : 'Hide';
-      });
-    }
+    card.querySelector('.pipeline-toggle').addEventListener('click', (e) => {
+      const telemetryEl = card.querySelector('.pipeline-telemetry');
+      telemetryEl.classList.toggle('hidden');
+      telemetryEl.classList.toggle('flex');
+      const open = !telemetryEl.classList.contains('hidden');
+      if (hasDetails) {
+        card.querySelector('.pipeline-stages').classList.toggle('hidden', !open);
+      }
+      e.target.textContent = open ? 'Hide' : 'Details';
+    });
 
     card.querySelector('.copy-entry-btn').addEventListener('click', (e) => {
       const text = formatEntryForCopy(entry);
+      const icon = e.currentTarget.querySelector('.material-symbols-outlined');
       invoke('copy_to_clipboard', { text }).then(() => {
-        e.target.textContent = 'Copied!';
-        setTimeout(() => { e.target.textContent = 'Copy'; }, 1500);
+        icon.textContent = 'check';
+        setTimeout(() => { icon.textContent = 'content_copy'; }, 1500);
       });
     });
 
@@ -1331,6 +1350,10 @@ async function updateTtsPanel() {
 
   ttsModelId = tts.id;
   ttsLoadedEngine = tts.engine;
+  // The player-bar voice label resolves its name through ttsModelId, which
+  // was null at the boot-time render — re-render now that it's known, or the
+  // bar says "Voice 0" until the user happens to open the voice sheet.
+  updateVoiceBtnLabel();
   const info = await invoke('tts_info');
   if (info.loaded) ttsLoadedModelId = tts.id;
 
@@ -2785,14 +2808,16 @@ function openLibActionSheet(item, isBook) {
         { action: 'mark-read', icon: 'check_circle', label: 'Mark as read' },
         { action: 'mark-unread', icon: 'radio_button_unchecked', label: 'Mark as unread' },
         { action: 'add-queue', icon: 'playlist_add', label: 'Add to queue' },
+        { action: 'delete', icon: 'delete', label: 'Delete', danger: true },
       ]
     : [
         { action: 'reset-progress', icon: 'restart_alt', label: 'Reset progress' },
         { action: 'add-queue', icon: 'playlist_add', label: 'Add to queue' },
+        { action: 'delete', icon: 'delete', label: 'Delete', danger: true },
       ];
   document.getElementById('lib-action-list').innerHTML = actions.map(a =>
-    `<button class="more-item w-full flex items-center gap-3 px-4 py-3 rounded-xl text-left cursor-pointer hover:bg-surface-container-highest text-on-surface" data-action="${a.action}">
-      <span class="material-symbols-outlined text-lg text-on-surface-variant">${a.icon}</span>
+    `<button class="more-item w-full flex items-center gap-3 px-4 py-3 rounded-xl text-left cursor-pointer hover:bg-surface-container-highest ${a.danger ? 'text-error' : 'text-on-surface'}" data-action="${a.action}">
+      <span class="material-symbols-outlined text-lg ${a.danger ? 'text-error/80' : 'text-on-surface-variant'}">${a.icon}</span>
       <span class="text-sm">${a.label}</span>
     </button>`).join('');
   libActionSheet.classList.remove('hidden');
@@ -2824,6 +2849,7 @@ document.getElementById('lib-action-list').addEventListener('click', async (e) =
   else if (action === 'mark-read') await invoke('book_set_read', { id, read: true });
   else if (action === 'mark-unread') await invoke('book_set_read', { id, read: false });
   else if (action === 'add-queue') addToQueue(id, chapter);
+  else if (action === 'delete') { await deleteLibraryItem(id); return; }
   loadLibrary();
 });
 
@@ -2844,27 +2870,37 @@ function renderLibraryList() {
   const feedsById = libFeedsById;
   const list = document.getElementById('lib-list');
   const empty = document.getElementById('lib-empty');
+  // The signature list treatment: listening progress lives on the card
+  // itself — a hairline along its bottom edge — instead of "42%" text in the
+  // meta line. The track only renders while something IS in progress;
+  // finished cards drop the line and carry the tick alone (one state, one
+  // signal). Delete moved off the rows into the long-press sheet: a
+  // destructive control on every row invites accidental taps and repeats
+  // what the sheet already offers.
+  const progressEdge = (pct) => (pct > 0 && pct < 100)
+    ? `<div class="absolute left-0 right-0 bottom-0 h-[3px] bg-primary/15"><div class="h-full bg-primary/70 rounded-r-full" style="width:${pct}%"></div></div>`
+    : '';
+  const doneTick = (pct) => pct >= 100
+    ? '<span class="material-symbols-outlined text-lg text-primary shrink-0">check_circle</span>'
+    : '';
+  const rowShell = (id, inner, pct) => `
+    <div class="lib-item relative overflow-hidden flex items-center justify-between gap-3 bg-surface-container rounded-xl px-4 py-3.5 cursor-pointer hover:bg-surface-container-high transition-colors" data-id="${escapeHtml(id)}">
+      ${inner}
+      ${doneTick(pct)}
+      ${progressEdge(pct)}
+    </div>`;
   const renderRow = (it) => {
     if (it.chapters && it.chapters.length) {
       const { totalWords, wordsRead, pct } = bookProgress(it);
       const chaptersLabel = `${it.chapters.length} chapter${it.chapters.length === 1 ? '' : 's'}`;
       const meta = pct >= 100 ? `${chaptersLabel} · Finished`
-        : pct > 0 ? `${chaptersLabel} · ${pct}% · ${fmtMins(estMsForWords(totalWords - wordsRead, ttsSpeed))} left`
+        : pct > 0 ? `${chaptersLabel} · ${fmtMins(estMsForWords(totalWords - wordsRead, ttsSpeed))} left`
         : `${chaptersLabel} · ${fmtMins(estMsForWords(totalWords, ttsSpeed))}`;
-      const doneTick = pct >= 100
-        ? '<span class="material-symbols-outlined text-lg text-primary shrink-0">check_circle</span>'
-        : '';
-      return `
-      <div class="lib-item flex items-center justify-between gap-3 bg-surface-container-low rounded-xl px-4 py-3 cursor-pointer hover:bg-surface-container-high transition-colors" data-id="${escapeHtml(it.id)}">
+      return rowShell(it.id, `
         <div class="min-w-0 flex-1">
-          <div class="text-sm font-medium text-on-surface truncate"><span class="material-symbols-outlined text-sm align-middle mr-1 text-on-surface-variant/70">menu_book</span>${escapeHtml(it.title)}</div>
-          <div class="text-[11px] ${pct >= 100 ? 'text-primary' : 'text-on-surface-variant'} tabular-nums mt-1">${meta}</div>
-        </div>
-        ${doneTick}
-        <button class="lib-del shrink-0 text-on-surface-variant/50 hover:text-error transition-colors p-1 cursor-pointer" data-id="${escapeHtml(it.id)}">
-          <span class="material-symbols-outlined text-lg">delete</span>
-        </button>
-      </div>`;
+          <div class="text-[15px] font-semibold leading-snug text-on-surface line-clamp-2"><span class="material-symbols-outlined text-sm align-middle mr-1 text-on-surface-variant/70">menu_book</span>${escapeHtml(it.title)}</div>
+          <div class="text-xs text-on-surface-variant tabular-nums mt-1">${meta}</div>
+        </div>`, pct);
     }
     const len = (it.body || '').length || 1;
     const prog = Math.max(0, Math.min(len, it.progress || 0));
@@ -2873,9 +2909,9 @@ function renderLibraryList() {
     // playback speed so the list matches the reader.
     const totalMs = itemDurationMs(it, ttsSpeed);
     const leftMs = totalMs * (1 - prog / len);
-    // Finished -> "Finished"; in-progress -> "42% · 6 min left"; fresh -> length.
+    // The edge line carries the fraction; words only say what time remains.
     let meta = pct >= 100 ? 'Finished'
-      : pct > 0 ? `${pct}% · ${fmtMins(leftMs)} left`
+      : pct > 0 ? `${fmtMins(leftMs)} left`
       : fmtMins(totalMs);
     // Publication date, when the source provided one.
     const pub = fmtPubDate(it.published);
@@ -2889,23 +2925,14 @@ function renderLibraryList() {
       if (src) meta += ` · ${escapeHtml(src)}`;
     }
     const newChip = (it.feed_id && !it.seen && !(it.progress > 0))
-      ? '<span class="text-[10px] font-semibold text-primary bg-primary/10 rounded px-1.5 py-0.5 mr-1.5">NEW</span>'
+      ? '<span class="inline-block align-[2px] text-[10px] font-semibold text-primary bg-primary/10 rounded-full px-2 py-0.5 mr-1.5">NEW</span>'
       : '';
-    const doneTick = pct >= 100
-      ? '<span class="material-symbols-outlined text-lg text-primary shrink-0">check_circle</span>'
-      : '';
-    return `
-    <div class="lib-item flex items-center justify-between gap-3 bg-surface-container-low rounded-xl px-4 py-3 cursor-pointer hover:bg-surface-container-high transition-colors" data-id="${escapeHtml(it.id)}">
+    return rowShell(it.id, `
       <div class="min-w-0 flex-1">
-        <div class="text-sm font-medium text-on-surface truncate">${newChip}${escapeHtml(it.title)}</div>
-        <div class="text-xs text-on-surface-variant truncate mt-0.5">${escapeHtml(it.body.slice(0, 80))}</div>
-        <div class="text-[11px] ${pct >= 100 ? 'text-primary' : 'text-on-surface-variant'} tabular-nums mt-1">${meta}</div>
-      </div>
-      ${doneTick}
-      <button class="lib-del shrink-0 text-on-surface-variant/50 hover:text-error transition-colors p-1 cursor-pointer" data-id="${escapeHtml(it.id)}">
-        <span class="material-symbols-outlined text-lg">delete</span>
-      </button>
-    </div>`;
+        <div class="text-[15px] font-semibold leading-snug text-on-surface line-clamp-2">${newChip}${escapeHtml(it.title)}</div>
+        <div class="text-xs text-on-surface-variant truncate mt-1">${escapeHtml(it.body.slice(0, 80))}</div>
+        <div class="text-xs text-on-surface-variant tabular-nums mt-1">${meta}</div>
+      </div>`, pct);
   };
   const rev = items.slice().reverse();
   const isBook = (it) => !!(it.chapters && it.chapters.length);
@@ -2927,21 +2954,24 @@ function renderLibraryList() {
       if (item) openLibActionSheet(item, bookIds.has(id));
     });
   });
-  list.querySelectorAll('.lib-del').forEach(btn => {
-    btn.addEventListener('click', async (e) => {
-      e.stopPropagation();
-      const id = btn.dataset.id;
-      // A book's audio is keyed off its chapter bodies, which library_delete
-      // also removes (books/<id>.json) — forget the cache first or it leaks.
-      if (bookIds.has(id) && ttsModelId) {
-        const voiceVal = ttsVoice || '0';
-        const sid = voiceVal.startsWith('custom:') ? 0 : (parseInt(voiceVal) || 0);
-        await invoke('book_forget_audio', { id, modelId: ttsModelId, sid, speed: ttsSpeed }).catch(() => {});
-      }
-      await invoke('library_delete', { id });
-      loadLibrary();
-    });
-  });
+}
+
+// Delete a library item (article or book), invoked from the long-press
+// sheet. A book's audio is keyed off its chapter bodies, which
+// library_delete also removes (books/<id>.json) — forget the cache first or
+// it leaks.
+async function deleteLibraryItem(id) {
+  const item = libItems.find(it => it.id === id);
+  const isBook = !!(item && item.chapters && item.chapters.length);
+  const ok = await showConfirm(`Delete "${item ? item.title : 'this item'}"?`);
+  if (!ok) return;
+  if (isBook && ttsModelId) {
+    const voiceVal = ttsVoice || '0';
+    const sid = voiceVal.startsWith('custom:') ? 0 : (parseInt(voiceVal) || 0);
+    await invoke('book_forget_audio', { id, modelId: ttsModelId, sid, speed: ttsSpeed }).catch(() => {});
+  }
+  await invoke('library_delete', { id });
+  loadLibrary();
 }
 
 // ── Playlist queue ──
@@ -3325,23 +3355,27 @@ async function openBook(id) {
     const doneIcon = done
       ? '<span class="material-symbols-outlined text-lg text-primary shrink-0">check_circle</span>'
       : '';
-    // Per-chapter completion: 100% once finished; for the chapter in progress,
-    // the character offset within it (ch.chars comes from ChapterMeta, so no
-    // chapter body needs loading just to render this list); other chapters
-    // (not yet visited, or merely jumped past) show nothing.
-    let pct = '';
-    if (done) pct = '100%';
-    else if (current && ch.chars > 0) pct = `${Math.round(Math.min(1, item.progress / ch.chars) * 100)}%`;
+    // Per-chapter completion, drawn as the same bottom-edge progress line the
+    // library cards use (ch.chars comes from ChapterMeta, so no chapter body
+    // needs loading just to render this list). Finished chapters carry the
+    // tick alone; chapters merely jumped past show nothing.
+    let pctNum = 0;
+    if (done) pctNum = 100;
+    else if (current && ch.chars > 0) pctNum = Math.round(Math.min(1, item.progress / ch.chars) * 100);
+    const edge = (pctNum > 0 && pctNum < 100)
+      ? `<div class="absolute left-0 right-0 bottom-0 h-[3px] bg-primary/15"><div class="h-full bg-primary/70 rounded-r-full" style="width:${pctNum}%"></div></div>`
+      : '';
     return `
-    <div class="lib-item book-chapter-row flex items-center justify-between gap-3 bg-surface-container-low rounded-xl px-4 py-3 cursor-pointer hover:bg-surface-container-high transition-colors" data-idx="${idx}">
+    <div class="lib-item book-chapter-row relative overflow-hidden flex items-center justify-between gap-3 bg-surface-container rounded-xl px-4 py-3.5 cursor-pointer hover:bg-surface-container-high transition-colors" data-idx="${idx}">
       <div class="min-w-0 flex-1">
-        <div class="text-sm font-medium text-on-surface truncate">${idx + 1}. ${escapeHtml(ch.title || `Chapter ${idx + 1}`)}</div>
+        <div class="text-[15px] font-semibold leading-snug text-on-surface truncate">${idx + 1}. ${escapeHtml(ch.title || `Chapter ${idx + 1}`)}</div>
         <div class="flex items-center justify-between mt-1">
-          <span class="text-[11px] text-on-surface-variant tabular-nums">${fmtMins(estMsForWords(ch.words, ttsSpeed))}${pct ? ` · ${pct}` : ''}</span>
+          <span class="text-xs text-on-surface-variant tabular-nums">${fmtMins(estMsForWords(ch.words, ttsSpeed))}</span>
           ${currentChip}
         </div>
       </div>
       ${doneIcon}
+      ${edge}
     </div>`;
   }).join('');
   listEl.querySelectorAll('.book-chapter-row').forEach(el => {

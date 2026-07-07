@@ -190,12 +190,12 @@
     </div>
     <div class="flex items-center justify-between mb-4">
       <div>
-        <h2 class="text-lg font-bold tracking-tight text-on-surface">History</h2>
+        <h2 class="text-xl font-bold tracking-tight text-on-surface">History</h2>
         <p class="text-xs text-on-surface-variant mt-0.5">Recent transcriptions from overlay and in-app</p>
       </div>
       <div class="flex items-center gap-2">
-        <button id="export-history" class="text-xs font-semibold text-on-surface-variant hover:text-primary transition-colors px-3 py-1.5 rounded-lg hover:bg-primary/10">Export</button>
-        <button id="clear-history" class="text-xs font-semibold text-on-surface-variant hover:text-error transition-colors px-3 py-1.5 rounded-lg hover:bg-error/10">Clear</button>
+        <button id="export-history" class="text-xs font-semibold text-on-surface-variant hover:text-primary transition-colors px-3 min-h-10 rounded-lg hover:bg-primary/10">Export</button>
+        <button id="clear-history" class="text-xs font-semibold text-on-surface-variant hover:text-error transition-colors px-3 min-h-10 rounded-lg hover:bg-error/10">Clear</button>
       </div>
     </div>
     <div id="history-list" class="flex-1 min-h-0 space-y-3 overflow-y-auto">
@@ -209,7 +209,7 @@
   <!-- Audio tab -->
   <div id="audio" class="tab-panel hidden flex-1 overflow-y-auto px-5 py-6">
     <div class="mb-6">
-      <h2 class="text-lg font-bold tracking-tight text-on-surface">Audio Input</h2>
+      <h2 class="text-xl font-bold tracking-tight text-on-surface">Audio Input</h2>
       <p class="text-xs text-on-surface-variant mt-0.5">Select the microphone used for dictation</p>
     </div>
     <div class="bg-surface-container-low rounded-xl p-5">
@@ -229,8 +229,8 @@
       <div class="space-y-6">
         <!-- Appearance section -->
         <section>
-          <div class="mb-4">
-            <h2 class="text-lg font-bold tracking-tight text-on-surface">Appearance</h2>
+          <div class="mb-2">
+            <h2 class="text-sm font-semibold text-on-surface">Appearance</h2>
           </div>
           <div class="bg-surface-container-low rounded-xl p-5">
             <div class="flex items-center justify-between">
@@ -249,8 +249,8 @@
 
         <!-- Updates section: one Dictation-models row (see MODEL_PACKAGES.md) -->
         <section>
-          <div class="mb-4">
-            <h2 class="text-lg font-bold tracking-tight text-on-surface">Updates</h2>
+          <div class="mb-2">
+            <h2 class="text-sm font-semibold text-on-surface">Updates</h2>
           </div>
           <div class="bg-surface-container-low rounded-xl p-5 space-y-4">
             <div class="flex items-center justify-between gap-3">
@@ -271,8 +271,8 @@
 
         <!-- Storage section: byte totals per category, populated by loadStorage() -->
         <section>
-          <div class="mb-4">
-            <h2 class="text-lg font-bold tracking-tight text-on-surface">Storage</h2>
+          <div class="mb-2">
+            <h2 class="text-sm font-semibold text-on-surface">Storage</h2>
           </div>
           <div id="storage-list" class="bg-surface-container-low rounded-xl overflow-hidden divide-y divide-outline-variant/20"></div>
         </section>
@@ -285,8 +285,8 @@
       <div class="space-y-6">
         <!-- Dictation section -->
         <section>
-          <div class="mb-4">
-            <h2 class="text-lg font-bold tracking-tight text-on-surface">Dictation</h2>
+          <div class="mb-2">
+            <h2 class="text-sm font-semibold text-on-surface">Dictation</h2>
           </div>
           <div class="bg-surface-container-low rounded-xl p-5 space-y-4">
             <div id="hotkey-row" class="hidden">
@@ -314,8 +314,8 @@
 
         <!-- Vocabulary section -->
         <section>
-          <div class="mb-4">
-            <h2 class="text-lg font-bold tracking-tight text-on-surface">Vocabulary</h2>
+          <div class="mb-2">
+            <h2 class="text-sm font-semibold text-on-surface">Vocabulary</h2>
             <p class="text-xs text-on-surface-variant mt-0.5">Correct words the model consistently gets wrong</p>
           </div>
           <div class="bg-surface-container-low rounded-xl p-5 space-y-4">
@@ -341,8 +341,8 @@
       <div class="space-y-6">
         <!-- Reading section -->
         <section>
-          <div class="mb-4">
-            <h2 class="text-lg font-bold tracking-tight text-on-surface">Reading</h2>
+          <div class="mb-2">
+            <h2 class="text-sm font-semibold text-on-surface">Reading</h2>
           </div>
           <div class="bg-surface-container-low rounded-xl p-5">
             <div class="flex items-center justify-between mb-2">
@@ -360,7 +360,7 @@
   <!-- Snippets tab -->
   <div id="snippets" class="tab-panel hidden flex-1 overflow-y-auto px-5 py-6 space-y-6">
     <div>
-      <h2 class="text-lg font-bold tracking-tight text-on-surface">Snippets</h2>
+      <h2 class="text-xl font-bold tracking-tight text-on-surface">Snippets</h2>
       <p class="text-xs text-on-surface-variant mt-0.5">Hold <span class="font-mono">&#8997; S</span> and say a trigger phrase to paste its body</p>
     </div>
 
@@ -420,11 +420,11 @@
   <!-- Library tab (Listen home) -->
   <div id="library" class="tab-panel hidden flex-1 flex flex-col px-5 py-6 min-h-0">
     <div class="flex items-center justify-between mb-4 gap-3">
-      <h2 class="text-lg font-bold tracking-tight text-on-surface">Library</h2>
+      <h2 class="text-xl font-bold tracking-tight text-on-surface">Library</h2>
       <div class="flex items-center gap-2 shrink-0">
         <button id="queue-btn" class="relative p-2 text-on-surface-variant hover:text-primary transition-colors rounded-lg hover:bg-primary/10 cursor-pointer">
           <span class="material-symbols-outlined text-xl">queue_music</span>
-          <span id="queue-badge" class="hidden absolute top-0 right-0 min-w-[16px] h-[16px] px-[3px] flex items-center justify-center rounded-full bg-primary text-on-primary text-[9px] font-bold leading-none">0</span>
+          <span id="queue-badge" class="hidden absolute -top-0.5 -right-0.5 min-w-[16px] h-[16px] px-[3px] flex items-center justify-center rounded-full bg-primary text-on-primary text-[9px] font-bold leading-none">0</span>
         </button>
         <div id="lib-switch" class="pill-track relative flex w-44 shrink-0 p-1 rounded-full">
           <span id="lib-thumb" class="pill-thumb absolute top-1 bottom-1 left-1 w-[calc(50%-0.25rem)] rounded-full ring-1 ring-outline-variant/20 transition-transform duration-300 ease-[cubic-bezier(0.4,0,0.2,1)]"></span>
@@ -437,8 +437,12 @@
       <div id="lib-list" class="space-y-2"></div>
       <div id="lib-empty" class="hidden flex flex-col items-center justify-center pt-16 text-on-surface-variant">
         <span class="material-symbols-outlined text-4xl mb-3 opacity-30">library_books</span>
-        <p id="lib-empty-title" class="text-sm">No saved texts yet</p>
-        <p class="text-xs mt-1 opacity-70">Tap the + button below to add one</p>
+        <p id="lib-empty-title" class="text-sm font-medium text-on-surface">No saved texts yet</p>
+        <p class="text-xs mt-1 opacity-70">Articles, books and pasted text all live here</p>
+        <button id="lib-empty-add" class="mt-5 flex items-center gap-1.5 bg-primary text-on-primary text-xs font-semibold px-5 min-h-10 rounded-full cursor-pointer hover:brightness-110 transition-all active:scale-[0.98]">
+          <span class="material-symbols-outlined text-base">add</span>
+          Add your first
+        </button>
       </div>
     </div>
   </div>
@@ -469,7 +473,9 @@
 
     <!-- Rendered text with per-word spans for highlighting. Playback is driven
          entirely by the player bar (shown while a reading is open). -->
-    <div id="reading-text" class="flex-1 min-h-0 overflow-y-auto text-base leading-relaxed text-on-surface-variant whitespace-pre-wrap"></div>
+    <!-- Full-strength text: this is the app's core reading surface, not
+         secondary chrome. The active-word highlight still reads over it. -->
+    <div id="reading-text" class="flex-1 min-h-0 overflow-y-auto text-[17px] leading-[1.7] text-on-surface/90 whitespace-pre-wrap"></div>
   </div>
 
   <!-- Book chapter list (opened from Library for a book; not a nav item) -->
@@ -566,7 +572,7 @@
   <div id="feeds" class="tab-panel hidden flex-1 flex flex-col px-5 py-6 min-h-0">
     <div class="flex items-center justify-between mb-4">
       <div>
-        <h2 class="text-lg font-bold tracking-tight text-on-surface">Feeds</h2>
+        <h2 class="text-xl font-bold tracking-tight text-on-surface">Feeds</h2>
         <p class="text-xs text-on-surface-variant mt-0.5">Newsletters pulled into your library</p>
       </div>
       <div class="flex items-center gap-2">
@@ -640,7 +646,7 @@
   <!-- Voices (TTS) tab -->
   <div id="voices" class="tab-panel hidden flex-1 overflow-y-auto px-5 py-6 space-y-6">
     <div>
-      <h2 class="text-lg font-bold tracking-tight text-on-surface">Voices</h2>
+      <h2 class="text-xl font-bold tracking-tight text-on-surface">Voices</h2>
       <p class="text-xs text-on-surface-variant mt-0.5">Tap a voice to hear a sample. Star your favourites to show them in the player.</p>
     </div>
 
@@ -681,7 +687,7 @@
   <div id="reports" class="tab-panel hidden flex-1 overflow-y-auto px-5 py-6 flex flex-col">
     <div class="flex items-center justify-between mb-4">
       <div>
-        <h2 class="text-lg font-bold tracking-tight text-on-surface">Reports</h2>
+        <h2 class="text-xl font-bold tracking-tight text-on-surface">Reports</h2>
         <p class="text-xs text-on-surface-variant mt-0.5">Words you flagged as mispronounced</p>
       </div>
       <div class="flex items-center gap-2">
@@ -801,7 +807,7 @@
   </div>
 
   <!-- TTS Player bar -->
-  <div id="tts-player" class="fixed bottom-0 left-0 right-0 z-40 bg-surface-container-low border-t border-outline-variant/20 translate-y-full transition-transform duration-200" style="padding-bottom: env(safe-area-inset-bottom);">
+  <div id="tts-player" class="fixed bottom-0 left-0 right-0 z-40 bg-surface-container-high border-t border-outline-variant/20 translate-y-full transition-transform duration-200" style="padding-bottom: env(safe-area-inset-bottom);">
     <div id="tts-progress-track" class="relative h-1 mx-4 mt-3 rounded-full cursor-pointer" style="background: rgb(var(--c-on-surface) / 0.08)">
       <div class="absolute inset-0 rounded-full overflow-hidden">
         <div id="tts-cache-segments" class="absolute inset-0 pointer-events-none"></div>
@@ -815,20 +821,20 @@
       <span id="tts-time-total" class="text-[11px] text-on-surface-variant tabular-nums">0:00</span>
     </div>
     <div class="relative flex items-center justify-center pb-3 gap-7">
-      <button id="tts-voice-btn" class="absolute left-3 top-1/2 -translate-y-1/2 flex flex-col items-center gap-0.5 text-on-surface-variant active:text-on-surface transition-colors cursor-pointer px-1">
+      <button id="tts-voice-btn" class="absolute left-3 top-1/2 -translate-y-1/2 flex flex-col items-center gap-0.5 min-w-12 min-h-11 justify-center text-on-surface-variant active:text-on-surface transition-colors cursor-pointer px-1">
         <span class="material-symbols-outlined text-[20px]">record_voice_over</span>
-        <span id="tts-voice-btn-label" class="text-[9px] font-semibold leading-none truncate max-w-[4.5rem]">Voice</span>
+        <span id="tts-voice-btn-label" class="text-[10px] font-semibold leading-none truncate max-w-[5rem]">Voice</span>
       </button>
-      <button id="tts-skip-back" class="p-2 text-on-surface-variant active:text-on-surface transition-colors cursor-pointer">
+      <button id="tts-skip-back" class="p-2 min-w-11 min-h-11 text-on-surface-variant active:text-on-surface transition-colors cursor-pointer">
         <span class="material-symbols-outlined text-[28px]">replay_10</span>
       </button>
       <button id="tts-play-pause" class="w-14 h-14 flex items-center justify-center bg-on-surface rounded-full cursor-pointer active:scale-95 transition-transform shadow-lg">
         <span class="material-symbols-outlined text-3xl text-surface" style="font-variation-settings: 'FILL' 1">pause</span>
       </button>
-      <button id="tts-skip-fwd" class="p-2 text-on-surface-variant active:text-on-surface transition-colors cursor-pointer">
+      <button id="tts-skip-fwd" class="p-2 min-w-11 min-h-11 text-on-surface-variant active:text-on-surface transition-colors cursor-pointer">
         <span class="material-symbols-outlined text-[28px]">forward_10</span>
       </button>
-      <button id="tts-speed-btn" class="absolute right-3 text-sm font-bold text-on-surface-variant active:text-on-surface transition-colors cursor-pointer px-1">1.0x</button>
+      <button id="tts-speed-btn" class="absolute right-3 top-1/2 -translate-y-1/2 min-h-8 rounded-full bg-surface-container-highest px-3 text-xs font-bold tabular-nums text-on-surface-variant active:text-on-surface transition-colors cursor-pointer">1.0x</button>
     </div>
   </div>
 
