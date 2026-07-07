@@ -14,6 +14,7 @@
 //! refuses while dictation records.
 
 pub mod loopback;
+pub mod speakers;
 pub mod store;
 pub mod summarize;
 
@@ -68,6 +69,17 @@ pub fn start(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
         .ensure_vad_model()
         .map_err(|e| format!("voice detection unavailable: {e}"))?;
 
+    // Optional speaker labeling for the loopback channel (experimental).
+    // Off -> loopback utterances are all "Speaker 1"; model missing -> same.
+    let cfg = crate::config::AppConfig::load();
+    let labeler = if cfg.meeting_diarize {
+        crate::models::ModelManager::global()
+            .speaker_model_path()
+            .and_then(|p| speakers::SpeakerLabeler::new(&p))
+    } else {
+        None
+    };
+
     // Mic on the configured input; system audio when the platform can.
     let mic = AudioRecorder::new_with_device(Some(&vad_path), DeviceSpec::ConfigInput)?;
     let (loopback_rec, loopback_notice) = match loopback::resolve() {
@@ -121,6 +133,7 @@ pub fn start(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
         started_at,
         utterances.clone(),
         app.clone(),
+        None,
     ));
     if let Some(rx) = loop_rx {
         consumers.push(spawn_consumer(
@@ -130,6 +143,7 @@ pub fn start(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
             started_at,
             utterances.clone(),
             app.clone(),
+            labeler,
         ));
     }
 
@@ -196,6 +210,7 @@ pub fn start(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
 }
 
 /// One VAD segment stream -> transcriber -> tagged utterances + events.
+#[allow(clippy::too_many_arguments)]
 fn spawn_consumer(
     rx: std::sync::mpsc::Receiver<Vec<f32>>,
     source: &'static str,
@@ -203,6 +218,7 @@ fn spawn_consumer(
     started_at: Instant,
     utterances: Arc<Mutex<Vec<Utterance>>>,
     app: tauri::AppHandle,
+    labeler: Option<speakers::SpeakerLabeler>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::Builder::new()
         .name(format!("meeting-{source}"))
@@ -215,16 +231,24 @@ fn spawn_consumer(
                 let seg_ms = (segment.len() as u64) * 1000 / 16_000;
                 let t_ms = started_at.elapsed().as_millis() as u64;
                 let t_ms = t_ms.saturating_sub(seg_ms);
+                // Cluster the speaker from the SAME samples before the
+                // transcriber consumes them. Mic is always "You".
+                let speaker = if source == "mic" {
+                    "You".to_string()
+                } else if let Some(l) = labeler.as_ref() {
+                    l.label(&segment)
+                } else {
+                    "Speaker 1".to_string()
+                };
                 match transcriber.transcribe(segment, 16_000) {
                     Ok(text) => {
                         let text = text.trim().to_string();
                         if text.is_empty() {
                             continue;
                         }
-                        let speaker = if source == "mic" { "You" } else { "Speaker 1" };
                         let utterance = Utterance {
                             source: source.into(),
-                            speaker: speaker.into(),
+                            speaker,
                             text,
                             t_ms,
                         };
