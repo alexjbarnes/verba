@@ -34,10 +34,20 @@ pub struct LlmConfig {
     pub eos_token_ids: Vec<i64>,
     /// Hard ceiling on prompt+generation tokens the model supports.
     pub max_context: usize,
+    /// Weights filename inside the model dir. Exports with ONNX external
+    /// data reference their companion files by the ORIGINAL name embedded in
+    /// the graph, so files keep their upstream names and this points at the
+    /// entry .onnx (default "model.onnx" for single-file exports).
+    #[serde(default = "default_model_file")]
+    pub model_file: String,
     /// Prompt template with `{system}` and `{user}` placeholders. Must end
     /// with the assistant-turn opener (and, for families with a thinking
     /// mode, whatever suppresses it — e.g. Qwen3's empty <think/> block).
     pub prompt_template: String,
+}
+
+fn default_model_file() -> String {
+    "model.onnx".into()
 }
 
 impl LlmConfig {
@@ -89,7 +99,7 @@ impl LlmRunner {
             .map_err(|e| format!("session builder: {e}"))?
             .with_execution_providers(&cpu_ep)
             .map_err(|e| format!("llm ep: {e}"))?
-            .commit_from_file(dir.join("model.onnx"))
+            .commit_from_file(dir.join(&cfg.model_file))
             .map_err(|e| format!("llm model: {e}"))?;
 
         let tokenizer = Tokenizer::from_file(dir.join("tokenizer.json"))

@@ -49,6 +49,21 @@ pub struct Manifest {
     pub schema: u32,
     pub dictation: DictationSpec,
     pub voices: VoicesSpec,
+    /// Desktop Meeting mode models (summarizer LLM variants + speaker
+    /// embedding). Optional so pre-meeting manifests keep parsing and old
+    /// apps ignore it.
+    #[serde(default)]
+    pub meeting: Option<MeetingSpec>,
+}
+
+#[derive(Clone, Deserialize)]
+pub struct MeetingSpec {
+    /// Aggregate version; bumps when any meeting component bumps.
+    pub version: u32,
+    /// `speaker` plus one `sum-*` component per offered summarizer model.
+    /// The user installs the speaker component and exactly ONE summarizer
+    /// (their choice; a RAM-based recommendation preselects it).
+    pub components: HashMap<String, ComponentSpec>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -127,6 +142,13 @@ pub struct InstalledPackages {
     pub dictation_version: u32,
     #[serde(default)]
     pub dictation_components: HashMap<String, u32>,
+    #[serde(default)]
+    pub meeting_version: u32,
+    #[serde(default)]
+    pub meeting_components: HashMap<String, u32>,
+    /// Which summarizer component the user installed (e.g. "sum-qwen3-1.7b").
+    #[serde(default)]
+    pub meeting_summarizer: String,
 }
 
 /// Absolute paths to the seven grammar model files, present only when every
@@ -338,9 +360,71 @@ impl ModelManager {
                 "pending_bytes": pending_bytes,
                 "progress": self.progress.lock().unwrap().get("pkg-dictation").copied().unwrap_or(0.0),
             },
+            "meeting": self.meeting_status(&m, &installed),
             "voices_version": m.voices.version,
             "manifest_age_secs": self.manifest_age_secs(),
         })
+    }
+
+    /// Meeting-package status: same state machine as dictation, but the
+    /// component set is `speaker` + the ONE summarizer the user chose (from
+    /// the installed record, else nothing counts as chosen yet).
+    fn meeting_status(&self, m: &Manifest, installed: &InstalledPackages) -> serde_json::Value {
+        let Some(spec) = &m.meeting else {
+            return serde_json::json!({ "state": "unavailable" });
+        };
+        let chosen = installed.meeting_summarizer.clone();
+        let components = Self::meeting_components(spec, &chosen);
+        let have_choice = !chosen.is_empty() && spec.components.contains_key(&chosen);
+        let files_complete = have_choice
+            && components
+                .iter()
+                .all(|(_, c)| c.all_files().iter().all(|f| self.find_file(&f.rel_path).is_some()));
+        let any_state = installed.meeting_version > 0
+            || components
+                .iter()
+                .any(|(_, c)| c.all_files().iter().any(|f| self.find_file(&f.rel_path).is_some()));
+        let downloading = self.progress.lock().unwrap().contains_key("pkg-meeting");
+        let versions_current = components
+            .iter()
+            .all(|(name, c)| installed.meeting_components.get(name) == Some(&c.version));
+        let state = if downloading {
+            "downloading"
+        } else if have_choice && files_complete && versions_current {
+            "installed"
+        } else if any_state {
+            "update_available"
+        } else {
+            "not_installed"
+        };
+        let pending_bytes: u64 = components
+            .iter()
+            .flat_map(|(_, c)| c.all_files())
+            .filter(|f| self.find_file(&f.rel_path).is_none())
+            .map(|f| f.bytes)
+            .sum();
+        serde_json::json!({
+            "installed_version": installed.meeting_version,
+            "available_version": spec.version,
+            "state": state,
+            "summarizer": chosen,
+            "pending_bytes": pending_bytes,
+            "progress": self.progress.lock().unwrap().get("pkg-meeting").copied().unwrap_or(0.0),
+        })
+    }
+
+    /// The meeting components an install covers: `speaker` plus the chosen
+    /// summarizer (empty choice -> speaker only, which is never offered alone
+    /// by the UI).
+    fn meeting_components(spec: &MeetingSpec, summarizer_id: &str) -> Vec<(String, ComponentSpec)> {
+        let mut out = Vec::new();
+        if let Some(c) = spec.components.get("speaker") {
+            out.push(("speaker".to_string(), c.clone()));
+        }
+        if let Some(c) = spec.components.get(summarizer_id) {
+            out.push((summarizer_id.to_string(), c.clone()));
+        }
+        out
     }
 
     /// Install or update the dictation package: for each platform component,
@@ -388,10 +472,12 @@ impl ModelManager {
             }
         }
 
-        let mut rec = InstalledPackages {
-            dictation_version: m.dictation.version,
-            dictation_components: HashMap::new(),
-        };
+        // Mutate the loaded record rather than rebuilding it: the meeting
+        // package's install state lives in the same file and must survive a
+        // dictation update.
+        let mut rec = self.installed_packages();
+        rec.dictation_version = m.dictation.version;
+        rec.dictation_components.clear();
         for (name, c) in &components {
             rec.dictation_components.insert(name.clone(), c.version);
         }
@@ -421,6 +507,131 @@ impl ModelManager {
             t5_tokenizer: by_role("t5_tokenizer")?,
             config: by_role("config")?,
         })
+    }
+
+    // ── Meeting package (desktop: summarizer LLM + speaker embedding) ──
+
+    /// Install or update the meeting package for the CHOSEN summarizer:
+    /// `speaker` + `sum-<...>` components, same partial-update semantics as
+    /// install_dictation. Records the choice so status/updates track it.
+    pub async fn install_meeting(
+        &self,
+        app: &tauri::AppHandle,
+        summarizer_id: &str,
+    ) -> Result<(), String> {
+        let m = self.manifest();
+        let spec = m.meeting.as_ref().ok_or("no meeting package in the manifest")?;
+        if !spec.components.contains_key(summarizer_id) {
+            return Err(format!("unknown summarizer: {summarizer_id}"));
+        }
+        let installed = self.installed_packages();
+        let components = Self::meeting_components(spec, summarizer_id);
+
+        let mut work: Vec<ModelFile> = Vec::new();
+        for (name, c) in &components {
+            let version_changed = installed.meeting_components.get(name) != Some(&c.version);
+            for f in c.all_files() {
+                let missing = self.find_file(&f.rel_path).is_none();
+                if version_changed || missing {
+                    if version_changed {
+                        let _ = std::fs::remove_file(self.base_dir.join(&f.rel_path));
+                    }
+                    work.push(f);
+                }
+            }
+        }
+
+        if !work.is_empty() {
+            self.download_files("pkg-meeting", &work, app).await?;
+        }
+
+        for (_, c) in &components {
+            if !c.verify_bytes {
+                continue;
+            }
+            for f in c.all_files() {
+                let path = self.base_dir.join(&f.rel_path);
+                let actual = std::fs::metadata(&path).map(|md| md.len()).unwrap_or(0);
+                if f.bytes > 0 && actual != f.bytes {
+                    let _ = std::fs::remove_file(&path);
+                    return Err(format!(
+                        "download verification failed for {} ({} bytes, expected {})",
+                        f.rel_path, actual, f.bytes
+                    ));
+                }
+            }
+        }
+
+        let mut rec = installed;
+        rec.meeting_version = spec.version;
+        rec.meeting_summarizer = summarizer_id.to_string();
+        rec.meeting_components.clear();
+        for (name, c) in &components {
+            rec.meeting_components.insert(name.clone(), c.version);
+        }
+        self.save_installed_packages(&rec)?;
+        log::info!("Meeting package installed: {summarizer_id} at version {}", spec.version);
+        Ok(())
+    }
+
+    /// The summarizer choices for the Settings UI, flagged with install state
+    /// and the RAM-based recommendation.
+    pub fn meeting_models(&self) -> Vec<serde_json::Value> {
+        let m = self.manifest();
+        let Some(spec) = &m.meeting else { return Vec::new() };
+        let recommended = recommended_summarizer(system_ram_bytes());
+        let mut out: Vec<serde_json::Value> = spec
+            .components
+            .iter()
+            .filter(|(id, _)| id.starts_with("sum-"))
+            .map(|(id, c)| {
+                let (name, desc, size) = match &c.model {
+                    Some(md) => (md.name.clone(), md.desc.clone(), md.size.clone()),
+                    None => (id.clone(), String::new(), String::new()),
+                };
+                let bytes: u64 = c.all_files().iter().map(|f| f.bytes).sum();
+                let installed = c
+                    .all_files()
+                    .iter()
+                    .all(|f| self.find_file(&f.rel_path).is_some());
+                serde_json::json!({
+                    "id": id,
+                    "name": name,
+                    "desc": desc,
+                    "size": size,
+                    "bytes": bytes,
+                    "installed": installed,
+                    "recommended": *id == recommended,
+                })
+            })
+            .collect();
+        // Smallest first, so the list reads as a capability ladder.
+        out.sort_by_key(|v| v["bytes"].as_u64().unwrap_or(0));
+        out
+    }
+
+    /// Directory holding the chosen summarizer's files, only when everything
+    /// (weights, tokenizer, llm_config) is on disk.
+    pub fn summarizer_dir(&self, summarizer_id: &str) -> Option<PathBuf> {
+        let m = self.manifest();
+        let c = m.meeting.as_ref()?.components.get(summarizer_id)?.clone();
+        let files = c.all_files();
+        if files.is_empty() {
+            return None;
+        }
+        for f in &files {
+            self.find_file(&f.rel_path)?;
+        }
+        self.find_file(&files[0].rel_path)?
+            .parent()
+            .map(|d| d.to_path_buf())
+    }
+
+    /// The speaker-embedding model, when downloaded.
+    pub fn speaker_model_path(&self) -> Option<PathBuf> {
+        let m = self.manifest();
+        let c = m.meeting.as_ref()?.components.get("speaker")?.clone();
+        c.files.first().and_then(|f| self.find_file(&f.rel_path))
     }
 
     fn default_base_dir() -> Result<PathBuf, String> {
@@ -923,6 +1134,72 @@ impl ModelManager {
     }
 }
 
+/// Total physical RAM, for the summarizer recommendation. Zero when the
+/// platform probe fails (callers treat that as the smallest tier).
+pub fn system_ram_bytes() -> u64 {
+    #[cfg(unix)]
+    {
+        let pages = unsafe { libc::sysconf(libc::_SC_PHYS_PAGES) };
+        let page_size = unsafe { libc::sysconf(libc::_SC_PAGE_SIZE) };
+        if pages > 0 && page_size > 0 {
+            return pages as u64 * page_size as u64;
+        }
+        0
+    }
+    #[cfg(windows)]
+    {
+        // GlobalMemoryStatusEx without a winapi dependency.
+        #[repr(C)]
+        struct MemoryStatusEx {
+            length: u32,
+            memory_load: u32,
+            total_phys: u64,
+            avail_phys: u64,
+            total_page_file: u64,
+            avail_page_file: u64,
+            total_virtual: u64,
+            avail_virtual: u64,
+            avail_extended_virtual: u64,
+        }
+        extern "system" {
+            fn GlobalMemoryStatusEx(buf: *mut MemoryStatusEx) -> i32;
+        }
+        let mut st = MemoryStatusEx {
+            length: std::mem::size_of::<MemoryStatusEx>() as u32,
+            memory_load: 0,
+            total_phys: 0,
+            avail_phys: 0,
+            total_page_file: 0,
+            avail_page_file: 0,
+            total_virtual: 0,
+            avail_virtual: 0,
+            avail_extended_virtual: 0,
+        };
+        if unsafe { GlobalMemoryStatusEx(&mut st) } != 0 {
+            return st.total_phys;
+        }
+        0
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        0
+    }
+}
+
+/// RAM-tier recommendation: <8GB -> Qwen3-0.6B, 8-16GB -> Qwen3-1.7B,
+/// >=16GB -> Llama-3.2-3B. Gemma-3-1b stays a listed alternative, never the
+/// recommendation.
+pub fn recommended_summarizer(ram_bytes: u64) -> String {
+    const GB: u64 = 1024 * 1024 * 1024;
+    if ram_bytes >= 16 * GB {
+        "sum-llama-3.2-3b".into()
+    } else if ram_bytes >= 8 * GB {
+        "sum-qwen3-1.7b".into()
+    } else {
+        "sum-qwen3-0.6b".into()
+    }
+}
+
 /// Recursive size of a directory (0 if absent).
 fn dir_size(dir: &std::path::Path) -> u64 {
     let mut total = 0u64;
@@ -1090,6 +1367,102 @@ mod tests {
     }
 
     #[test]
+    fn embedded_manifest_has_meeting_package() {
+        let m = parse_manifest(EMBEDDED_MANIFEST).unwrap();
+        let spec = m.meeting.as_ref().expect("meeting package present");
+        assert!(spec.components.contains_key("speaker"));
+        let sums: Vec<&String> = spec.components.keys().filter(|k| k.starts_with("sum-")).collect();
+        assert_eq!(sums.len(), 4, "four summarizer choices");
+        // Every meeting file carries an exact size (verify_bytes is on).
+        for c in spec.components.values() {
+            assert!(c.verify_bytes);
+            for f in c.all_files() {
+                assert!(f.bytes > 0, "missing exact byte count for {}", f.rel_path);
+            }
+        }
+    }
+
+    #[test]
+    fn manifest_without_meeting_still_parses() {
+        // A pre-meeting remote manifest (schema 1, no meeting key) must load.
+        let m = parse_manifest(
+            r#"{"schema":1,
+                "dictation":{"version":1,"components":{}},
+                "voices":{"version":1,"list":[]}}"#,
+        )
+        .unwrap();
+        assert!(m.meeting.is_none());
+    }
+
+    #[test]
+    fn recommended_summarizer_tiers() {
+        const GB: u64 = 1024 * 1024 * 1024;
+        assert_eq!(recommended_summarizer(4 * GB), "sum-qwen3-0.6b");
+        assert_eq!(recommended_summarizer(8 * GB), "sum-qwen3-1.7b");
+        assert_eq!(recommended_summarizer(12 * GB), "sum-qwen3-1.7b");
+        assert_eq!(recommended_summarizer(16 * GB), "sum-llama-3.2-3b");
+        assert_eq!(recommended_summarizer(0), "sum-qwen3-0.6b");
+    }
+
+    #[test]
+    fn meeting_status_states() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = test_manager(dir.path());
+
+        // Nothing chosen, nothing on disk.
+        let st = mgr.packages_status();
+        assert_eq!(st["meeting"]["state"], "not_installed");
+
+        // Choose + fully install the smallest summarizer.
+        let m = mgr.manifest();
+        let spec = m.meeting.as_ref().unwrap();
+        let chosen = "sum-qwen3-0.6b";
+        let mut rec = InstalledPackages::default();
+        rec.meeting_version = spec.version;
+        rec.meeting_summarizer = chosen.into();
+        for (name, c) in ModelManager::meeting_components(spec, chosen) {
+            for f in c.all_files() {
+                let p = dir.path().join(&f.rel_path);
+                fs::create_dir_all(p.parent().unwrap()).unwrap();
+                fs::write(p, b"fake").unwrap();
+            }
+            rec.meeting_components.insert(name, c.version);
+        }
+        mgr.save_installed_packages(&rec).unwrap();
+        let st = mgr.packages_status();
+        assert_eq!(st["meeting"]["state"], "installed");
+        assert_eq!(st["meeting"]["summarizer"], chosen);
+
+        // A version bump on the speaker component flips to update_available.
+        let mut stale = rec.clone();
+        stale.meeting_components.insert("speaker".into(), 0);
+        mgr.save_installed_packages(&stale).unwrap();
+        let st = mgr.packages_status();
+        assert_eq!(st["meeting"]["state"], "update_available");
+    }
+
+    #[test]
+    fn dictation_install_record_preserves_meeting_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = test_manager(dir.path());
+        let mut rec = InstalledPackages::default();
+        rec.meeting_version = 1;
+        rec.meeting_summarizer = "sum-qwen3-0.6b".into();
+        rec.meeting_components.insert("speaker".into(), 1);
+        mgr.save_installed_packages(&rec).unwrap();
+
+        // Simulate what install_dictation does to the record.
+        let mut rec2 = mgr.installed_packages();
+        rec2.dictation_version = 3;
+        mgr.save_installed_packages(&rec2).unwrap();
+
+        let out = mgr.installed_packages();
+        assert_eq!(out.meeting_version, 1);
+        assert_eq!(out.meeting_summarizer, "sum-qwen3-0.6b");
+        assert_eq!(out.dictation_version, 3);
+    }
+
+    #[test]
     fn packages_status_states() {
         let dir = tempfile::tempdir().unwrap();
         let mgr = test_manager(dir.path());
@@ -1104,7 +1477,8 @@ mod tests {
 
         // Everything present + versions recorded -> installed.
         let m = mgr.manifest();
-        let mut rec = InstalledPackages { dictation_version: m.dictation.version, dictation_components: HashMap::new() };
+        let mut rec = InstalledPackages::default();
+        rec.dictation_version = m.dictation.version;
         for (name, c) in platform_components(&m) {
             for f in c.all_files() {
                 let p = dir.path().join(&f.rel_path);

@@ -31,12 +31,31 @@ pub struct AppConfig {
     /// model in the registry (the original single-model behavior).
     #[serde(default)]
     pub tts_model: String,
+    /// Where meeting transcripts are written as Markdown (desktop Meeting
+    /// mode). Empty means the default: Documents/Verba Meetings.
+    #[serde(default = "default_meetings_dir")]
+    pub meeting_transcript_dir: String,
+    /// Where meeting summaries are written; defaults with the transcripts.
+    #[serde(default = "default_meetings_dir")]
+    pub meeting_summary_dir: String,
+    /// Chosen summarizer component id (e.g. "sum-qwen3-1.7b"); "" = unchosen.
+    #[serde(default)]
+    pub meeting_summarizer: String,
+    /// Label remote speakers via embedding clustering (experimental).
+    #[serde(default = "default_true")]
+    pub meeting_diarize: bool,
     /// Playback speed remembered per voice (voice string -> speed multiplier).
     /// Selecting a voice restores its last speed (default 1.0). MUST stay the
     /// last field: `toml` emits map fields as `[tables]`, which must follow all
     /// scalar fields, or serialization fails.
     #[serde(default)]
     pub tts_voice_speeds: HashMap<String, f32>,
+}
+
+fn default_meetings_dir() -> String {
+    dirs::document_dir()
+        .map(|d| d.join("Verba Meetings").to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 
 impl Default for AppConfig {
@@ -55,6 +74,10 @@ impl Default for AppConfig {
             tts_favourite_voices: Vec::new(),
             tts_voice: String::new(),
             tts_model: String::new(),
+            meeting_transcript_dir: default_meetings_dir(),
+            meeting_summary_dir: default_meetings_dir(),
+            meeting_summarizer: String::new(),
+            meeting_diarize: true,
             tts_voice_speeds: HashMap::new(),
         }
     }
@@ -113,6 +136,31 @@ mod tests {
     }
 
     #[test]
+    fn pre_meeting_config_loads_with_defaults() {
+        // A config written before the meeting fields existed: they must
+        // default (dirs from Documents, diarize on) rather than fail.
+        let toml_src = r#"
+language = "en"
+threads = 4
+output_dir = ""
+device_index = -1
+active_engine = "parakeet"
+active_model_id = ""
+haptic_feedback = true
+tts_favourite_sids = []
+tts_favourite_voices = []
+tts_voice = ""
+tts_model = ""
+
+[tts_voice_speeds]
+"#;
+        let cfg: AppConfig = toml::from_str(toml_src).unwrap();
+        assert!(cfg.meeting_diarize);
+        assert!(cfg.meeting_summarizer.is_empty());
+        assert_eq!(cfg.meeting_transcript_dir, default_meetings_dir());
+    }
+
+    #[test]
     fn roundtrip_toml() {
         let cfg = AppConfig {
             language: "fr".into(),
@@ -126,6 +174,10 @@ mod tests {
             tts_favourite_voices: vec!["tts-piper-alba:0".into()],
             tts_voice: "7".into(),
             tts_model: "tts-piper-alba".into(),
+            meeting_transcript_dir: "/tmp/meet-t".into(),
+            meeting_summary_dir: "/tmp/meet-s".into(),
+            meeting_summarizer: "sum-qwen3-1.7b".into(),
+            meeting_diarize: false,
             tts_voice_speeds: HashMap::from([("7".to_string(), 0.75f32)]),
         };
 
@@ -136,6 +188,9 @@ mod tests {
         assert_eq!(deserialized.threads, 8);
         assert_eq!(deserialized.device_index, 2);
         assert_eq!(deserialized.active_engine, "parakeet");
+        assert_eq!(deserialized.meeting_transcript_dir, "/tmp/meet-t");
+        assert_eq!(deserialized.meeting_summarizer, "sum-qwen3-1.7b");
+        assert!(!deserialized.meeting_diarize);
         assert_eq!(deserialized.active_model_id, "parakeet-v3-int8");
         assert!(!deserialized.haptic_feedback);
         assert_eq!(deserialized.tts_favourite_sids, vec![3, 7]);

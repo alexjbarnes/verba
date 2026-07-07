@@ -525,6 +525,25 @@ async fn packages_check_updates() -> serde_json::Value {
     st
 }
 
+/// Install the meeting package (speaker model + the chosen summarizer) and
+/// remember the choice in AppConfig for the session layer.
+#[tauri::command]
+async fn package_install_meeting(app: tauri::AppHandle, summarizer_id: String) -> Result<(), String> {
+    models::ModelManager::global()
+        .install_meeting(&app, &summarizer_id)
+        .await?;
+    let mut cfg = config::AppConfig::load();
+    cfg.meeting_summarizer = summarizer_id;
+    cfg.save()
+}
+
+/// Summarizer choices for the Settings UI, with install state and the
+/// RAM-based recommendation flag.
+#[tauri::command]
+fn meeting_models() -> Vec<serde_json::Value> {
+    models::ModelManager::global().meeting_models()
+}
+
 #[tauri::command]
 async fn package_install_dictation(app: tauri::AppHandle) -> Result<(), String> {
     models::ModelManager::global().install_dictation(&app).await?;
@@ -1464,6 +1483,8 @@ pub fn run() {
             packages_status,
             packages_check_updates,
             package_install_dictation,
+            package_install_meeting,
+            meeting_models,
             storage_summary,
             storage_clear,
             list_history,
