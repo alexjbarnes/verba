@@ -115,20 +115,53 @@ runtime state exactly like a not-yet-downloaded voice. Behavior for the
 missing case is unchanged by design: the stage silently skips (same as
 today's cfg-off builds and same as the <5-word skip).
 
+## Meeting package (desktop only)
+
+A third top-level manifest package, `meeting`, alongside `dictation` and
+`voices` (optional in the schema, so old manifests and old apps ignore it).
+It holds a `speaker` component (the embedding model for diarization) plus one
+`sum-*` component per offered summarizer LLM. The user installs the speaker
+component and exactly ONE summarizer — a RAM-tier recommendation preselects
+it (`recommended_summarizer`: <8 GB Qwen3-0.6B, 8-16 GB Qwen3-1.7B, ≥16 GB
+Llama-3.2-3B; Gemma-3-1b is always listed, never the recommendation). The
+chosen id lives in both `packages.json` (meeting_summarizer) and AppConfig.
+
+Summarizer LLMs are decoder-only ONNX (q4f16, onnx-community exports) run
+through `meeting/summarize.rs`'s hand-rolled KV-cache loop — the grammar T5
+decoder's technique, minus the encoder: one prefill over the whole prompt
+with empty caches, then one token per step with the model's `present.*`
+outputs fed back as `past_key_values.*` inputs (moved as opaque DynValues so
+f16 caches never get converted). Per-model facts (layers, kv heads, head
+dim, EOS ids, chat template, entry `model_file`) come from an
+`llm_config.json` beside the weights, authored at staging — nothing
+per-family is hardcoded. Gemma/Llama exports use ONNX external-data
+companions, so their files keep upstream names and `model_file` names the
+entry `.onnx`.
+
+Summarization map-reduces the transcript (~1000-token chunks, 10% overlap on
+utterance boundaries → per-chunk bullets → one combine pass) with the user's
+own notes leading as authoritative anchors, emitting `## Summary` /
+`## Decisions` / `## Action items`. Speaker diarization is experimental and
+loopback-only: a per-segment embedding clustered online (cosine 0.65, ≤8
+speakers), embeddings in memory only, never persisted.
+
 ## Hosting layout on R2
 
 ```
 models/TTS/...                        (existing, unchanged)
-models/grammar/1/<the 7 files>        (new; path carries component version)
-models/vad/1/silero_vad.onnx          (new)
-manifest/v1.json                      (new)
+models/grammar/1/<the 7 files>        (path carries component version)
+models/vad/1/silero_vad.onnx
+models/summarizer/<id>/1/llm_config.json   (new; the ONLY meeting files on R2)
+manifest/v1.json
 ```
 
-ASR files stay on Hugging Face initially (public, large, already working);
-the manifest can repoint them at R2 later without an app release. This box
-has no R2 write credentials: artifacts are staged locally under
-`r2-staging/` with exact upload commands; the app-side code ships first and
-grammar/VAD activate when the objects go live.
+ASR and summarizer WEIGHTS stay on their public hosts (Hugging Face for
+Parakeet + the LLMs, the sherpa GitHub release for the speaker model) — the
+manifest points straight at them, exactly like ASR does today. Only the
+authored `llm_config.json` files (a few hundred bytes each, no public home)
+ship from R2. This box has no R2 write credentials: artifacts are staged
+locally under `r2-staging/` with exact upload commands; the app-side code
+ships first and each component activates when its objects go live.
 
 ## Storage management (Settings > Storage)
 
