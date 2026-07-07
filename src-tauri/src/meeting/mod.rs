@@ -390,3 +390,107 @@ pub fn status() -> serde_json::Value {
         None => serde_json::json!({ "state": "idle" }),
     }
 }
+
+/// Parse a stored transcript markdown back into notes + speaker/text lines,
+/// so summarization (at stop time or a later re-run) has a single source.
+/// The format is ours (store::transcript_markdown): a `## Notes` block then
+/// `## Transcript` with `**[MM:SS] Speaker:** text` lines.
+fn parse_transcript(md: &str) -> (String, Vec<summarize::TranscriptLine>) {
+    let mut notes = String::new();
+    let mut lines = Vec::new();
+    let mut section = "";
+    for raw in md.lines() {
+        if let Some(h) = raw.strip_prefix("## ") {
+            section = if h.trim() == "Notes" {
+                "notes"
+            } else if h.trim() == "Transcript" {
+                "transcript"
+            } else {
+                ""
+            };
+            continue;
+        }
+        match section {
+            "notes" => {
+                notes.push_str(raw);
+                notes.push('\n');
+            }
+            "transcript" => {
+                // **[MM:SS] Speaker:** text
+                if let Some(rest) = raw.strip_prefix("**[") {
+                    if let Some((_, after)) = rest.split_once("] ") {
+                        if let Some((speaker, text)) = after.split_once(":** ") {
+                            lines.push(summarize::TranscriptLine {
+                                speaker: speaker.to_string(),
+                                text: text.to_string(),
+                            });
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    (notes.trim().to_string(), lines)
+}
+
+/// Summarize a stored meeting with the chosen local LLM, writing the summary
+/// markdown next to the transcript and recording its path. Emits
+/// `meeting-summary-progress {id, stage, done, total}`. Runs on a blocking
+/// thread (the LLM is CPU-heavy); the model is loaded per job and dropped
+/// after so its multi-GB session doesn't linger.
+pub fn summarize(app: tauri::AppHandle, id: String) -> Result<MeetingMeta, String> {
+    let store = store::MeetingStore::global();
+    let mut meta = store.get(&id).ok_or("meeting not found")?;
+    if meta.transcript_path.is_empty() {
+        return Err("no transcript to summarize".into());
+    }
+
+    let cfg = crate::config::AppConfig::load();
+    if cfg.meeting_summarizer.is_empty() {
+        return Err("no summarizer model installed — choose one in Settings".into());
+    }
+    let model_dir = crate::models::ModelManager::global()
+        .summarizer_dir(&cfg.meeting_summarizer)
+        .ok_or("summarizer model not downloaded")?;
+
+    let md = std::fs::read_to_string(&meta.transcript_path)
+        .map_err(|e| format!("read transcript: {e}"))?;
+    let (notes, lines) = parse_transcript(&md);
+    if lines.is_empty() && notes.is_empty() {
+        return Err("transcript is empty".into());
+    }
+
+    let emit = |stage: &str, done: usize, total: usize| {
+        let _ = app.emit(
+            "meeting-summary-progress",
+            serde_json::json!({ "id": id, "stage": stage, "done": done, "total": total }),
+        );
+    };
+
+    emit("loading", 0, 1);
+    let runner = summarize::LlmRunner::load(&model_dir)?;
+    emit("loading", 1, 1);
+
+    let summary = summarize::summarize_meeting(&runner, &notes, &lines, |stage, done, total| {
+        emit(stage, done, total);
+    })?;
+    drop(runner); // free the session before writing files
+
+    // Summary markdown beside the transcript, in the configured summary dir.
+    let body = format!("# {}\n\n{summary}\n", meta.title);
+    let filename = {
+        let stem = std::path::Path::new(&meta.transcript_path)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("Meeting");
+        format!("{stem} Summary.md")
+    };
+    let path = store::write_markdown(&cfg.meeting_summary_dir, &filename, &body)?;
+    meta.summary_path = path.to_string_lossy().into_owned();
+    meta.summarizer_id = cfg.meeting_summarizer.clone();
+    store.upsert(meta.clone())?;
+
+    emit("done", 1, 1);
+    Ok(meta)
+}

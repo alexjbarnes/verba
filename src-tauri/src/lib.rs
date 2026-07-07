@@ -634,6 +634,17 @@ fn meeting_read_file(id: String, which: String) -> Result<String, String> {
     std::fs::read_to_string(&path).map_err(|e| format!("read {path}: {e}"))
 }
 
+/// Summarize a stored meeting with the chosen local LLM. Blocking (CPU-heavy
+/// generation) off the main thread; progress arrives via
+/// meeting-summary-progress events.
+#[cfg(not(target_os = "android"))]
+#[tauri::command]
+async fn meeting_summarize(app: tauri::AppHandle, id: String) -> Result<meeting::store::MeetingMeta, String> {
+    tauri::async_runtime::spawn_blocking(move || meeting::summarize(app, id))
+        .await
+        .map_err(|e| format!("summarize task: {e}"))?
+}
+
 // Android stubs: same names/signatures, always an error.
 #[cfg(target_os = "android")]
 #[tauri::command]
@@ -678,6 +689,11 @@ fn meeting_delete(_id: String, _delete_files: Option<bool>) -> Result<(), String
 #[cfg(target_os = "android")]
 #[tauri::command]
 fn meeting_read_file(_id: String, _which: String) -> Result<String, String> {
+    Err("Meeting mode is desktop only".into())
+}
+#[cfg(target_os = "android")]
+#[tauri::command]
+async fn meeting_summarize(_app: tauri::AppHandle, _id: String) -> Result<serde_json::Value, String> {
     Err("Meeting mode is desktop only".into())
 }
 
@@ -1640,6 +1656,7 @@ pub fn run() {
             meeting_get,
             meeting_delete,
             meeting_read_file,
+            meeting_summarize,
             storage_summary,
             storage_clear,
             list_history,

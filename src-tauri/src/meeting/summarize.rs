@@ -322,3 +322,213 @@ fn argmax_last(outputs: &ort::session::SessionOutputs<'_>) -> Result<i64, String
         .map(|(i, _)| i as i64)
         .ok_or_else(|| "empty logits".into())
 }
+
+// ── Meeting summarization: map-reduce over the transcript, anchored on the
+// user's own notes ──
+
+impl LlmRunner {
+    /// Token count of a plain string (no chat template), for chunk sizing.
+    fn count_tokens(&self, text: &str) -> usize {
+        self.tokenizer
+            .encode(text, false)
+            .map(|e| e.get_ids().len())
+            .unwrap_or(0)
+    }
+}
+
+/// One transcript line as the summarizer sees it (speaker + text; timing is
+/// dropped — it doesn't help a summary).
+pub struct TranscriptLine {
+    pub speaker: String,
+    pub text: String,
+}
+
+const MAP_SYSTEM: &str =
+    "You are a meeting-notes assistant. Summarize this part of a meeting transcript in a few concise bullet points capturing what was said, decided, and any tasks assigned. Output only the bullets.";
+
+const COMBINE_SYSTEM: &str =
+    "You are a meeting-notes assistant. Using the user's own notes as the source of truth and the transcript summaries as supporting detail, write the final meeting notes. Output exactly three markdown sections with these headings and nothing else:\n## Summary\n## Decisions\n## Action items\nUnder each, use concise bullet points. If a section has nothing, write '- None'.";
+
+/// Chunk transcript lines into ~`target_tokens` windows with ~10% overlap,
+/// never splitting a line. A line longer than the target becomes its own
+/// (oversized) chunk rather than being cut mid-utterance.
+pub fn chunk_lines(
+    runner: &LlmRunner,
+    lines: &[TranscriptLine],
+    target_tokens: usize,
+) -> Vec<String> {
+    let rendered: Vec<(String, usize)> = lines
+        .iter()
+        .map(|l| {
+            let s = format!("{}: {}", l.speaker, l.text);
+            let n = runner.count_tokens(&s);
+            (s, n)
+        })
+        .collect();
+
+    let overlap = target_tokens / 10;
+    let mut chunks = Vec::new();
+    let mut i = 0;
+    while i < rendered.len() {
+        let mut cur = String::new();
+        let mut tokens = 0;
+        let mut j = i;
+        while j < rendered.len() && (tokens == 0 || tokens + rendered[j].1 <= target_tokens) {
+            if !cur.is_empty() {
+                cur.push('\n');
+            }
+            cur.push_str(&rendered[j].0);
+            tokens += rendered[j].1;
+            j += 1;
+        }
+        chunks.push(cur);
+        if j >= rendered.len() {
+            break;
+        }
+        // Step back a few lines for overlap so context spans the boundary.
+        let mut back = 0;
+        let mut overlap_tokens = 0;
+        while back < j - i && overlap_tokens < overlap {
+            overlap_tokens += rendered[j - 1 - back].1;
+            back += 1;
+        }
+        i = (j - back).max(i + 1);
+    }
+    chunks
+}
+
+/// Full summarization: map each transcript chunk to bullets, then a single
+/// combine pass that leads with the user's verbatim notes. Tiny transcripts
+/// (one chunk) skip the map stage. `progress(stage, done, total)` is called
+/// per unit of work for UI.
+pub fn summarize_meeting(
+    runner: &LlmRunner,
+    notes: &str,
+    lines: &[TranscriptLine],
+    mut progress: impl FnMut(&str, usize, usize),
+) -> Result<String, String> {
+    // ~1000-token chunks (well within every model's 8k context alongside the
+    // map prompt and headroom).
+    let chunks = chunk_lines(runner, lines, 1000);
+
+    let notes = notes.trim();
+    let notes_block = if notes.is_empty() {
+        "(The user did not take notes.)".to_string()
+    } else {
+        format!("The user's notes (authoritative):\n{notes}")
+    };
+
+    // A transcript that fits in one chunk goes straight to the combine pass.
+    let summaries: Vec<String> = if chunks.len() <= 1 {
+        chunks
+    } else {
+        let total = chunks.len();
+        let mut out = Vec::with_capacity(total);
+        for (i, chunk) in chunks.iter().enumerate() {
+            progress("map", i, total);
+            let gen = runner.generate(MAP_SYSTEM, chunk, 250)?;
+            out.push(gen.text);
+        }
+        out
+    };
+
+    progress("combine", 0, 1);
+    let combine_user = format!(
+        "{notes_block}\n\nTranscript summaries:\n{}",
+        summaries.join("\n\n")
+    );
+    let gen = runner.generate(COMBINE_SYSTEM, &combine_user, 700)?;
+    progress("combine", 1, 1);
+    Ok(gen.text.trim().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The chat template must render {system}/{user} and end with the
+    // assistant opener, per family. Verified from a synthetic LlmConfig so a
+    // template edit that breaks the turn structure fails loudly.
+    fn cfg(family: &str, template: &str) -> LlmConfig {
+        LlmConfig {
+            family: family.into(),
+            num_layers: 1,
+            num_kv_heads: 1,
+            head_dim: 1,
+            eos_token_ids: vec![0],
+            max_context: 8192,
+            model_file: "model.onnx".into(),
+            prompt_template: template.into(),
+        }
+    }
+
+    #[test]
+    fn qwen3_template_renders_nothink() {
+        let c = cfg(
+            "qwen3",
+            "<|im_start|>system\n{system}<|im_end|>\n<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
+        );
+        let out = c.render_prompt("SYS", "USR");
+        assert!(out.contains("<|im_start|>system\nSYS<|im_end|>"));
+        assert!(out.contains("<|im_start|>user\nUSR<|im_end|>"));
+        assert!(out.ends_with("<|im_start|>assistant\n<think>\n\n</think>\n\n"));
+    }
+
+    #[test]
+    fn gemma_template_folds_system_into_user() {
+        let c = cfg(
+            "gemma3",
+            "<start_of_turn>user\n{system}\n\n{user}<end_of_turn>\n<start_of_turn>model\n",
+        );
+        let out = c.render_prompt("SYS", "USR");
+        assert!(out.starts_with("<start_of_turn>user\nSYS\n\nUSR<end_of_turn>"));
+        assert!(out.ends_with("<start_of_turn>model\n"));
+    }
+
+    #[test]
+    fn llama_template_has_header_ids() {
+        let c = cfg(
+            "llama32",
+            "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n{system}<|eot_id|><|start_header_id|>user<|end_header_id|>\n\n{user}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n",
+        );
+        let out = c.render_prompt("SYS", "USR");
+        assert!(out.contains("system<|end_header_id|>\n\nSYS<|eot_id|>"));
+        assert!(out.ends_with("assistant<|end_header_id|>\n\n"));
+    }
+}
+
+#[cfg(test)]
+mod integration {
+    use super::*;
+    use std::path::PathBuf;
+
+    // Real end-to-end summary. Run manually:
+    //   SHERPA_ONNX_LIB_DIR=<lib> ORT_DYLIB_PATH=<libonnxruntime> \
+    //   LD_LIBRARY_PATH=<lib> MEETING_LLM_DIR=<scratch/qwen3-0.6b> \
+    //   cargo test --lib meeting::summarize::integration -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn summarize_real_model() {
+        let dir = match std::env::var("MEETING_LLM_DIR") {
+            Ok(d) => PathBuf::from(d),
+            Err(_) => {
+                eprintln!("set MEETING_LLM_DIR to a model dir");
+                return;
+            }
+        };
+        let runner = LlmRunner::load(&dir).expect("load model");
+        let lines = vec![
+            TranscriptLine { speaker: "You".into(), text: "Let's lock the launch date.".into() },
+            TranscriptLine { speaker: "Speaker 1".into(), text: "Friday works if QA signs off Thursday.".into() },
+            TranscriptLine { speaker: "Speaker 2".into(), text: "I'll own the QA pass and the rollback plan.".into() },
+            TranscriptLine { speaker: "You".into(), text: "Great, and Sam drafts the release notes.".into() },
+        ];
+        let summary = summarize_meeting(&runner, "ship friday; sam=notes; qa owns rollback", &lines, |s, d, t| {
+            eprintln!("stage {s} {d}/{t}");
+        })
+        .expect("summarize");
+        eprintln!("--- summary ---\n{summary}\n---------------");
+        assert!(summary.contains("## Summary"));
+        assert!(summary.contains("## Action items"));
+    }
+}
