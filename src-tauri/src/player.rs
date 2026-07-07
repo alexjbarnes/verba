@@ -195,7 +195,7 @@ fn run_stream(
     let device = host.default_output_device().ok_or("no output audio device")?;
     let config = cpal::StreamConfig {
         channels: 1,
-        sample_rate: cpal::SampleRate(sample_rate as u32),
+        sample_rate: sample_rate as u32,
         buffer_size: cpal::BufferSize::Default,
     };
 
@@ -205,7 +205,7 @@ fn run_stream(
     let rebuffer_margin = (sample_rate as usize) * REBUFFER_MARGIN_SECS;
     let stream = device
         .build_output_stream(
-            &config,
+            config,
             move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
                 // Realtime audio thread. Do ONLY a bounded copy here — no
                 // allocation, no channel draining (that is the feeder's job).

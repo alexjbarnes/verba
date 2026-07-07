@@ -19,7 +19,11 @@ android {
     defaultConfig {
         manifestPlaceholders["usesCleartextTraffic"] = "false"
         applicationId = "com.alexb151.verba"
-        minSdk = 24
+        // API 26 (Android 8.0): cpal 0.18's Android host is AAudio-only (it
+        // dropped oboe's OpenSLES fallback), and libaaudio.so ships in the NDK
+        // sysroot only from API 26. Raising the floor from 24 drops Android
+        // 7.0/7.1.
+        minSdk = 26
         targetSdk = 36
         versionCode = tauriProperties.getProperty("tauri.android.versionCode", "1").toInt()
         versionName = tauriProperties.getProperty("tauri.android.versionName", "1.0")

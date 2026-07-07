@@ -106,24 +106,49 @@ struct StreamHandle {
     disconnected: Arc<AtomicBool>,
 }
 
+/// Which audio device a recorder should open. Resolved inside the worker
+/// thread (a `cpal::Device` is not `Send`, so only this Send descriptor
+/// crosses the thread boundary). `ConfigInput` preserves the dictation
+/// behavior — the device_index in AppConfig, else the default input. The
+/// loopback variants back Meeting mode's system-audio capture.
+#[derive(Clone, Debug)]
+pub enum DeviceSpec {
+    /// AppConfig.device_index, falling back to the default input device.
+    ConfigInput,
+    /// A specific input device selected by its human name.
+    InputByName(String),
+    /// The default OUTPUT device opened as an input (WASAPI loopback on
+    /// Windows, Core Audio process tap on macOS 14.6+).
+    LoopbackDefaultOutput,
+}
+
 /// Audio recorder with a dedicated worker thread.
 pub struct AudioRecorder {
     cmd_tx: mpsc::Sender<Cmd>,
     event_rx: mpsc::Receiver<Event>,
     vad_path: Option<PathBuf>,
+    device_spec: DeviceSpec,
 }
 
 impl AudioRecorder {
-    /// Spawn the recorder worker. The VAD model path must point to a Silero
-    /// ONNX file. If `vad_model` is None, VAD is disabled and all audio is kept.
+    /// Spawn the recorder worker on the configured input device. The VAD model
+    /// path must point to a Silero ONNX file. If `vad_model` is None, VAD is
+    /// disabled and all audio is kept.
     pub fn new(vad_model: Option<&Path>) -> Result<Self, String> {
+        Self::new_with_device(vad_model, DeviceSpec::ConfigInput)
+    }
+
+    /// Spawn the recorder worker on an explicit device (Meeting mode uses this
+    /// for the loopback stream).
+    pub fn new_with_device(vad_model: Option<&Path>, device_spec: DeviceSpec) -> Result<Self, String> {
         let vad_path: Option<PathBuf> = vad_model.map(|p| p.to_path_buf());
-        let (cmd_tx, event_rx) = Self::spawn_worker(vad_path.as_deref())?;
-        Ok(Self { cmd_tx, event_rx, vad_path })
+        let (cmd_tx, event_rx) = Self::spawn_worker(vad_path.as_deref(), device_spec.clone())?;
+        Ok(Self { cmd_tx, event_rx, vad_path, device_spec })
     }
 
     fn spawn_worker(
         vad_path: Option<&Path>,
+        device_spec: DeviceSpec,
     ) -> Result<(mpsc::Sender<Cmd>, mpsc::Receiver<Event>), String> {
         let (cmd_tx, cmd_rx) = mpsc::channel();
         let (event_tx, event_rx) = mpsc::channel();
@@ -151,7 +176,7 @@ impl AudioRecorder {
                     }
                 };
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    worker(cmd_rx, event_tx, vad);
+                    worker(cmd_rx, event_tx, vad, device_spec);
                 }));
                 if let Err(panic_info) = result {
                     let msg = if let Some(s) = panic_info.downcast_ref::<String>() {
@@ -190,7 +215,7 @@ impl AudioRecorder {
     /// or Err if it failed to start (e.g. VAD model missing).
     pub fn respawn(&mut self) -> Result<(), String> {
         log::info!("Respawning recorder worker thread");
-        let (cmd_tx, event_rx) = Self::spawn_worker(self.vad_path.as_deref())?;
+        let (cmd_tx, event_rx) = Self::spawn_worker(self.vad_path.as_deref(), self.device_spec.clone())?;
         self.cmd_tx = cmd_tx;
         self.event_rx = event_rx;
         Ok(())
@@ -240,7 +265,7 @@ impl AudioRecorder {
     }
 }
 
-fn worker(cmd_rx: mpsc::Receiver<Cmd>, event_tx: mpsc::Sender<Event>, mut vad: Option<Vad>) {
+fn worker(cmd_rx: mpsc::Receiver<Cmd>, event_tx: mpsc::Sender<Event>, mut vad: Option<Vad>, device_spec: DeviceSpec) {
     while let Ok(cmd) = cmd_rx.recv() {
         match cmd {
             Cmd::Start { segment_tx } => {
@@ -270,7 +295,7 @@ fn worker(cmd_rx: mpsc::Receiver<Cmd>, event_tx: mpsc::Sender<Event>, mut vad: O
                         }
                     }
 
-                    match open_stream() {
+                    match open_stream(&device_spec) {
                         Ok(mut handle) => {
                             if !sent_started {
                                 let _ = event_tx.send(Event::Started);
@@ -337,49 +362,74 @@ fn worker(cmd_rx: mpsc::Receiver<Cmd>, event_tx: mpsc::Sender<Event>, mut vad: O
 }
 
 /// Open the mic and return the stream handle.
-/// Reads the configured device_index from AppConfig. If -1 or invalid,
-/// falls back to the system default input device.
-fn open_stream() -> Result<StreamHandle, String> {
-    let t = std::time::Instant::now();
-    let host = cpal::default_host();
-    let cfg = crate::config::AppConfig::load();
-    let device = if cfg.device_index >= 0 {
-        // Look up the specific device by index
-        let idx = cfg.device_index as usize;
-        let mut found = None;
-        if let Ok(inputs) = host.input_devices() {
-            for (i, dev) in inputs.enumerate() {
-                if i == idx {
-                    if let Ok(name) = dev.name() {
-                        log::info!("Using configured input device [{idx}]: {name}");
+/// Resolve the cpal device for a `DeviceSpec`. Runs on the recorder worker
+/// thread (the returned `Device` is not `Send`). Loopback opens the default
+/// OUTPUT device as an input, which cpal maps to WASAPI loopback / a Core
+/// Audio tap / a monitor source depending on platform.
+fn resolve_device(host: &cpal::Host, spec: &DeviceSpec) -> Result<cpal::Device, String> {
+    match spec {
+        DeviceSpec::ConfigInput => {
+            let cfg = crate::config::AppConfig::load();
+            if cfg.device_index >= 0 {
+                let idx = cfg.device_index as usize;
+                if let Ok(inputs) = host.input_devices() {
+                    for (i, dev) in inputs.enumerate() {
+                        if i == idx {
+                            if let Ok(desc) = dev.description() {
+                                log::info!("Using configured input device [{idx}]: {}", desc.name());
+                            }
+                            return Ok(dev);
+                        }
                     }
-                    found = Some(dev);
-                    break;
+                }
+                log::warn!("Configured device_index {idx} not found, falling back to default");
+            }
+            let dev = host.default_input_device().ok_or("no input device available")?;
+            if let Ok(desc) = dev.description() {
+                log::info!("Using system default input device: {}", desc.name());
+            }
+            Ok(dev)
+        }
+        DeviceSpec::InputByName(name) => {
+            if let Ok(inputs) = host.input_devices() {
+                for dev in inputs {
+                    if dev.description().map(|d| d.name() == name).unwrap_or(false) {
+                        log::info!("Using named input device: {name}");
+                        return Ok(dev);
+                    }
                 }
             }
+            Err(format!("input device not found: {name}"))
         }
-        match found {
-            Some(dev) => dev,
-            None => {
-                log::warn!("Configured device_index {idx} not found, falling back to default");
-                host.default_input_device()
-                    .ok_or("no input device available")?
+        DeviceSpec::LoopbackDefaultOutput => {
+            let dev = host
+                .default_output_device()
+                .ok_or("no output device available for loopback")?;
+            if let Ok(desc) = dev.description() {
+                log::info!("Loopback: capturing default output device: {}", desc.name());
             }
+            Ok(dev)
         }
-    } else {
-        let dev = host.default_input_device()
-            .ok_or("no input device available")?;
-        if let Ok(name) = dev.name() {
-            log::info!("Using system default input device: {name}");
-        }
-        dev
+    }
+}
+
+fn open_stream(spec: &DeviceSpec) -> Result<StreamHandle, String> {
+    let t = std::time::Instant::now();
+    let host = cpal::default_host();
+    let device = resolve_device(&host, spec)?;
+
+    // Loopback captures an OUTPUT device, so its stream shape comes from the
+    // output config; every other spec is a normal input.
+    let supported = match spec {
+        DeviceSpec::LoopbackDefaultOutput => device
+            .default_output_config()
+            .map_err(|e| format!("no output config for loopback: {e}"))?,
+        _ => device
+            .default_input_config()
+            .map_err(|e| format!("no input config: {e}"))?,
     };
 
-    let supported = device
-        .default_input_config()
-        .map_err(|e| format!("no input config: {e}"))?;
-
-    let device_rate = supported.sample_rate().0 as i32;
+    let device_rate = supported.sample_rate() as i32;
     let channels = supported.channels() as usize;
 
     log::info!(
@@ -419,7 +469,7 @@ fn open_stream() -> Result<StreamHandle, String> {
 
     let stream = device
         .build_input_stream(
-            &stream_config,
+            stream_config,
             move |data: &[f32], _: &cpal::InputCallbackInfo| {
                 let mono: Vec<f32> = if channels > 1 {
                     data.chunks(channels)

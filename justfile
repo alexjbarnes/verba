@@ -229,6 +229,9 @@ _build profile: _tauri-build _strip _repackage _sign
 _tauri-build:
     @echo "==> Building with Tauri CLI (arm64)..."
     @test -f {{sherpa_libs}}/libsherpa-onnx-c-api.a || (echo "ERROR: sherpa-onnx libs not found at {{sherpa_libs}}" && echo "Run: just setup-android" && exit 1)
+    # NB: the Rust link API level (and gradle minSdk) come from
+    # bundle.android.minSdkVersion in tauri.conf.json — 26, required because
+    # cpal 0.18's Android host is AAudio-only (libaaudio.so ships from API 26).
     cd {{repo_root}} && SHERPA_ONNX_LIB_DIR="{{sherpa_libs}}" npx tauri android build --target aarch64 --apk
 
 # Strip debug symbols from .so to reduce APK size

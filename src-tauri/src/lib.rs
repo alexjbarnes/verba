@@ -9,6 +9,8 @@ mod heteronyms;
 mod history;
 mod library;
 mod media;
+#[cfg(not(target_os = "android"))]
+pub mod meeting;
 mod mispronunciations;
 mod models;
 #[cfg(desktop)]
@@ -20,7 +22,7 @@ mod player;
 pub mod postprocess;
 #[cfg(desktop)]
 mod sound;
-mod recorder;
+pub mod recorder;
 mod snippets;
 mod share;
 mod transcribe;
