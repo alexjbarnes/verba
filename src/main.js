@@ -488,16 +488,16 @@ function renderReports(entries) {
       </div>`;
     return;
   }
+  let i = 0;
   for (const entry of [...entries].reverse()) {
     const row = document.createElement('div');
-    row.className = 'flex items-center justify-between gap-3 bg-surface-container-low rounded-xl border border-outline-variant/20 px-4 py-3';
+    row.className = 'stagger-in bg-surface-container rounded-xl px-3.5 py-3';
+    row.style.setProperty('--i', i++);
     const when = entry.reported_at_ms ? new Date(entry.reported_at_ms).toLocaleString() : '';
+    const meta = [entry.voice, when].filter(Boolean).join(' \u{b7} ');
     row.innerHTML = `
-      <div class="min-w-0 flex-1">
-        <span class="text-sm font-medium text-on-surface truncate select-text block">${escapeHtml(entry.word)}</span>
-        ${entry.voice ? `<span class="text-[10px] text-on-surface-variant/70 truncate block mt-0.5">${escapeHtml(entry.voice)}</span>` : ''}
-      </div>
-      <span class="text-[11px] text-on-surface-variant tabular-nums shrink-0">${escapeHtml(when)}</span>`;
+      <span class="text-[15px] font-semibold leading-snug text-on-surface truncate select-text block">${escapeHtml(entry.word)}</span>
+      ${meta ? `<span class="text-xs text-on-surface-variant tabular-nums truncate block mt-0.5">${escapeHtml(meta)}</span>` : ''}`;
     list.appendChild(row);
   }
 }
@@ -984,17 +984,19 @@ async function loadSnippets() {
   }
   snippetEmpty.classList.add('hidden');
 
+  let i = 0;
   for (const snippet of items) {
     const row = document.createElement('div');
-    row.className = 'flex items-start justify-between gap-3 px-4 py-3';
+    row.className = 'stagger-in flex items-start justify-between gap-3 px-4 py-3';
+    row.style.setProperty('--i', i++);
     row.innerHTML = `
       <div class="min-w-0 flex-1 snippet-edit-target cursor-pointer" data-id="${escapeHtml(snippet.id)}">
         <div class="flex flex-wrap gap-1 mb-1">
           ${snippet.triggers.map(t =>
-            `<span class="text-xs font-mono bg-primary/10 text-primary px-2 py-0.5 rounded">${escapeHtml(t)}</span>`
+            `<span class="text-[10px] font-mono font-semibold bg-primary/10 text-primary px-2 py-0.5 rounded-full">${escapeHtml(t)}</span>`
           ).join('')}
         </div>
-        <p class="text-sm text-on-surface leading-relaxed">${escapeHtml(snippet.body)}</p>
+        <p class="text-[15px] font-semibold leading-snug text-on-surface line-clamp-2">${escapeHtml(snippet.body)}</p>
       </div>
       <button class="snippet-del-btn shrink-0 text-on-surface-variant hover:text-error transition-colors cursor-pointer p-1.5 rounded-lg hover:bg-error/10 mt-0.5" data-id="${escapeHtml(snippet.id)}" title="Delete">
         <span class="material-symbols-outlined text-base">delete</span>
@@ -1446,7 +1448,7 @@ function speakersOf(m) {
   return VOICES.filter(v => v.model === m.id).length || 1;
 }
 
-function voiceRowHtml(v) {
+function voiceRowHtml(v, i) {
   const key = voiceKey(v.model, v.sid);
   const m = modelById(v.model);
   const fav = ttsFavourites.includes(key);
@@ -1457,24 +1459,28 @@ function voiceRowHtml(v) {
   if (v.hint) hintBits.push(escapeHtml(v.hint));
   if (!ready && m) hintBits.push(`${escapeHtml(m.size)} on first use`);
   const hint = hintBits.length
-    ? `<span class="block text-[11px] text-on-surface-variant/70 truncate">${hintBits.join(' \u{b7} ')}</span>`
+    ? `<span class="block text-xs text-on-surface-variant truncate mt-0.5">${hintBits.join(' \u{b7} ')}</span>`
     : '';
   const right = inUse
     ? '<span class="text-[11px] font-semibold text-primary shrink-0">In use</span>'
     : key === pendingUseKey
       ? `<span class="text-[11px] font-semibold text-on-surface-variant shrink-0" data-voice-progress="${escapeHtml(v.model)}">0%</span>`
-      : `<button class="voice-use shrink-0 text-xs font-semibold text-on-surface-variant hover:text-primary transition-colors px-2 py-1 rounded-lg hover:bg-primary/10 cursor-pointer" data-model="${escapeHtml(v.model)}" data-sid="${v.sid}">Use</button>`;
+      : `<button class="voice-use shrink-0 min-h-10 flex items-center justify-center text-xs font-semibold text-on-surface-variant hover:text-primary transition-colors px-3 rounded-lg hover:bg-primary/10 cursor-pointer" data-model="${escapeHtml(v.model)}" data-sid="${v.sid}">Use</button>`;
+  // The sample icon stays a standalone glyph (not folded into the avatar) so
+  // updateSampleIcon's direct DOM patch — it toggles this exact node on play/
+  // stop without a re-render — keeps working untouched.
   return `
-    <div class="voice-row flex items-center justify-between gap-2 px-4 py-2.5" data-key="${escapeHtml(key)}">
-      <button class="voice-sample flex items-center gap-3 min-w-0 flex-1 text-left cursor-pointer" data-model="${escapeHtml(v.model)}" data-sid="${v.sid}">
-        <span class="material-symbols-outlined text-xl ${playing ? 'text-primary' : 'text-on-surface-variant'}">${playing ? 'graphic_eq' : 'play_circle'}</span>
+    <div class="voice-row stagger-in flex items-center justify-between gap-3 px-4 py-2.5" data-key="${escapeHtml(key)}" style="--i:${i || 0}">
+      <button class="voice-sample flex items-center gap-3 min-w-0 flex-1 min-h-10 text-left cursor-pointer" data-model="${escapeHtml(v.model)}" data-sid="${v.sid}">
+        <div class="${coverClass(v.label)} w-10 h-10 rounded-full text-xs shrink-0">${escapeHtml(coverMonogram(v.label))}</div>
+        <span class="material-symbols-outlined text-xl shrink-0 ${playing ? 'text-primary' : 'text-on-surface-variant'}">${playing ? 'graphic_eq' : 'play_circle'}</span>
         <span class="min-w-0">
-          <span class="block text-sm text-on-surface truncate">${escapeHtml(v.label)}</span>
+          <span class="block text-[15px] font-semibold leading-snug text-on-surface truncate">${escapeHtml(v.label)}</span>
           ${hint}
         </span>
       </button>
       ${right}
-      <button class="voice-fav shrink-0 p-1 cursor-pointer ${fav ? 'text-primary' : 'text-on-surface-variant/40'}" data-key="${escapeHtml(key)}">
+      <button class="voice-fav shrink-0 min-h-10 min-w-10 flex items-center justify-center cursor-pointer ${fav ? 'text-primary' : 'text-on-surface-variant/40'}" data-key="${escapeHtml(key)}">
         <span class="material-symbols-outlined text-lg" style="font-variation-settings:'FILL' ${fav ? 1 : 0}">star</span>
       </button>
     </div>`;
@@ -1484,11 +1490,11 @@ function rebuildFavSection() {
   const favSection = document.getElementById('voices-fav-section');
   const favList = document.getElementById('voices-fav-list');
   const rows = ttsFavourites
-    .map(key => {
+    .map((key, i) => {
       const v = voiceByKey(key);
       // Stale keys (unknown voice or its backing file left the registry)
       // stay in config but don't render.
-      return v && modelById(v.model) ? voiceRowHtml(v) : '';
+      return v && modelById(v.model) ? voiceRowHtml(v, i) : '';
     })
     .filter(Boolean);
   favSection.classList.toggle('hidden', rows.length === 0);
@@ -2316,8 +2322,22 @@ function openNowPlaying() {
   const title = document.getElementById('reading-title').textContent || '';
   document.getElementById('np-title').textContent = title;
   const cover = document.getElementById('np-cover');
-  cover.className = `${coverClass(title)} w-36 h-36 rounded-2xl text-4xl shadow-xl`;
-  cover.textContent = coverMonogram(title);
+  cover.className = `${coverClass(title)} w-36 h-36 rounded-2xl text-4xl shadow-xl relative overflow-hidden`;
+  cover.innerHTML = `<span>${escapeHtml(coverMonogram(title))}</span>`;
+  if (readingItem) {
+    if (readingItem.image_url) {
+      cover.insertAdjacentHTML('beforeend',
+        `<img src="${escapeHtml(readingItem.image_url)}" class="absolute inset-0 w-full h-full object-cover" onerror="this.remove()">`);
+    } else if (readingItem.chapters && readingItem.chapters.length) {
+      const id = readingItem.id;
+      localCoverUrl(id).then(url => {
+        if (url && npOpen && readingItem && readingItem.id === id && !cover.querySelector('img')) {
+          cover.insertAdjacentHTML('beforeend',
+            `<img src="${url}" class="absolute inset-0 w-full h-full object-cover" onerror="this.remove()">`);
+        }
+      });
+    }
+  }
   document.getElementById('np-speed').textContent = speedBtn.textContent;
   document.getElementById('np-voice-label').textContent =
     document.getElementById('tts-voice-btn-label').textContent;
@@ -2985,6 +3005,42 @@ function coverClass(seed) {
   return `cover cover-${(h >>> 0) % 8}`;
 }
 
+// A cover tile: gradient + monogram always render (instant, deterministic);
+// a real image layers on top when the item has one — remote article lead
+// images immediately (onerror peels the img off, exposing the gradient),
+// stored EPUB covers asynchronously via hydrateLocalCovers().
+function coverTileHtml(it, sizeClasses, textClass) {
+  const isBook = !!(it.chapters && it.chapters.length);
+  let img = '';
+  if (!isBook && it.image_url) {
+    img = `<img src="${escapeHtml(it.image_url)}" class="absolute inset-0 w-full h-full object-cover" loading="lazy" onerror="this.remove()">`;
+  }
+  const hydrate = isBook ? ` data-cover-book="${escapeHtml(it.id)}"` : '';
+  return `<div class="${coverClass(it.title)} ${sizeClasses} ${textClass} relative"${hydrate}><span>${escapeHtml(coverMonogram(it.title))}</span>${img}</div>`;
+}
+
+// Stored covers (EPUBs) fetched once per item and patched in after render.
+const localCoverCache = new Map(); // id -> data URL | null
+async function localCoverUrl(id) {
+  if (!localCoverCache.has(id)) {
+    let url = null;
+    try { url = await invoke('library_cover', { id }); } catch (_) { /* none */ }
+    localCoverCache.set(id, url);
+  }
+  return localCoverCache.get(id);
+}
+
+function hydrateLocalCovers(root) {
+  root.querySelectorAll('[data-cover-book]').forEach(el => {
+    localCoverUrl(el.dataset.coverBook).then(url => {
+      if (url && el.isConnected && !el.querySelector('img')) {
+        el.insertAdjacentHTML('beforeend',
+          `<img src="${url}" class="absolute inset-0 w-full h-full object-cover" onerror="this.remove()">`);
+      }
+    });
+  });
+}
+
 function coverMonogram(title) {
   const words = (title || '').trim().split(/\s+/).filter(w => /[\p{L}\p{N}]/u.test(w));
   const letter = (w) => (w.match(/[\p{L}\p{N}]/u) || ['?'])[0];
@@ -3037,7 +3093,7 @@ function renderLibraryHero() {
   heroEl.innerHTML = `
     <div id="lib-hero-card" class="relative overflow-hidden rounded-2xl bg-surface-container-high cursor-pointer mb-4 stagger-in" style="--i:0">
       <div class="flex items-center gap-4 p-4">
-        <div class="${coverClass(it.title)} w-16 h-16 rounded-xl text-xl">${escapeHtml(coverMonogram(it.title))}</div>
+        ${coverTileHtml(it, 'w-16 h-16 rounded-xl overflow-hidden', 'text-xl')}
         <div class="min-w-0 flex-1">
           <p class="text-[11px] font-semibold uppercase tracking-[0.08em] text-primary mb-1">Continue listening</p>
           <p class="text-[15px] font-semibold leading-snug text-on-surface line-clamp-2">${escapeHtml(it.title)}</p>
@@ -3058,6 +3114,7 @@ function renderLibraryHero() {
   document.getElementById('lib-hero-card').addEventListener('click', () => {
     if (isBook) openBook(it.id); else openReading(it.id);
   });
+  hydrateLocalCovers(heroEl);
 }
 
 function renderLibraryList() {
@@ -3101,7 +3158,7 @@ function renderLibraryList() {
       : '';
     return `
     <div class="lib-item stagger-in cursor-pointer" data-id="${escapeHtml(it.id)}" style="--i:${i}">
-      <div class="relative overflow-hidden rounded-xl aspect-[3/4] ${coverClass(it.title)}">
+      <div class="relative overflow-hidden rounded-xl aspect-[3/4] ${coverClass(it.title)}" data-cover-book="${escapeHtml(it.id)}">
         <span class="text-4xl opacity-90">${escapeHtml(coverMonogram(it.title))}</span>
         <div class="absolute inset-x-0 bottom-0 pt-10 pb-2.5 px-3 bg-gradient-to-t from-black/70 to-transparent">
           <p class="normal-case text-[13px] font-semibold leading-tight text-white line-clamp-2">${escapeHtml(it.title)}</p>
@@ -3139,7 +3196,7 @@ function renderLibraryList() {
       ? '<span class="inline-block align-[2px] text-[10px] font-semibold text-primary bg-primary/10 rounded-full px-2 py-0.5 mr-1.5">NEW</span>'
       : '';
     return rowShell(it.id, `
-      <div class="${coverClass(it.title)} w-11 h-11 rounded-lg text-sm self-start mt-0.5">${escapeHtml(coverMonogram(it.title))}</div>
+      ${coverTileHtml(it, 'w-11 h-11 rounded-lg self-start mt-0.5', 'text-sm')}
       <div class="min-w-0 flex-1">
         <div class="text-[15px] font-semibold leading-snug text-on-surface line-clamp-2">${newChip}${escapeHtml(it.title)}</div>
         <div class="text-xs text-on-surface-variant truncate mt-0.5">${escapeHtml(it.body.slice(0, 80))}</div>
@@ -3159,6 +3216,7 @@ function renderLibraryList() {
     list.className = 'space-y-2';
     list.innerHTML = shown.map(renderRow).join('');
   }
+  hydrateLocalCovers(list);
   const bookIds = new Set(items.filter(isBook).map(it => it.id));
   list.querySelectorAll('.lib-item').forEach(el => {
     const id = el.dataset.id;
@@ -3273,8 +3331,16 @@ function renderQueueSheet() {
     return;
   }
   const last = q.length - 1;
-  list.innerHTML = q.map((entry, i) => `
-    <div class="flex items-center gap-2 px-3 py-2.5" data-i="${i}">
+  list.innerHTML = q.map((entry, i) => {
+    // A queued entry can outlive its library item (deleted before its turn
+    // comes up); fall back to a plain '?' tile rather than skip the row.
+    const item = libItems.find(it => it.id === entry.id);
+    const tile = item
+      ? coverTileHtml(item, 'w-10 h-10 rounded-lg', 'text-xs')
+      : `<div class="${coverClass('?')} w-10 h-10 rounded-lg text-xs">?</div>`;
+    return `
+    <div class="stagger-in flex items-center gap-2.5 px-3 py-2.5" data-i="${i}" style="--i:${i}">
+      ${tile}
       <div class="flex flex-col shrink-0 -my-1">
         <button class="queue-row-up p-0.5 text-on-surface-variant hover:text-primary transition-colors cursor-pointer disabled:opacity-25 disabled:pointer-events-none" data-i="${i}" ${i === 0 ? 'disabled' : ''}>
           <span class="material-symbols-outlined text-base">keyboard_arrow_up</span>
@@ -3283,12 +3349,14 @@ function renderQueueSheet() {
           <span class="material-symbols-outlined text-base">keyboard_arrow_down</span>
         </button>
       </div>
-      <button class="queue-row-play min-w-0 flex-1 text-left text-sm text-on-surface truncate cursor-pointer hover:text-primary transition-colors">${escapeHtml(queueEntryLabel(entry))}</button>
+      <button class="queue-row-play min-w-0 flex-1 text-left text-sm font-medium text-on-surface truncate cursor-pointer hover:text-primary transition-colors">${escapeHtml(queueEntryLabel(entry))}</button>
       <button class="queue-row-remove shrink-0 text-on-surface-variant hover:text-error transition-colors p-1 cursor-pointer" data-i="${i}">
         <span class="material-symbols-outlined text-lg">close</span>
       </button>
-    </div>`).join('')
+    </div>`;
+  }).join('')
     + '<button id="queue-clear-btn" class="w-full text-xs font-semibold text-on-surface-variant hover:text-error transition-colors px-4 py-3 mt-1 rounded-xl hover:bg-error/10 cursor-pointer">Clear queue</button>';
+  hydrateLocalCovers(list);
 }
 
 function openQueueSheet() {
@@ -3395,6 +3463,16 @@ function extractArticle(html, baseUrl) {
   const base = doc.createElement('base');
   base.href = baseUrl;
   doc.head && doc.head.prepend(base);
+  // Lead image, before Readability mutates the doc: og:image is near
+  // universal on blogs; twitter:image and link[rel=image_src] mop up the
+  // rest. Relative URLs resolve against the page. Stored on the item and
+  // rendered as its cover; the generated gradient stays the fallback.
+  let imageUrl = '';
+  const og = doc.querySelector('meta[property="og:image"], meta[name="og:image"], meta[name="twitter:image"], meta[property="twitter:image"]');
+  const imgLink = og ? og.getAttribute('content') : (doc.querySelector('link[rel="image_src"]') || {}).href;
+  if (imgLink) {
+    try { imageUrl = new URL(imgLink, baseUrl).href; } catch (_) { /* malformed */ }
+  }
   // Drop semantic chrome up front. Some sites (e.g. a table-based masthead
   // inside the same wrapper as the article) confuse Readability into
   // climbing past the <article> and keeping the site header/nav; removing
@@ -3416,6 +3494,7 @@ function extractArticle(html, baseUrl) {
       title: (article.title || '').trim(),
       body: article.textContent.trim(),
       published: (article.publishedTime || '').trim(),
+      imageUrl,
     };
   }
   return null;
@@ -3447,6 +3526,7 @@ async function importSharedText(text) {
     let title = null;
     let body = raw;
     let published = null;
+    let imageUrl = null;
     if (url) {
       showToast('Fetching article…');
       let html;
@@ -3462,6 +3542,7 @@ async function importSharedText(text) {
           title = article.title || url;
           body = article.body;
           published = article.published || null;
+          imageUrl = article.imageUrl || null;
         } else {
           showToast('No readable article found');
           return;
@@ -3473,7 +3554,7 @@ async function importSharedText(text) {
     }
     let item;
     try {
-      item = await invoke('library_add', { title, body, url: url || null, published });
+      item = await invoke('library_add', { title, body, url: url || null, published, imageUrl });
     } catch (err) {
       showToast('Save failed: ' + err);
       return;
@@ -3942,6 +4023,26 @@ importFileInput.addEventListener('change', () => {
 
 // Import a picked File/eBook. SAF's reported MIME type is unreliable, so
 // parsing is routed by the filename's own extension, not file.type; `kind`
+// Re-encode raw cover bytes ({data, mime} from parseEpub) to a bounded JPEG
+// and return bare base64, or null when the image can't decode. The canvas
+// pass normalizes any source format and caps the long edge at 600px so a
+// stored cover is a thumbnail (tens of KB), never the publisher's original.
+async function coverToJpegB64({ data, mime }) {
+  try {
+    const bmp = await createImageBitmap(new Blob([data], { type: mime }));
+    const scale = Math.min(1, 600 / Math.max(bmp.width, bmp.height));
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(bmp.width * scale));
+    canvas.height = Math.max(1, Math.round(bmp.height * scale));
+    canvas.getContext('2d').drawImage(bmp, 0, 0, canvas.width, canvas.height);
+    bmp.close();
+    const dataUrl = canvas.toDataURL('image/jpeg', 0.8);
+    return dataUrl.split(',')[1] || null;
+  } catch (_) {
+    return null;
+  }
+}
+
 // (which button was pressed) is only a fallback for an extensionless name.
 // A short result becomes one article like importFeedEntry's shape; a long
 // one (or any EPUB, even a single chapter) becomes a book.
@@ -3962,6 +4063,17 @@ async function importFile(file, kind) {
         return;
       }
       const item = await invoke('book_add', { title: book.title || titleFromName, chapters: book.chapters });
+      // The EPUB's own cover, re-encoded through a canvas (bounded to 600px
+      // JPEG) and stored server-side. Best effort: a book without a cover
+      // just keeps its generated gradient.
+      if (book.cover) {
+        coverToJpegB64(book.cover).then(b64 => {
+          if (b64) return invoke('library_set_cover', { id: item.id, dataB64: b64 });
+        }).then(() => {
+          localCoverCache.delete(item.id);
+          if (activeTab === 'library') loadLibrary();
+        }).catch(() => {});
+      }
       await loadLibrary();
       openBook(item.id);
       showToast('Book added');
@@ -4256,6 +4368,7 @@ async function importFeedEntry(feed, entry) {
     guid: entry.key,
     // Feed entry date first (authoritative); page metadata as fallback.
     published: entry.date || article.published || null,
+    imageUrl: article.imageUrl || null,
   });
 }
 
@@ -4374,15 +4487,16 @@ async function loadFeeds() {
   const list = document.getElementById('feeds-list');
   const empty = document.getElementById('feeds-empty');
   empty.classList.toggle('hidden', feeds.length > 0);
-  list.innerHTML = feeds.slice().reverse().map(f => {
+  list.innerHTML = feeds.slice().reverse().map((f, i) => {
     const checked = f.last_checked ? formatTimestamp(f.last_checked) : 'never';
     const meta = `Checked ${checked} · Auto-add ${f.auto_add ? 'on' : 'off'}`;
     return `
-    <div class="feed-item flex items-center justify-between gap-3 bg-surface-container-low rounded-xl px-4 py-3 cursor-pointer hover:bg-surface-container-high transition-colors" data-id="${escapeHtml(f.id)}">
+    <div class="feed-item stagger-in flex items-center justify-between gap-3 bg-surface-container rounded-xl px-3.5 py-3 cursor-pointer hover:bg-surface-container-high transition-colors" data-id="${escapeHtml(f.id)}" style="--i:${i}">
+      <div class="${coverClass(f.title)} w-11 h-11 rounded-lg self-start mt-0.5 text-sm">${escapeHtml(coverMonogram(f.title))}</div>
       <div class="min-w-0 flex-1">
-        <div class="text-sm font-medium text-on-surface truncate">${escapeHtml(f.title)}</div>
+        <div class="text-[15px] font-semibold leading-snug text-on-surface truncate">${escapeHtml(f.title)}</div>
         <div class="text-xs text-on-surface-variant truncate mt-0.5">${escapeHtml(f.url)}</div>
-        <div class="text-[11px] text-on-surface-variant tabular-nums mt-1">${meta}</div>
+        <div class="text-xs text-on-surface-variant tabular-nums mt-0.5">${meta}</div>
       </div>
       <button class="feed-edit shrink-0 text-on-surface-variant/50 hover:text-primary transition-colors p-1 cursor-pointer" data-id="${escapeHtml(f.id)}">
         <span class="material-symbols-outlined text-lg">edit</span>
@@ -4481,15 +4595,15 @@ async function renderFeedEntries(feed) {
     // must not read like this week's.
     const date = e.date ? (fmtPubDate(e.date) || formatTimestamp(e.date)) : '';
     const right = itemId
-      ? '<span class="text-[11px] font-semibold text-primary shrink-0">Added</span>'
-      : `<button class="feed-entry-add shrink-0 text-on-surface-variant hover:text-primary transition-colors p-1 cursor-pointer" data-i="${i}">
-           <span class="material-symbols-outlined text-lg">add_circle</span>
+      ? '<span class="shrink-0 flex items-center gap-1 text-xs text-on-surface-variant"><span class="material-symbols-outlined text-base">check</span>Added</span>'
+      : `<button class="feed-entry-add shrink-0 w-10 h-10 flex items-center justify-center rounded-full text-on-surface-variant hover:text-primary hover:bg-primary/10 transition-colors cursor-pointer" data-i="${i}">
+           <span class="material-symbols-outlined text-xl">add_circle</span>
          </button>`;
     return `
-    <div class="feed-entry flex items-center justify-between gap-3 bg-surface-container-low rounded-xl px-4 py-3 ${itemId ? 'cursor-pointer hover:bg-surface-container-high transition-colors' : ''}" data-item-id="${escapeHtml(itemId)}">
+    <div class="feed-entry stagger-in flex items-center justify-between gap-3 bg-surface-container rounded-xl px-3.5 py-3 ${itemId ? 'cursor-pointer hover:bg-surface-container-high transition-colors' : ''}" data-item-id="${escapeHtml(itemId)}" style="--i:${i}">
       <div class="min-w-0 flex-1">
-        <div class="text-sm font-medium text-on-surface truncate">${escapeHtml(e.title || e.link || 'Untitled')}</div>
-        ${date ? `<div class="text-[11px] text-on-surface-variant tabular-nums mt-1">${escapeHtml(date)}</div>` : ''}
+        <div class="text-[15px] font-semibold leading-snug text-on-surface line-clamp-2">${escapeHtml(e.title || e.link || 'Untitled')}</div>
+        ${date ? `<div class="text-xs text-on-surface-variant tabular-nums mt-1">${escapeHtml(date)}</div>` : ''}
       </div>
       ${right}
     </div>`;
@@ -4517,7 +4631,7 @@ async function renderFeedEntries(feed) {
       const entry = entries[Number(btn.dataset.i)];
       if (!entry) return;
       btn.disabled = true;
-      btn.innerHTML = '<span class="material-symbols-outlined text-lg tts-spin">progress_activity</span>';
+      btn.innerHTML = '<span class="material-symbols-outlined text-xl tts-spin">progress_activity</span>';
       try {
         await importFeedEntry(feed, entry);
         showToast('Article added');
@@ -4525,7 +4639,7 @@ async function renderFeedEntries(feed) {
       } catch (err) {
         showToast('Could not add: ' + err);
         btn.disabled = false;
-        btn.innerHTML = '<span class="material-symbols-outlined text-lg">add_circle</span>';
+        btn.innerHTML = '<span class="material-symbols-outlined text-xl">add_circle</span>';
       }
     });
   });

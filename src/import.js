@@ -277,6 +277,31 @@ export async function parseEpub(arrayBuffer) {
     }
   }
 
+  // Cover image, both spec generations: EPUB3 marks the manifest item with
+  // properties="cover-image"; EPUB2 points at it via <meta name="cover"
+  // content="<manifest-id>">. Returned as raw bytes + mime — the caller
+  // re-encodes through a canvas (bounding size and normalizing format)
+  // before storing.
+  let cover = null;
+  {
+    let coverItem = Object.values(manifest)
+      .find(m => m.properties.split(/\s+/).includes('cover-image'));
+    if (!coverItem) {
+      const coverMeta = Array.from(opfDoc.getElementsByTagName('meta'))
+        .find(m => (m.getAttribute('name') || '').toLowerCase() === 'cover');
+      const coverId = coverMeta && coverMeta.getAttribute('content');
+      if (coverId && manifest[coverId] && manifest[coverId].mediaType.startsWith('image/')) {
+        coverItem = manifest[coverId];
+      }
+    }
+    if (coverItem) {
+      const bytes = files[resolveZipPath(opfDir, coverItem.href)];
+      if (bytes && bytes.length) {
+        cover = { data: bytes, mime: coverItem.mediaType || 'image/jpeg' };
+      }
+    }
+  }
+
   const spineEl = opfDoc.getElementsByTagName('spine')[0];
   const itemrefs = spineEl ? Array.from(spineEl.getElementsByTagName('itemref')) : [];
   const spineHrefs = itemrefs
@@ -384,7 +409,7 @@ export async function parseEpub(arrayBuffer) {
     }
   });
 
-  return { title: bookTitle, chapters };
+  return { title: bookTitle, chapters, cover };
 }
 
 // ── PDF ──

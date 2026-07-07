@@ -838,6 +838,7 @@ fn library_add(
     feed_id: Option<String>,
     guid: Option<String>,
     published: Option<String>,
+    image_url: Option<String>,
 ) -> Result<library::LibraryItem, String> {
     let body = body.trim().to_string();
     if body.is_empty() {
@@ -850,6 +851,29 @@ fn library_add(
         feed_id.unwrap_or_default(),
         guid.unwrap_or_default(),
         published.unwrap_or_default(),
+        image_url.unwrap_or_default(),
+    ))
+}
+
+/// Store an item's cover image (base64 JPEG, canvas-re-encoded by the
+/// frontend at import — EPUB covers).
+#[tauri::command]
+fn library_set_cover(id: String, data_b64: String) -> Result<(), String> {
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data_b64.as_bytes())
+        .map_err(|e| format!("cover decode: {e}"))?;
+    library::Library::global().set_cover(&id, &bytes)
+}
+
+/// Fetch a stored cover as a data URL; None when the item has none.
+#[tauri::command]
+fn library_cover(id: String) -> Option<String> {
+    use base64::Engine as _;
+    let bytes = library::Library::global().cover(&id)?;
+    Some(format!(
+        "data:image/jpeg;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(bytes)
     ))
 }
 
@@ -1487,6 +1511,8 @@ pub fn run() {
             library_set_progress,
             library_set_duration,
             library_mark_seen,
+            library_set_cover,
+            library_cover,
             book_add,
             book_chapter,
             book_set_position,

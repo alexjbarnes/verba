@@ -86,6 +86,12 @@ pub struct LibraryItem {
     /// of playback progress. Legacy JSON predating this field loads as false.
     #[serde(default)]
     pub seen: bool,
+    /// Lead image URL scraped at import (og:image and friends); "" when the
+    /// source had none. Remote — rendered directly by the webview, with the
+    /// generated gradient cover as fallback. EPUB covers do NOT use this:
+    /// they're stored locally via `set_cover` (see `cover_path`).
+    #[serde(default)]
+    pub image_url: String,
 }
 
 pub struct Library {
@@ -131,6 +137,7 @@ impl Library {
         feed_id: String,
         guid: String,
         published: String,
+        image_url: String,
     ) -> LibraryItem {
         let title = if title.trim().is_empty() {
             Self::derive_title(&body)
@@ -154,6 +161,7 @@ impl Library {
             current_chapter: 0,
             completed: Vec::new(),
             seen: false,
+            image_url,
         };
         let mut items = self.items.lock().unwrap();
         items.push(item.clone());
@@ -220,6 +228,7 @@ impl Library {
             current_chapter: 0,
             completed: Vec::new(),
             seen: false,
+            image_url: String::new(),
         };
         let mut items = self.items.lock().unwrap();
         items.push(item.clone());
@@ -318,6 +327,9 @@ impl Library {
                 let _ = std::fs::remove_file(path);
             }
         }
+        if let Some(path) = Self::cover_path(id) {
+            let _ = std::fs::remove_file(path);
+        }
     }
 
     pub fn set_progress(&self, id: &str, progress: u64) {
@@ -383,6 +395,37 @@ impl Library {
         Self::books_dir().map(|d| d.join(format!("{id}.json")))
     }
 
+    /// Local cover image for an item (EPUB covers, saved at import). Always
+    /// JPEG: the frontend re-encodes through a canvas before upload, which
+    /// both bounds the size and fixes the format.
+    fn cover_path(id: &str) -> Option<PathBuf> {
+        Self::books_dir().map(|d| d.join(format!("{id}.cover.jpg")))
+    }
+
+    /// Store a cover for `id`. Rejects ids we don't know and caps the size —
+    /// a cover is a thumbnail, not an archive.
+    pub fn set_cover(&self, id: &str, bytes: &[u8]) -> Result<(), String> {
+        const MAX: usize = 2 * 1024 * 1024;
+        if bytes.len() > MAX {
+            return Err("cover too large".into());
+        }
+        if !self.items.lock().unwrap().iter().any(|i| i.id == id) {
+            return Err("unknown item".into());
+        }
+        let path = Self::cover_path(id).ok_or("no data dir")?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("covers dir: {e}"))?;
+        }
+        let tmp = path.with_extension("tmp");
+        std::fs::write(&tmp, bytes).map_err(|e| format!("cover write: {e}"))?;
+        std::fs::rename(&tmp, &path).map_err(|e| format!("cover rename: {e}"))
+    }
+
+    /// Read a stored cover back, None when the item never had one.
+    pub fn cover(&self, id: &str) -> Option<Vec<u8>> {
+        std::fs::read(Self::cover_path(id)?).ok()
+    }
+
     fn load_from_disk() -> Option<Vec<LibraryItem>> {
         let path = Self::library_path()?;
         let data = std::fs::read_to_string(&path).ok()?;
@@ -444,9 +487,9 @@ mod tests {
     #[test]
     fn add_uses_explicit_title_then_derives() {
         let lib = Library { items: Mutex::new(vec![]) };
-        let a = lib.add("My Title".into(), "some body".into(), String::new(), String::new(), String::new(), String::new());
+        let a = lib.add("My Title".into(), "some body".into(), String::new(), String::new(), String::new(), String::new(), String::new());
         assert_eq!(a.title, "My Title");
-        let b = lib.add("  ".into(), "First line\nsecond".into(), String::new(), String::new(), String::new(), String::new());
+        let b = lib.add("  ".into(), "First line\nsecond".into(), String::new(), String::new(), String::new(), String::new(), String::new());
         assert_eq!(b.title, "First line");
         assert_ne!(a.id, b.id);
         assert_eq!(lib.items.lock().unwrap().len(), 2);
@@ -455,8 +498,8 @@ mod tests {
     #[test]
     fn delete_removes_by_id() {
         let lib = Library { items: Mutex::new(vec![]) };
-        let a = lib.add("t".into(), "one".into(), String::new(), String::new(), String::new(), String::new());
-        lib.add("t".into(), "two".into(), String::new(), String::new(), String::new(), String::new());
+        let a = lib.add("t".into(), "one".into(), String::new(), String::new(), String::new(), String::new(), String::new());
+        lib.add("t".into(), "two".into(), String::new(), String::new(), String::new(), String::new(), String::new());
         lib.delete(&a.id);
         let items = lib.items.lock().unwrap();
         assert_eq!(items.len(), 1);
@@ -466,7 +509,7 @@ mod tests {
     #[test]
     fn set_progress_updates_item() {
         let lib = Library { items: Mutex::new(vec![]) };
-        let a = lib.add("t".into(), "body".into(), String::new(), String::new(), String::new(), String::new());
+        let a = lib.add("t".into(), "body".into(), String::new(), String::new(), String::new(), String::new(), String::new());
         lib.set_progress(&a.id, 42);
         assert_eq!(lib.items.lock().unwrap()[0].progress, 42);
     }
@@ -519,6 +562,7 @@ mod tests {
             current_chapter: 1,
             completed: vec![0],
             seen: false,
+            image_url: String::new(),
         };
         let round: LibraryItem = serde_json::from_str(&serde_json::to_string(&book).unwrap()).unwrap();
         assert_eq!(round.chapters.len(), 1);
@@ -578,7 +622,7 @@ mod tests {
     #[test]
     fn mark_seen_sets_true_once_and_is_idempotent() {
         let lib = Library { items: Mutex::new(vec![]) };
-        let a = lib.add("t".into(), "body".into(), String::new(), String::new(), String::new(), String::new());
+        let a = lib.add("t".into(), "body".into(), String::new(), String::new(), String::new(), String::new(), String::new());
         assert!(!lib.items.lock().unwrap()[0].seen);
         lib.mark_seen(&a.id);
         assert!(lib.items.lock().unwrap()[0].seen);
@@ -620,7 +664,7 @@ mod tests {
     #[test]
     fn set_book_read_is_noop_for_plain_article() {
         let lib = Library { items: Mutex::new(vec![]) };
-        let a = lib.add("t".into(), "body".into(), String::new(), String::new(), String::new(), String::new());
+        let a = lib.add("t".into(), "body".into(), String::new(), String::new(), String::new(), String::new(), String::new());
         lib.set_book_read(&a.id, true);
         let got = lib.items.lock().unwrap();
         assert!(got[0].completed.is_empty());
