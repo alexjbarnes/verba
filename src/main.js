@@ -416,9 +416,12 @@ function renderHistory(entries) {
 }
 
 function escapeHtml(str) {
-  const div = document.createElement('div');
-  div.textContent = str;
-  return div.innerHTML;
+  // Manual map rather than the textContent/innerHTML trick: that trick does
+  // NOT escape quotes, which matters now that escaped values land inside
+  // attribute positions (src="${...}") as well as text nodes.
+  return String(str).replace(/[&<>"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  })[c]);
 }
 
 function showToast(msg) {
@@ -883,7 +886,10 @@ function saveFontScale(scale) {
 // not depend on the Settings panel ever having been opened.
 function applyFontScale(scale) {
   const el = document.getElementById('reading-text');
-  if (el) el.style.fontSize = (scale / 100) + 'rem';
+  // 100% = 1.0625rem (17px at the default root size), matching the
+  // text-[17px] class on #reading-text. This inline style always beats the
+  // class, so its baseline must BE the design size or the class is dead.
+  if (el) el.style.fontSize = ((scale / 100) * 1.0625).toFixed(4) + 'rem';
 }
 
 const fontScaleRange = document.getElementById('font-scale-range');
@@ -1801,7 +1807,7 @@ const speedBtn = document.getElementById('tts-speed-btn');
 let cacheRanges = [];
 let cacheTotalMs = 0;
 let cacheStatusGen = -1; // last genId we refreshed coverage for (refresh once per gen_done)
-const PLAYER_PAD = '7rem';
+const PLAYER_PAD = '8rem'; // bar measures ~117.5px with the grab handle; 128px keeps clearance
 
 function fmtTime(ms) {
   const s = Math.floor(ms / 1000);
@@ -2318,12 +2324,18 @@ document.getElementById('tts-skip-fwd').addEventListener('click', () => {
 const nowPlaying = document.getElementById('now-playing');
 let npOpen = false;
 
-function openNowPlaying() {
-  const title = document.getElementById('reading-title').textContent || '';
-  document.getElementById('np-title').textContent = title;
+// Title + artwork for the expanded view. Called on open AND whenever the
+// open item changes underneath it (book chapter auto-advance) — the display
+// title is the composite header text, but the gradient/monogram seed is the
+// ITEM title so the placeholder matches the same book's tile everywhere
+// else in the app.
+function refreshNowPlayingMeta() {
+  const headerTitle = document.getElementById('reading-title').textContent || '';
+  const seed = (readingItem && readingItem.title) || headerTitle;
+  document.getElementById('np-title').textContent = headerTitle;
   const cover = document.getElementById('np-cover');
-  cover.className = `${coverClass(title)} w-36 h-36 rounded-2xl text-4xl shadow-xl relative overflow-hidden`;
-  cover.innerHTML = `<span>${escapeHtml(coverMonogram(title))}</span>`;
+  cover.className = `${coverClass(seed)} w-36 h-36 rounded-2xl text-4xl shadow-xl relative overflow-hidden`;
+  cover.innerHTML = `<span>${escapeHtml(coverMonogram(seed))}</span>`;
   if (readingItem) {
     if (readingItem.image_url) {
       cover.insertAdjacentHTML('beforeend',
@@ -2338,6 +2350,10 @@ function openNowPlaying() {
       });
     }
   }
+}
+
+function openNowPlaying() {
+  refreshNowPlayingMeta();
   document.getElementById('np-speed').textContent = speedBtn.textContent;
   document.getElementById('np-voice-label').textContent =
     document.getElementById('tts-voice-btn-label').textContent;
@@ -2382,7 +2398,6 @@ document.getElementById('np-speed').addEventListener('click', openSpeedSheet);
 // exactly like the bar's own track.
 (() => {
   const track = document.getElementById('np-track');
-  let dragging = false;
   const preview = (e) => {
     const rect = track.getBoundingClientRect();
     const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
@@ -2393,16 +2408,17 @@ document.getElementById('np-speed').addEventListener('click', openSpeedSheet);
     document.getElementById('np-time-current').textContent = fmtTime(pendingSeekMs);
   };
   track.addEventListener('pointerdown', (e) => {
-    dragging = true;
+    e.preventDefault(); // suppress compatibility mouse events on top of the source gate
     ttsSeeking = true;
+    seekSource = 'np';
     track.setPointerCapture(e.pointerId);
     preview(e);
   });
-  track.addEventListener('pointermove', (e) => { if (dragging) preview(e); });
+  track.addEventListener('pointermove', (e) => { if (seekSource === 'np') preview(e); });
   track.addEventListener('pointerup', () => {
-    if (!dragging) return;
-    dragging = false;
+    if (seekSource !== 'np') return;
     ttsSeeking = false;
+    seekSource = null;
     seekToFull(pendingSeekMs);
   });
 })();
@@ -2423,12 +2439,18 @@ function seekFromPointer(e) {
   timeCurrent.textContent = fmtTime(pendingSeekMs);
 }
 
-progressTrack.addEventListener('mousedown', (e) => { ttsSeeking = true; seekFromPointer(e); });
-progressTrack.addEventListener('touchstart', (e) => { ttsSeeking = true; seekFromPointer(e); }, { passive: true });
-document.addEventListener('mousemove', (e) => { if (ttsSeeking) seekFromPointer(e); });
-document.addEventListener('touchmove', (e) => { if (ttsSeeking) seekFromPointer(e); }, { passive: true });
-document.addEventListener('mouseup', () => { if (ttsSeeking) { ttsSeeking = false; seekToFull(pendingSeekMs); } });
-document.addEventListener('touchend', () => { if (ttsSeeking) { ttsSeeking = false; seekToFull(pendingSeekMs); } });
+// Which track owns the live drag: the now-playing track's pointer events
+// spawn compatibility mouse/touch events that bubble to the document
+// handlers below — gating them on the SOURCE (not just "a drag is live")
+// keeps them from recomputing the seek against the hidden mini-bar's rect
+// and corrupting pendingSeekMs mid-drag.
+let seekSource = null; // 'bar' | 'np' | null
+progressTrack.addEventListener('mousedown', (e) => { ttsSeeking = true; seekSource = 'bar'; seekFromPointer(e); });
+progressTrack.addEventListener('touchstart', (e) => { ttsSeeking = true; seekSource = 'bar'; seekFromPointer(e); }, { passive: true });
+document.addEventListener('mousemove', (e) => { if (seekSource === 'bar') seekFromPointer(e); });
+document.addEventListener('touchmove', (e) => { if (seekSource === 'bar') seekFromPointer(e); }, { passive: true });
+document.addEventListener('mouseup', () => { if (seekSource === 'bar') { ttsSeeking = false; seekSource = null; seekToFull(pendingSeekMs); } });
+document.addEventListener('touchend', () => { if (seekSource === 'bar') { ttsSeeking = false; seekSource = null; seekToFull(pendingSeekMs); } });
 
 // ── Speed sheet ──
 
@@ -3107,7 +3129,11 @@ function renderLibraryHero() {
     </div>`;
   document.getElementById('lib-hero-play').addEventListener('click', (e) => {
     e.stopPropagation();
-    playQueueEntry({ id: it.id, chapter: lp.chapter }).then(ok => {
+    // chapter:null resolves to the book's CURRENT chapter — the same state
+    // the card's subtitle describes. Passing lastPlayed's chapter here could
+    // diverge from the subtitle when the user merely browsed another chapter
+    // (which persists the book position without starting playback).
+    playQueueEntry({ id: it.id, chapter: null }).then(ok => {
       if (!ok) showToast('Could not resume');
     });
   });
@@ -3222,7 +3248,6 @@ function renderLibraryList() {
     const id = el.dataset.id;
     el.addEventListener('click', (e) => {
       if (el._longPressed) { el._longPressed = false; return; }
-      if (e.target.closest('.lib-del')) return;
       if (bookIds.has(id)) openBook(id); else openReading(id);
     });
     attachLongPress(el, () => {
@@ -3247,6 +3272,7 @@ async function deleteLibraryItem(id) {
     await invoke('book_forget_audio', { id, modelId: ttsModelId, sid, speed: ttsSpeed }).catch(() => {});
   }
   await invoke('library_delete', { id });
+  localCoverCache.delete(id);
   loadLibrary();
 }
 
@@ -3468,9 +3494,19 @@ function extractArticle(html, baseUrl) {
   // rest. Relative URLs resolve against the page. Stored on the item and
   // rendered as its cover; the generated gradient stays the fallback.
   let imageUrl = '';
-  const og = doc.querySelector('meta[property="og:image"], meta[name="og:image"], meta[name="twitter:image"], meta[property="twitter:image"]');
-  const imgLink = og ? og.getAttribute('content') : (doc.querySelector('link[rel="image_src"]') || {}).href;
+  // Checked one selector at a time: a grouped querySelector matches in
+  // DOCUMENT order, which would let a twitter:image listed earlier in <head>
+  // beat the og:image this list deliberately prefers.
+  let imgLink = '';
+  for (const sel of ['meta[property="og:image"]', 'meta[name="og:image"]', 'meta[name="twitter:image"]', 'meta[property="twitter:image"]']) {
+    const el = doc.querySelector(sel);
+    if (el && el.getAttribute('content')) { imgLink = el.getAttribute('content'); break; }
+  }
+  if (!imgLink) imgLink = (doc.querySelector('link[rel="image_src"]') || {}).href || '';
   if (imgLink) {
+    // NOTE: this URL() round-trip is a security boundary, not just
+    // normalization — it percent-encodes quotes so image_url can never
+    // break out of the src="..." attributes it gets interpolated into.
     try { imageUrl = new URL(imgLink, baseUrl).href; } catch (_) { /* malformed */ }
   }
   // Drop semantic chrome up front. Some sites (e.g. a table-based masthead
@@ -3594,6 +3630,7 @@ async function openReading(id, { autoplay = false } = {}) {
   activeWord = -1; genBaseWord = 0; timingCursor = 0; wordTimes = {};
   document.getElementById('reading-title').textContent = item.title;
   invoke('media_set_title', { title: item.title }).catch(() => {});
+  if (npOpen) refreshNowPlayingMeta();
   renderReading(readingText);
   showPanel('reading');
   setBottomNavVisible(false); // detail view: hide the tab bar, player bar to edge
@@ -3712,6 +3749,7 @@ async function openBookChapter(item, idx, { autoplay = false } = {}) {
   const headerTitle = `${item.title} — ${chapterTitle}`;
   document.getElementById('reading-title').textContent = headerTitle;
   invoke('media_set_title', { title: headerTitle }).catch(() => {});
+  if (npOpen) refreshNowPlayingMeta();
   renderReading(readingText);
   showPanel('reading');
   setBottomNavVisible(false); // detail view: hide the tab bar, player bar to edge
@@ -4069,15 +4107,16 @@ async function importFile(file, kind) {
       }
       const item = await invoke('book_add', { title: book.title || titleFromName, chapters: book.chapters });
       // The EPUB's own cover, re-encoded through a canvas (bounded to 600px
-      // JPEG) and stored server-side. Best effort: a book without a cover
-      // just keeps its generated gradient.
+      // JPEG) and stored server-side. Awaited BEFORE the library render:
+      // rendering first would fetch (and cache) a null cover, and the
+      // placeholder wouldn't heal until the next full library reload. The
+      // canvas pass is tens of milliseconds — cheap against an import.
+      // Best effort: a book whose cover fails to decode keeps its gradient.
       if (book.cover) {
-        coverToJpegB64(book.cover).then(b64 => {
-          if (b64) return invoke('library_set_cover', { id: item.id, dataB64: b64 });
-        }).then(() => {
-          localCoverCache.delete(item.id);
-          if (activeTab === 'library') loadLibrary();
-        }).catch(() => {});
+        try {
+          const b64 = await coverToJpegB64(book.cover);
+          if (b64) await invoke('library_set_cover', { id: item.id, dataB64: b64 });
+        } catch (_) { /* keep the gradient */ }
       }
       await loadLibrary();
       openBook(item.id);
