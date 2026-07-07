@@ -125,8 +125,11 @@ function renderBottomNav() {
     const active = it.tab && it.tab === activeTab;
     const attr = it.overflow ? 'data-overflow="1"' : `data-tab="${it.tab}"`;
     const color = active ? 'text-primary' : 'text-on-surface-variant';
+    // The active icon sits in a tonal pill (M3 style) so the current tab
+    // reads by shape as well as color.
+    const pill = active ? 'bg-primary/15 rounded-full' : '';
     return `<button class="nav-slot flex-1 flex flex-col items-center justify-center gap-0.5 py-1.5 ${color} active:opacity-70 transition-colors" ${attr}>
-      <span class="material-symbols-outlined text-[22px]" style="font-variation-settings:'FILL' ${active ? 1 : 0}">${it.icon}</span>
+      <span class="${pill} px-4 py-0.5 transition-colors"><span class="material-symbols-outlined text-[22px]" style="font-variation-settings:'FILL' ${active ? 1 : 0}">${it.icon}</span></span>
       <span class="text-[10px] font-medium leading-none">${it.label}</span>
     </button>`;
   }).join('');
@@ -344,9 +347,11 @@ function renderHistory(entries) {
       </div>`;
     return;
   }
+  let staggerIdx = 0;
   for (const entry of [...entries].reverse()) {
     const card = document.createElement('div');
-    card.className = 'bg-surface-container rounded-xl p-4';
+    card.className = 'bg-surface-container rounded-xl p-4 stagger-in';
+    card.style.setProperty('--i', staggerIdx++);
 
     const hasStages = entry.pipeline_stages && entry.pipeline_stages.length > 1;
     const hasChunks = entry.chunk_timings && entry.chunk_timings.length > 0;
@@ -1932,6 +1937,7 @@ function resetTtsUI() {
   // means the next play press starts (resume or from 0) rather than pausing.
   ttsStarted = false;
   setTtsLoading(false);
+  closeNowPlaying();
 }
 
 // Enable/disable the player-bar play control based on voice readiness.
@@ -1980,6 +1986,17 @@ function updatePlayerBar(st) {
     icon.textContent = 'progress_activity';
   } else {
     icon.textContent = st.paused ? 'play_arrow' : 'pause';
+  }
+  // Mirror onto the full-screen now-playing view when it's open — same
+  // numbers, bigger face.
+  if (npOpen) {
+    document.getElementById('np-position-fill').style.width = `${posPct}%`;
+    document.getElementById('np-buffer-fill').style.width = `${bufPct}%`;
+    document.getElementById('np-seek-thumb').style.left = `${posPct}%`;
+    document.getElementById('np-time-current').textContent = fmtTime(fullPos);
+    document.getElementById('np-time-total').textContent = fmtTime(fullDur);
+    document.getElementById('np-play-icon').textContent = icon.textContent;
+    document.getElementById('np-play-icon').classList.toggle('tts-spin', buffering);
   }
   renderCacheSegments();
 }
@@ -2286,6 +2303,90 @@ document.getElementById('tts-skip-fwd').addEventListener('click', () => {
   seekToFull(timelineBaseMs + ttsState.position_ms + 10000);
 });
 
+// ── Full-screen now-playing ──
+//
+// A bigger face on the same clock: transport clicks delegate to the bar's
+// own buttons and the display mirrors updatePlayerBar's numbers, so there
+// is exactly one playback state machine. Opened from the bar's grab
+// handle; the back gesture closes it before anything else.
+const nowPlaying = document.getElementById('now-playing');
+let npOpen = false;
+
+function openNowPlaying() {
+  const title = document.getElementById('reading-title').textContent || '';
+  document.getElementById('np-title').textContent = title;
+  const cover = document.getElementById('np-cover');
+  cover.className = `${coverClass(title)} w-36 h-36 rounded-2xl text-4xl shadow-xl`;
+  cover.textContent = coverMonogram(title);
+  document.getElementById('np-speed').textContent = speedBtn.textContent;
+  document.getElementById('np-voice-label').textContent =
+    document.getElementById('tts-voice-btn-label').textContent;
+  npOpen = true;
+  nowPlaying.classList.remove('hidden');
+  nowPlaying.classList.add('flex', 'sheet-anim');
+  renderNpExcerpt();
+  updatePlayerBar(ttsState);
+}
+
+function closeNowPlaying() {
+  npOpen = false;
+  nowPlaying.classList.add('hidden');
+  nowPlaying.classList.remove('flex', 'sheet-anim');
+}
+
+// The sentence being spoken, active word highlighted, as centered context.
+function renderNpExcerpt() {
+  if (!npOpen) return;
+  const el = document.getElementById('np-excerpt');
+  if (activeWord < 0 || !readingWords.length) { el.textContent = ''; return; }
+  const from = Math.max(0, activeWord - 9);
+  const to = Math.min(readingWords.length, activeWord + 11);
+  let html = from > 0 ? '… ' : '';
+  for (let i = from; i < to; i++) {
+    const w = escapeHtml(readingWords[i].text);
+    html += (i === activeWord ? `<span class="text-on-surface font-semibold">${w}</span>` : w) + ' ';
+  }
+  if (to < readingWords.length) html += '…';
+  el.innerHTML = html;
+}
+
+document.getElementById('tts-expand').addEventListener('click', openNowPlaying);
+document.getElementById('np-collapse').addEventListener('click', closeNowPlaying);
+document.getElementById('np-play-pause').addEventListener('click', () => playPauseBtn.click());
+document.getElementById('np-skip-back').addEventListener('click', () => document.getElementById('tts-skip-back').click());
+document.getElementById('np-skip-fwd').addEventListener('click', () => document.getElementById('tts-skip-fwd').click());
+document.getElementById('np-voice').addEventListener('click', openVoiceSheet);
+document.getElementById('np-speed').addEventListener('click', openSpeedSheet);
+
+// Tap or drag to seek on the big track, mapped against the displayed total
+// exactly like the bar's own track.
+(() => {
+  const track = document.getElementById('np-track');
+  let dragging = false;
+  const preview = (e) => {
+    const rect = track.getBoundingClientRect();
+    const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+    pendingSeekMs = Math.floor(pct * (lastFullDurMs || 1));
+    const displayPct = pct * 100;
+    document.getElementById('np-position-fill').style.width = `${displayPct}%`;
+    document.getElementById('np-seek-thumb').style.left = `${displayPct}%`;
+    document.getElementById('np-time-current').textContent = fmtTime(pendingSeekMs);
+  };
+  track.addEventListener('pointerdown', (e) => {
+    dragging = true;
+    ttsSeeking = true;
+    track.setPointerCapture(e.pointerId);
+    preview(e);
+  });
+  track.addEventListener('pointermove', (e) => { if (dragging) preview(e); });
+  track.addEventListener('pointerup', () => {
+    if (!dragging) return;
+    dragging = false;
+    ttsSeeking = false;
+    seekToFull(pendingSeekMs);
+  });
+})();
+
 function seekFromPointer(e) {
   const rect = progressTrack.getBoundingClientRect();
   const x = (e.touches ? e.touches[0].clientX : e.clientX) - rect.left;
@@ -2331,6 +2432,7 @@ function setTtsSpeed(val) {
   ttsSpeed = Math.round(val * 100) / 100;
   const label = ttsSpeed % 1 === 0 ? ttsSpeed.toFixed(1) : String(ttsSpeed);
   speedBtn.textContent = label + 'x';
+  document.getElementById('np-speed').textContent = label + 'x';
   speedSlider.value = ttsSpeed;
   speedSliderLabel.textContent = label + 'x';
   updateSpeedChips();
@@ -2372,6 +2474,9 @@ async function startSpeak(text, baseWord, baseMs) {
   const myGen = ++genId;
   ttsStarted = true;
   voiceDirty = false; // this synth reflects the current voice
+  // Playback actually started on this item: it becomes the library's
+  // "Continue listening" hero until finished or something else plays.
+  if (readingItem) markLastPlayed(readingItem.id, bookState ? bookState.current : null);
   setTtsLoading(true); // generating/pre-buffering until the first audio plays
   autoFollow = true;
   dynMilestoneIdx = 0;
@@ -2567,6 +2672,7 @@ function setActiveWord(i) {
   if (prev) prev.classList.remove('rw-active');
   activeWord = i;
   const span = el.querySelector(`[data-w="${i}"]`);
+  renderNpExcerpt();
   if (span) {
     span.classList.add('rw-active');
     // Don't fight a manual scroll. If following is off but the highlight is back
@@ -2865,11 +2971,101 @@ async function loadLibrary() {
 
 // Renders the selected tab from the module-cached `libItems`/`libFeedsById` —
 // no backend round trip, so switching tabs is instant.
+// ── Cover tiles ──
+//
+// Deterministic artwork stands in for real cover art: the title hashes to
+// one of eight palette-family gradients (see .cover-N in styles.css) and a
+// monogram. Same title, same tile, every render, both themes.
+function coverClass(seed) {
+  let h = 2166136261;
+  for (let i = 0; i < seed.length; i++) {
+    h ^= seed.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return `cover cover-${(h >>> 0) % 8}`;
+}
+
+function coverMonogram(title) {
+  const words = (title || '').trim().split(/\s+/).filter(w => /[\p{L}\p{N}]/u.test(w));
+  const letter = (w) => (w.match(/[\p{L}\p{N}]/u) || ['?'])[0];
+  if (!words.length) return '?';
+  return words.length === 1 ? letter(words[0]) : letter(words[0]) + letter(words[1]);
+}
+
+// ── Continue listening ──
+//
+// The most recent thing playback actually STARTED on (not merely opened),
+// tracked device-locally so the library can lead with a resume card.
+function markLastPlayed(id, chapter) {
+  try {
+    localStorage.setItem('verba-last-played', JSON.stringify({ id, chapter: chapter ?? null }));
+  } catch (_) { /* storage unavailable */ }
+}
+
+function lastPlayed() {
+  try {
+    const v = JSON.parse(localStorage.getItem('verba-last-played') || 'null');
+    return (v && typeof v.id === 'string') ? v : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+// Render the hero resume card when the last-played item is still in
+// progress. Finished or deleted items drop the hero entirely — an empty
+// slot, not a stale invitation.
+function renderLibraryHero() {
+  const heroEl = document.getElementById('lib-hero');
+  const lp = lastPlayed();
+  const it = lp && libItems.find(x => x.id === lp.id);
+  if (!it) { heroEl.innerHTML = ''; return; }
+  const isBook = !!(it.chapters && it.chapters.length);
+  let pct, leftLabel, sub;
+  if (isBook) {
+    const p = bookProgress(it);
+    pct = p.pct;
+    leftLabel = `${fmtMins(estMsForWords(p.totalWords - p.wordsRead, ttsSpeed))} left`;
+    const ch = it.chapters[Math.min(it.current_chapter, it.chapters.length - 1)];
+    sub = ch ? (ch.title || `Chapter ${it.current_chapter + 1}`) : '';
+  } else {
+    const len = (it.body || '').length || 1;
+    pct = Math.round(Math.max(0, Math.min(len, it.progress || 0)) / len * 100);
+    leftLabel = `${fmtMins(itemDurationMs(it, ttsSpeed) * (1 - (it.progress || 0) / len))} left`;
+    sub = it.body ? it.body.slice(0, 90) : '';
+  }
+  if (pct <= 0 || pct >= 100) { heroEl.innerHTML = ''; return; }
+  heroEl.innerHTML = `
+    <div id="lib-hero-card" class="relative overflow-hidden rounded-2xl bg-surface-container-high cursor-pointer mb-4 stagger-in" style="--i:0">
+      <div class="flex items-center gap-4 p-4">
+        <div class="${coverClass(it.title)} w-16 h-16 rounded-xl text-xl">${escapeHtml(coverMonogram(it.title))}</div>
+        <div class="min-w-0 flex-1">
+          <p class="text-[11px] font-semibold uppercase tracking-[0.08em] text-primary mb-1">Continue listening</p>
+          <p class="text-[15px] font-semibold leading-snug text-on-surface line-clamp-2">${escapeHtml(it.title)}</p>
+          <p class="text-xs text-on-surface-variant truncate mt-0.5">${escapeHtml(sub)} · ${leftLabel}</p>
+        </div>
+        <button id="lib-hero-play" class="shrink-0 w-12 h-12 flex items-center justify-center rounded-full bg-primary text-on-primary shadow-lg active:scale-95 transition-transform cursor-pointer">
+          <span class="material-symbols-outlined text-[26px]" style="font-variation-settings:'FILL' 1">play_arrow</span>
+        </button>
+      </div>
+      <div class="absolute left-0 right-0 bottom-0 h-[4px] bg-primary/15"><div class="progress-edge-fill h-full bg-primary rounded-r-full" style="width:${pct}%"></div></div>
+    </div>`;
+  document.getElementById('lib-hero-play').addEventListener('click', (e) => {
+    e.stopPropagation();
+    playQueueEntry({ id: it.id, chapter: lp.chapter }).then(ok => {
+      if (!ok) showToast('Could not resume');
+    });
+  });
+  document.getElementById('lib-hero-card').addEventListener('click', () => {
+    if (isBook) openBook(it.id); else openReading(it.id);
+  });
+}
+
 function renderLibraryList() {
   const items = libItems;
   const feedsById = libFeedsById;
   const list = document.getElementById('lib-list');
   const empty = document.getElementById('lib-empty');
+  renderLibraryHero();
   // The signature list treatment: listening progress lives on the card
   // itself — a hairline along its bottom edge — instead of "42%" text in the
   // meta line. The track only renders while something IS in progress;
@@ -2883,25 +3079,40 @@ function renderLibraryList() {
   const doneTick = (pct) => pct >= 100
     ? '<span class="material-symbols-outlined text-lg text-primary shrink-0">check_circle</span>'
     : '';
-  const rowShell = (id, inner, pct) => `
-    <div class="lib-item relative overflow-hidden flex items-center justify-between gap-3 bg-surface-container rounded-xl px-4 py-3.5 cursor-pointer hover:bg-surface-container-high transition-colors" data-id="${escapeHtml(id)}">
+  const progressEdgeThick = (pct) => (pct > 0 && pct < 100)
+    ? `<div class="absolute left-0 right-0 bottom-0 h-[4px] bg-primary/15"><div class="progress-edge-fill h-full bg-primary/80 rounded-r-full" style="width:${pct}%"></div></div>`
+    : '';
+  const rowShell = (id, inner, pct, i) => `
+    <div class="lib-item stagger-in relative overflow-hidden flex items-center justify-between gap-3 bg-surface-container rounded-xl px-3.5 py-3 cursor-pointer hover:bg-surface-container-high transition-colors" data-id="${escapeHtml(id)}" style="--i:${i}">
       ${inner}
       ${doneTick(pct)}
       ${progressEdge(pct)}
     </div>`;
-  const renderRow = (it) => {
-    if (it.chapters && it.chapters.length) {
-      const { totalWords, wordsRead, pct } = bookProgress(it);
-      const chaptersLabel = `${it.chapters.length} chapter${it.chapters.length === 1 ? '' : 's'}`;
-      const meta = pct >= 100 ? `${chaptersLabel} · Finished`
-        : pct > 0 ? `${chaptersLabel} · ${fmtMins(estMsForWords(totalWords - wordsRead, ttsSpeed))} left`
-        : `${chaptersLabel} · ${fmtMins(estMsForWords(totalWords, ttsSpeed))}`;
-      return rowShell(it.id, `
-        <div class="min-w-0 flex-1">
-          <div class="text-[15px] font-semibold leading-snug text-on-surface line-clamp-2"><span class="material-symbols-outlined text-sm align-middle mr-1 text-on-surface-variant/70">menu_book</span>${escapeHtml(it.title)}</div>
-          <div class="text-xs text-on-surface-variant tabular-nums mt-1">${meta}</div>
-        </div>`, pct);
-    }
+  // Books render as a cover grid, not rows: covers give the shelf a spine
+  // to scan, and a two-column grid earns the vertical space a book (a
+  // long-lived item) deserves.
+  const renderBookCard = (it, i) => {
+    const { totalWords, wordsRead, pct } = bookProgress(it);
+    const meta = pct >= 100 ? 'Finished'
+      : pct > 0 ? `${fmtMins(estMsForWords(totalWords - wordsRead, ttsSpeed))} left`
+      : `${it.chapters.length} chapters · ${fmtMins(estMsForWords(totalWords, ttsSpeed))}`;
+    const tick = pct >= 100
+      ? '<span class="material-symbols-outlined absolute top-2 right-2 text-xl text-white/90 drop-shadow">check_circle</span>'
+      : '';
+    return `
+    <div class="lib-item stagger-in cursor-pointer" data-id="${escapeHtml(it.id)}" style="--i:${i}">
+      <div class="relative overflow-hidden rounded-xl aspect-[3/4] ${coverClass(it.title)}">
+        <span class="text-4xl opacity-90">${escapeHtml(coverMonogram(it.title))}</span>
+        <div class="absolute inset-x-0 bottom-0 pt-10 pb-2.5 px-3 bg-gradient-to-t from-black/70 to-transparent">
+          <p class="normal-case text-[13px] font-semibold leading-tight text-white line-clamp-2">${escapeHtml(it.title)}</p>
+        </div>
+        ${tick}
+        ${progressEdgeThick(pct)}
+      </div>
+      <p class="text-xs text-on-surface-variant tabular-nums mt-1.5 px-0.5 truncate">${meta}</p>
+    </div>`;
+  };
+  const renderRow = (it, i) => {
     const len = (it.body || '').length || 1;
     const prog = Math.max(0, Math.min(len, it.progress || 0));
     const pct = Math.round(prog / len * 100);
@@ -2928,11 +3139,12 @@ function renderLibraryList() {
       ? '<span class="inline-block align-[2px] text-[10px] font-semibold text-primary bg-primary/10 rounded-full px-2 py-0.5 mr-1.5">NEW</span>'
       : '';
     return rowShell(it.id, `
+      <div class="${coverClass(it.title)} w-11 h-11 rounded-lg text-sm self-start mt-0.5">${escapeHtml(coverMonogram(it.title))}</div>
       <div class="min-w-0 flex-1">
         <div class="text-[15px] font-semibold leading-snug text-on-surface line-clamp-2">${newChip}${escapeHtml(it.title)}</div>
-        <div class="text-xs text-on-surface-variant truncate mt-1">${escapeHtml(it.body.slice(0, 80))}</div>
-        <div class="text-xs text-on-surface-variant tabular-nums mt-1">${meta}</div>
-      </div>`, pct);
+        <div class="text-xs text-on-surface-variant truncate mt-0.5">${escapeHtml(it.body.slice(0, 80))}</div>
+        <div class="text-xs text-on-surface-variant tabular-nums mt-0.5">${meta}</div>
+      </div>`, pct, i);
   };
   const rev = items.slice().reverse();
   const isBook = (it) => !!(it.chapters && it.chapters.length);
@@ -2940,7 +3152,13 @@ function renderLibraryList() {
   const shown = rev.filter(it => isBook(it) === (libTab === 'books'));
   empty.classList.toggle('hidden', shown.length > 0);
   document.getElementById('lib-empty-title').textContent = libTab === 'books' ? 'No books yet' : 'No saved texts yet';
-  list.innerHTML = shown.map(renderRow).join('');
+  if (libTab === 'books') {
+    list.className = 'grid grid-cols-2 gap-3';
+    list.innerHTML = shown.map(renderBookCard).join('');
+  } else {
+    list.className = 'space-y-2';
+    list.innerHTML = shown.map(renderRow).join('');
+  }
   const bookIds = new Set(items.filter(isBook).map(it => it.id));
   list.querySelectorAll('.lib-item').forEach(el => {
     const id = el.dataset.id;
@@ -3482,6 +3700,7 @@ function updateVoiceBtnLabel() {
   const label = document.getElementById('tts-voice-btn-label');
   if (!label) return;
   label.textContent = ttsVoice.startsWith('custom:') ? ttsVoice.slice(7) : voiceLabel(parseInt(ttsVoice, 10) || 0);
+  document.getElementById('np-voice-label').textContent = label.textContent;
 }
 
 function speedForVoice(voice) {
@@ -4544,6 +4763,7 @@ document.getElementById('copy-logs').addEventListener('click', () => {
 // openFeedEntries call showPanel() directly and never update `activeTab`
 // (only navigateTo does), so it does not track these views.
 const BACK_OVERLAYS = [
+  { el: document.getElementById('now-playing'), close: () => closeNowPlaying() },
   { el: document.getElementById('confirm-dialog'), close: () => document.getElementById('confirm-cancel').click() },
   { el: queueSheet, close: closeQueueSheet },
   { el: libActionSheet, close: closeLibActionSheet },

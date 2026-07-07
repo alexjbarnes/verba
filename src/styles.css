@@ -103,3 +103,60 @@ select {
     background: rgb(var(--c-primary) / 0.15);
   }
 }
+
+/* ── Motion (v2 polish) ──
+   Entrance choreography: list cards rise in with a per-row stagger (--i set
+   inline by the renderers, capped so long lists don't crawl), sheets slide
+   up on unhide (display:none -> block restarts the animation, so plain
+   class-list toggling gets the motion for free), and the card progress
+   edges grow from the left on render. All of it collapses to nothing under
+   prefers-reduced-motion. */
+@keyframes rise {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: none; }
+}
+.stagger-in {
+  animation: rise 0.26s cubic-bezier(0.2, 0, 0, 1) both;
+  animation-delay: calc(min(var(--i, 0), 8) * 26ms);
+}
+@keyframes sheet-up {
+  from { opacity: 0.4; transform: translateY(24px); }
+  to { opacity: 1; transform: none; }
+}
+.sheet-anim { animation: sheet-up 0.22s cubic-bezier(0.2, 0, 0, 1); }
+@keyframes edge-grow {
+  from { transform: scaleX(0); }
+  to { transform: none; }
+}
+.progress-edge-fill {
+  transform-origin: left;
+  animation: edge-grow 0.5s 0.15s cubic-bezier(0.2, 0, 0, 1) both;
+}
+@media (prefers-reduced-motion: reduce) {
+  .stagger-in, .sheet-anim, .progress-edge-fill { animation: none; }
+}
+
+/* ── Cover tiles (v2) ──
+   Deterministic artwork: a gradient pair picked from the title hash plus an
+   oversized monogram. Gives text-only lists visual texture without any real
+   cover art. Gradients live here (not per-element style attrs) so both
+   themes can tune them in one place. */
+.cover {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: rgb(255 255 255 / 0.82);
+  font-weight: 700;
+  overflow: hidden;
+  flex-shrink: 0;
+  text-transform: uppercase;
+}
+.cover-0 { background: linear-gradient(135deg, #4863ff, #9ba8ff); }
+.cover-1 { background: linear-gradient(135deg, #5a52c7, #9891fe); }
+.cover-2 { background: linear-gradient(135deg, #2849ee, #7c6fe8); }
+.cover-3 { background: linear-gradient(135deg, #6d3fd4, #b79bff); }
+.cover-4 { background: linear-gradient(135deg, #3652e1, #6fb3e8); }
+.cover-5 { background: linear-gradient(135deg, #8a3fb8, #f68dda); }
+.cover-6 { background: linear-gradient(135deg, #3b6fd4, #9ba8ff); }
+.cover-7 { background: linear-gradient(135deg, #4a45a8, #8999ff); }
+[data-theme="light"] .cover { color: rgb(255 255 255 / 0.92); }
