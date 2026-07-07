@@ -5,3 +5,4 @@
 //! resolver; the session coordinator, store, speakers, and summarizer follow.
 
 pub mod loopback;
+pub mod summarize;

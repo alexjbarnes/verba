@@ -1806,7 +1806,7 @@ static ORT_INIT: OnceLock<Result<(), String>> = OnceLock::new();
 
 /// Initialize ORT once. Mirrors `grammar_neural::ensure_ort_init` so the
 /// load-dynamic backend resolves `libonnxruntime.so` the same way across the app.
-fn ensure_ort_init() -> Result<(), String> {
+pub(crate) fn ensure_ort_init() -> Result<(), String> {
     ORT_INIT
         .get_or_init(|| {
             // commit() returns false when an ORT environment was already
