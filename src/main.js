@@ -3744,7 +3744,12 @@ async function openBookChapter(item, idx, { autoplay = false } = {}) {
     }
   }
 
-  if (autoplay) startSpeak(readingText, 0, 0);
+  // Resume-aware, exactly like openReading's autoplay: the hero card and
+  // queue re-enter the chapter the book was left on, which must continue
+  // from the saved offset. Chapter auto-advance is unaffected — a chapter
+  // change zeroes `prog` above, so resumeWord is 0 and this starts from
+  // the top as before.
+  if (autoplay) startPlaybackFromResume();
 }
 
 document.getElementById('reading-back').addEventListener('click', () => {
