@@ -40,6 +40,16 @@ struct AppState {
     recording: std::sync::atomic::AtomicBool,
 }
 
+/// The single microphone can serve dictation OR a meeting, never both.
+/// Every dictation start path calls this; meeting_start checks the inverse.
+fn dictation_blocked_by_meeting() -> Result<(), String> {
+    #[cfg(not(target_os = "android"))]
+    if meeting::is_active() {
+        return Err("A meeting is recording — stop it before dictating".into());
+    }
+    Ok(())
+}
+
 #[tauri::command]
 fn is_engine_ready() -> bool {
     engine::is_initialized()
@@ -542,6 +552,133 @@ async fn package_install_meeting(app: tauri::AppHandle, summarizer_id: String) -
 #[tauri::command]
 fn meeting_models() -> Vec<serde_json::Value> {
     models::ModelManager::global().meeting_models()
+}
+
+// ── Meeting session commands (desktop; Android gets stub errors so one
+// generate_handler list compiles everywhere) ──
+
+#[cfg(not(target_os = "android"))]
+#[tauri::command]
+fn meeting_start(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    // The mic can serve dictation or a meeting, never both.
+    #[cfg(desktop)]
+    {
+        let state = app.state::<AppState>();
+        if state.recording.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err("Dictation is recording — finish it before starting a meeting".into());
+        }
+    }
+    meeting::start(app)
+}
+
+#[cfg(not(target_os = "android"))]
+#[tauri::command]
+async fn meeting_stop(app: tauri::AppHandle, notes: Option<String>) -> Result<meeting::store::MeetingMeta, String> {
+    // Stop flushes tails through the transcriber — real work, so async off
+    // the main thread.
+    tauri::async_runtime::spawn_blocking(move || meeting::stop(app, notes.unwrap_or_default()))
+        .await
+        .map_err(|e| format!("stop task: {e}"))?
+}
+
+#[cfg(not(target_os = "android"))]
+#[tauri::command]
+fn meeting_cancel(app: tauri::AppHandle) -> Result<(), String> {
+    meeting::cancel(app)
+}
+
+#[cfg(not(target_os = "android"))]
+#[tauri::command]
+fn meeting_status() -> serde_json::Value {
+    meeting::status()
+}
+
+#[cfg(not(target_os = "android"))]
+#[tauri::command]
+fn meeting_note_set(text: String) -> Result<(), String> {
+    meeting::note_set(text)
+}
+
+#[cfg(not(target_os = "android"))]
+#[tauri::command]
+fn meetings_list() -> Vec<meeting::store::MeetingMeta> {
+    meeting::store::MeetingStore::global().list()
+}
+
+#[cfg(not(target_os = "android"))]
+#[tauri::command]
+fn meeting_get(id: String) -> Option<meeting::store::MeetingMeta> {
+    meeting::store::MeetingStore::global().get(&id)
+}
+
+#[cfg(not(target_os = "android"))]
+#[tauri::command]
+fn meeting_delete(id: String, delete_files: Option<bool>) -> Result<(), String> {
+    meeting::store::MeetingStore::global().delete(&id, delete_files.unwrap_or(false))
+}
+
+/// Read a meeting's transcript or summary markdown for the in-app view.
+#[cfg(not(target_os = "android"))]
+#[tauri::command]
+fn meeting_read_file(id: String, which: String) -> Result<String, String> {
+    let meta = meeting::store::MeetingStore::global()
+        .get(&id)
+        .ok_or("meeting not found")?;
+    let path = match which.as_str() {
+        "summary" => meta.summary_path,
+        _ => meta.transcript_path,
+    };
+    if path.is_empty() {
+        return Err("not written yet".into());
+    }
+    std::fs::read_to_string(&path).map_err(|e| format!("read {path}: {e}"))
+}
+
+// Android stubs: same names/signatures, always an error.
+#[cfg(target_os = "android")]
+#[tauri::command]
+fn meeting_start(_app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    Err("Meeting mode is desktop only".into())
+}
+#[cfg(target_os = "android")]
+#[tauri::command]
+async fn meeting_stop(_app: tauri::AppHandle, _notes: Option<String>) -> Result<serde_json::Value, String> {
+    Err("Meeting mode is desktop only".into())
+}
+#[cfg(target_os = "android")]
+#[tauri::command]
+fn meeting_cancel(_app: tauri::AppHandle) -> Result<(), String> {
+    Err("Meeting mode is desktop only".into())
+}
+#[cfg(target_os = "android")]
+#[tauri::command]
+fn meeting_status() -> serde_json::Value {
+    serde_json::json!({ "state": "unavailable" })
+}
+#[cfg(target_os = "android")]
+#[tauri::command]
+fn meeting_note_set(_text: String) -> Result<(), String> {
+    Err("Meeting mode is desktop only".into())
+}
+#[cfg(target_os = "android")]
+#[tauri::command]
+fn meetings_list() -> Vec<serde_json::Value> {
+    Vec::new()
+}
+#[cfg(target_os = "android")]
+#[tauri::command]
+fn meeting_get(_id: String) -> Option<serde_json::Value> {
+    None
+}
+#[cfg(target_os = "android")]
+#[tauri::command]
+fn meeting_delete(_id: String, _delete_files: Option<bool>) -> Result<(), String> {
+    Err("Meeting mode is desktop only".into())
+}
+#[cfg(target_os = "android")]
+#[tauri::command]
+fn meeting_read_file(_id: String, _which: String) -> Result<String, String> {
+    Err("Meeting mode is desktop only".into())
 }
 
 #[tauri::command]
@@ -1060,6 +1197,7 @@ async fn fetch_feed(
 /// to get the text back.
 #[tauri::command]
 fn ui_start_recording() -> Result<(), String> {
+    dictation_blocked_by_meeting()?;
     media::pause_media();
     engine::with_mut(|eng| eng.start_streaming())
         .unwrap_or_else(|| Err("Engine not ready".into()))
@@ -1246,6 +1384,10 @@ pub fn run() {
                             if state.recording.load(Ordering::SeqCst) {
                                 return;
                             }
+                            if dictation_blocked_by_meeting().is_err() {
+                                log::info!("Shortcut ignored: meeting recording");
+                                return;
+                            }
                             *captured_target.lock().unwrap() = paste::capture_frontmost_app();
                             let started = engine::with_mut(|eng| eng.start_streaming());
                             match started {
@@ -1340,6 +1482,10 @@ pub fn run() {
                     match event.state {
                         ShortcutState::Pressed => {
                             if state.recording.load(Ordering::SeqCst) {
+                                return;
+                            }
+                            if dictation_blocked_by_meeting().is_err() {
+                                log::info!("Shortcut ignored: meeting recording");
                                 return;
                             }
                             *captured_target_s.lock().unwrap() = paste::capture_frontmost_app();
@@ -1485,6 +1631,15 @@ pub fn run() {
             package_install_dictation,
             package_install_meeting,
             meeting_models,
+            meeting_start,
+            meeting_stop,
+            meeting_cancel,
+            meeting_status,
+            meeting_note_set,
+            meetings_list,
+            meeting_get,
+            meeting_delete,
+            meeting_read_file,
             storage_summary,
             storage_clear,
             list_history,

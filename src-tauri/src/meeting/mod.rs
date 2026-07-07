@@ -1,8 +1,368 @@
 //! Meeting mode (desktop only): live dual-stream transcription with local LLM
 //! summaries. See MODEL_PACKAGES.md and the meeting-mode plan.
 //!
-//! Grows over the implementation phases. Phase 1 lands only the loopback
-//! resolver; the session coordinator, store, speakers, and summarizer follow.
+//! `MeetingSession` coordinates two `AudioRecorder`s (mic + system loopback),
+//! funnels both VAD segment streams through the dictation engine's SHARED
+//! transcriber (segments interleave through its worker; Parakeet loads once),
+//! tags utterances with wall-clock offsets and a speaker label, and streams
+//! them to the frontend. Audio only ever exists in the recorder→VAD→
+//! transcriber channels — nothing is written to disk except text.
+//!
+//! The transcript autosaves every ~30s so a crash mid-meeting loses at most
+//! half a minute of text. Dictation and Meeting exclude each other: lib.rs
+//! checks `is_active()` on every dictation start path, and `meeting_start`
+//! refuses while dictation records.
 
 pub mod loopback;
+pub mod store;
 pub mod summarize;
+
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Instant;
+
+use tauri::Emitter;
+
+use crate::recorder::{AudioRecorder, DeviceSpec};
+use store::{MeetingMeta, Utterance};
+
+static MEETING_ACTIVE: AtomicBool = AtomicBool::new(false);
+static SESSION: OnceLock<Mutex<Option<Session>>> = OnceLock::new();
+
+fn session_slot() -> &'static Mutex<Option<Session>> {
+    SESSION.get_or_init(|| Mutex::new(None))
+}
+
+/// True while a meeting records — the dictation paths bail on this.
+pub fn is_active() -> bool {
+    MEETING_ACTIVE.load(Ordering::SeqCst)
+}
+
+/// Segments shorter than this never reach the transcriber (mirrors the
+/// dictation engine's 300ms floor).
+const MIN_SEGMENT_SAMPLES: usize = 4800; // 300ms at 16kHz
+
+struct Session {
+    meta: MeetingMeta,
+    started_at: Instant,
+    notes: Arc<Mutex<String>>,
+    utterances: Arc<Mutex<Vec<Utterance>>>,
+    mic: AudioRecorder,
+    loopback: Option<AudioRecorder>,
+    loopback_notice: Option<String>,
+    consumers: Vec<std::thread::JoinHandle<()>>,
+    autosaver: Option<std::thread::JoinHandle<()>>,
+}
+
+/// Start a meeting. Fails when one is already running or the dictation
+/// engine (transcriber + VAD) isn't ready yet.
+pub fn start(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    let mut slot = session_slot().lock().unwrap();
+    if slot.is_some() {
+        return Err("a meeting is already recording".into());
+    }
+
+    let transcriber = crate::engine::with(|e| e.transcriber_arc())
+        .ok_or("dictation engine not ready — download the dictation package first")?;
+    let vad_path = crate::models::ModelManager::global()
+        .ensure_vad_model()
+        .map_err(|e| format!("voice detection unavailable: {e}"))?;
+
+    // Mic on the configured input; system audio when the platform can.
+    let mic = AudioRecorder::new_with_device(Some(&vad_path), DeviceSpec::ConfigInput)?;
+    let (loopback_rec, loopback_notice) = match loopback::resolve() {
+        loopback::Loopback::Available(spec) => {
+            match AudioRecorder::new_with_device(Some(&vad_path), spec) {
+                Ok(r) => (Some(r), None),
+                Err(e) => (None, Some(format!("System audio unavailable: {e}"))),
+            }
+        }
+        loopback::Loopback::Unsupported(reason) => (None, Some(reason)),
+    };
+
+    let now = chrono::Local::now();
+    let meta = MeetingMeta {
+        id: format!("{:x}", chrono::Utc::now().timestamp_micros()),
+        title: format!("Meeting {}", now.format("%-d %b %H:%M")),
+        started: chrono::Utc::now().to_rfc3339(),
+        duration_ms: 0,
+        utterance_count: 0,
+        transcript_path: String::new(),
+        summary_path: String::new(),
+        summarizer_id: String::new(),
+    };
+    let filename = store::meeting_filename(&now.format("%Y-%m-%d %H-%M").to_string(), "Meeting");
+
+    let started_at = Instant::now();
+    let notes = Arc::new(Mutex::new(String::new()));
+    let utterances = Arc::new(Mutex::new(Vec::<Utterance>::new()));
+
+    // Start the streams BEFORE spawning consumers so a failed mic start
+    // doesn't leave orphan threads.
+    let mic_rx = mic.start_streaming()?;
+    let loop_rx = match &loopback_rec {
+        Some(r) => match r.start_streaming() {
+            Ok(rx) => Some(rx),
+            Err(e) => {
+                let _ = mic.stop();
+                return Err(format!("loopback start failed: {e}"));
+            }
+        },
+        None => None,
+    };
+
+    MEETING_ACTIVE.store(true, Ordering::SeqCst);
+
+    let mut consumers = Vec::new();
+    consumers.push(spawn_consumer(
+        mic_rx,
+        "mic",
+        transcriber.clone(),
+        started_at,
+        utterances.clone(),
+        app.clone(),
+    ));
+    if let Some(rx) = loop_rx {
+        consumers.push(spawn_consumer(
+            rx,
+            "system",
+            transcriber.clone(),
+            started_at,
+            utterances.clone(),
+            app.clone(),
+        ));
+    }
+
+    // Crash-safety autosave: rewrite the transcript markdown every ~30s while
+    // the meeting runs. Watches MEETING_ACTIVE at 1s granularity so stop()
+    // doesn't wait half a minute for the thread.
+    let autosaver = {
+        let meta = meta.clone();
+        let filename = filename.clone();
+        let notes = notes.clone();
+        let utterances = utterances.clone();
+        std::thread::Builder::new()
+            .name("meeting-autosave".into())
+            .spawn(move || {
+                let mut ticks = 0u32;
+                while MEETING_ACTIVE.load(Ordering::SeqCst) {
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                    ticks += 1;
+                    if ticks % 30 != 0 {
+                        continue;
+                    }
+                    let cfg = crate::config::AppConfig::load();
+                    let notes = notes.lock().unwrap().clone();
+                    let utts = utterances.lock().unwrap().clone();
+                    if utts.is_empty() && notes.trim().is_empty() {
+                        continue;
+                    }
+                    let mut meta = meta.clone();
+                    meta.utterance_count = utts.len() as u32;
+                    let md = store::transcript_markdown(&meta, &notes, &utts);
+                    match store::write_markdown(&cfg.meeting_transcript_dir, &filename, &md) {
+                        Ok(path) => {
+                            meta.transcript_path = path.to_string_lossy().into_owned();
+                            let _ = store::MeetingStore::global().upsert(meta);
+                        }
+                        Err(e) => log::warn!("meeting autosave failed: {e}"),
+                    }
+                }
+            })
+            .ok()
+    };
+
+    let notice = loopback_notice.clone();
+    *slot = Some(Session {
+        meta,
+        started_at,
+        notes,
+        utterances,
+        mic,
+        loopback: loopback_rec,
+        loopback_notice,
+        consumers,
+        autosaver,
+    });
+    drop(slot);
+
+    let payload = serde_json::json!({
+        "state": "recording",
+        "loopback_ok": notice.is_none(),
+        "notice": notice,
+    });
+    let _ = app.emit("meeting-state", payload.clone());
+    Ok(payload)
+}
+
+/// One VAD segment stream -> transcriber -> tagged utterances + events.
+fn spawn_consumer(
+    rx: std::sync::mpsc::Receiver<Vec<f32>>,
+    source: &'static str,
+    transcriber: Arc<crate::transcribe::Transcriber>,
+    started_at: Instant,
+    utterances: Arc<Mutex<Vec<Utterance>>>,
+    app: tauri::AppHandle,
+) -> std::thread::JoinHandle<()> {
+    std::thread::Builder::new()
+        .name(format!("meeting-{source}"))
+        .spawn(move || {
+            for segment in rx.iter() {
+                if segment.len() < MIN_SEGMENT_SAMPLES {
+                    continue;
+                }
+                // Tag with when the segment STARTED: elapsed minus its length.
+                let seg_ms = (segment.len() as u64) * 1000 / 16_000;
+                let t_ms = started_at.elapsed().as_millis() as u64;
+                let t_ms = t_ms.saturating_sub(seg_ms);
+                match transcriber.transcribe(segment, 16_000) {
+                    Ok(text) => {
+                        let text = text.trim().to_string();
+                        if text.is_empty() {
+                            continue;
+                        }
+                        let speaker = if source == "mic" { "You" } else { "Speaker 1" };
+                        let utterance = Utterance {
+                            source: source.into(),
+                            speaker: speaker.into(),
+                            text,
+                            t_ms,
+                        };
+                        utterances.lock().unwrap().push(utterance.clone());
+                        let _ = app.emit("meeting-utterance", &utterance);
+                    }
+                    Err(e) => log::warn!("meeting {source} transcribe failed: {e}"),
+                }
+            }
+        })
+        .expect("spawn meeting consumer")
+}
+
+/// Stop the meeting: flush tails, write the final transcript, index it.
+/// Returns the finished meta (summarization is a separate step).
+pub fn stop(app: tauri::AppHandle, final_notes: String) -> Result<MeetingMeta, String> {
+    let session = session_slot()
+        .lock()
+        .unwrap()
+        .take()
+        .ok_or("no meeting is recording")?;
+    MEETING_ACTIVE.store(false, Ordering::SeqCst);
+
+    if !final_notes.is_empty() {
+        *session.notes.lock().unwrap() = final_notes;
+    }
+
+    // Stopping the recorders closes their segment channels; consumers drain
+    // what's queued and exit. Tails come back as raw samples.
+    let transcriber = crate::engine::with(|e| e.transcriber_arc());
+    let mut tails: Vec<(&'static str, Vec<f32>)> = Vec::new();
+    match session.mic.stop() {
+        Ok(t) => tails.push(("mic", t)),
+        Err(e) => log::warn!("mic stop: {e}"),
+    }
+    if let Some(rec) = &session.loopback {
+        match rec.stop() {
+            Ok(t) => tails.push(("system", t)),
+            Err(e) => log::warn!("loopback stop: {e}"),
+        }
+    }
+    for h in session.consumers {
+        let _ = h.join();
+    }
+    if let Some(h) = session.autosaver {
+        let _ = h.join();
+    }
+
+    let duration_ms = session.started_at.elapsed().as_millis() as u64;
+    if let Some(t) = transcriber {
+        for (source, samples) in tails {
+            if samples.len() < MIN_SEGMENT_SAMPLES {
+                continue;
+            }
+            let seg_ms = (samples.len() as u64) * 1000 / 16_000;
+            if let Ok(text) = t.transcribe(samples, 16_000) {
+                let text = text.trim().to_string();
+                if !text.is_empty() {
+                    session.utterances.lock().unwrap().push(Utterance {
+                        source: source.into(),
+                        speaker: (if source == "mic" { "You" } else { "Speaker 1" }).into(),
+                        text,
+                        t_ms: duration_ms.saturating_sub(seg_ms),
+                    });
+                }
+            }
+        }
+    }
+
+    // Final transcript + index entry.
+    let cfg = crate::config::AppConfig::load();
+    let notes = session.notes.lock().unwrap().clone();
+    let mut utts = session.utterances.lock().unwrap().clone();
+    utts.sort_by_key(|u| u.t_ms);
+    let mut meta = session.meta.clone();
+    meta.duration_ms = duration_ms;
+    meta.utterance_count = utts.len() as u32;
+    let started_local = chrono::DateTime::parse_from_rfc3339(&meta.started)
+        .map(|d| d.with_timezone(&chrono::Local).format("%Y-%m-%d %H-%M").to_string())
+        .unwrap_or_else(|_| "meeting".into());
+    let filename = store::meeting_filename(&started_local, "Meeting");
+    let md = store::transcript_markdown(&meta, &notes, &utts);
+    let path = store::write_markdown(&cfg.meeting_transcript_dir, &filename, &md)?;
+    meta.transcript_path = path.to_string_lossy().into_owned();
+    store::MeetingStore::global().upsert(meta.clone())?;
+
+    let _ = app.emit("meeting-state", serde_json::json!({ "state": "idle" }));
+    Ok(meta)
+}
+
+/// Abandon the meeting: stop capture, remove any autosaved transcript and
+/// index entry. Nothing is kept.
+pub fn cancel(app: tauri::AppHandle) -> Result<(), String> {
+    let session = session_slot()
+        .lock()
+        .unwrap()
+        .take()
+        .ok_or("no meeting is recording")?;
+    MEETING_ACTIVE.store(false, Ordering::SeqCst);
+
+    let _ = session.mic.stop();
+    if let Some(rec) = &session.loopback {
+        let _ = rec.stop();
+    }
+    for h in session.consumers {
+        let _ = h.join();
+    }
+    if let Some(h) = session.autosaver {
+        let _ = h.join();
+    }
+    let _ = store::MeetingStore::global().delete(&session.meta.id, true);
+
+    let _ = app.emit("meeting-state", serde_json::json!({ "state": "idle" }));
+    Ok(())
+}
+
+/// Replace the live notes buffer (debounced from the frontend textarea).
+pub fn note_set(text: String) -> Result<(), String> {
+    let slot = session_slot().lock().unwrap();
+    let session = slot.as_ref().ok_or("no meeting is recording")?;
+    *session.notes.lock().unwrap() = text;
+    Ok(())
+}
+
+/// Current session snapshot, for UI resync after a reload.
+pub fn status() -> serde_json::Value {
+    let slot = session_slot().lock().unwrap();
+    match slot.as_ref() {
+        Some(s) => serde_json::json!({
+            "state": "recording",
+            "id": s.meta.id,
+            "title": s.meta.title,
+            "elapsed_ms": s.started_at.elapsed().as_millis() as u64,
+            "utterances": s.utterances.lock().unwrap().clone(),
+            "notes": s.notes.lock().unwrap().clone(),
+            "loopback_ok": s.loopback.is_some(),
+            "notice": s.loopback_notice,
+        }),
+        None => serde_json::json!({ "state": "idle" }),
+    }
+}

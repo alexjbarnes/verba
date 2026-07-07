@@ -280,6 +280,13 @@ impl Engine {
         &self.recorder
     }
 
+    /// Clone of the shared transcriber handle. Meeting mode's two segment
+    /// consumers transcribe through this same worker (its internal mutex
+    /// interleaves segments), so Parakeet is loaded exactly once.
+    pub fn transcriber_arc(&self) -> Arc<Transcriber> {
+        self.transcriber.clone()
+    }
+
     /// Replace the transcriber with a new model.
     pub fn reload_model(&mut self, transcriber: Transcriber, model_id: String) {
         self.transcriber = Arc::new(transcriber);
