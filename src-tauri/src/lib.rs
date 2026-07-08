@@ -619,6 +619,9 @@ fn meeting_get(id: String) -> Option<meeting::store::MeetingMeta> {
 #[cfg(not(target_os = "android"))]
 #[tauri::command]
 fn meeting_delete(id: String, delete_files: Option<bool>) -> Result<(), String> {
+    if delete_files.unwrap_or(false) {
+        meeting::gallery::delete_meeting_voiceprints(&id);
+    }
     meeting::store::MeetingStore::global().delete(&id, delete_files.unwrap_or(false))
 }
 
@@ -648,6 +651,25 @@ async fn meeting_summarize(app: tauri::AppHandle, id: String) -> Result<meeting:
     tauri::async_runtime::spawn_blocking(move || meeting::summarize(app, id))
         .await
         .map_err(|e| format!("summarize task: {e}"))?
+}
+
+/// Rename (and enroll) a speaker in a finished meeting. Enrolling their
+/// voiceprint means future meetings identify them live.
+#[cfg(not(target_os = "android"))]
+#[tauri::command]
+fn meeting_rename_speaker(
+    id: String,
+    from: String,
+    to: String,
+) -> Result<meeting::store::MeetingMeta, String> {
+    meeting::rename_speaker(id, from, to)
+}
+
+/// Distinct non-"You" speakers in a finished meeting, for the rename UI.
+#[cfg(not(target_os = "android"))]
+#[tauri::command]
+fn meeting_speakers(id: String) -> Result<Vec<String>, String> {
+    meeting::speakers(&id)
 }
 
 // Android stubs: same names/signatures, always an error.
@@ -699,6 +721,16 @@ fn meeting_read_file(_id: String, _which: String) -> Result<String, String> {
 #[cfg(target_os = "android")]
 #[tauri::command]
 async fn meeting_summarize(_app: tauri::AppHandle, _id: String) -> Result<serde_json::Value, String> {
+    Err("Meeting mode is desktop only".into())
+}
+#[cfg(target_os = "android")]
+#[tauri::command]
+fn meeting_rename_speaker(_id: String, _from: String, _to: String) -> Result<serde_json::Value, String> {
+    Err("Meeting mode is desktop only".into())
+}
+#[cfg(target_os = "android")]
+#[tauri::command]
+fn meeting_speakers(_id: String) -> Result<serde_json::Value, String> {
     Err("Meeting mode is desktop only".into())
 }
 
@@ -1665,6 +1697,8 @@ pub fn run() {
             meeting_delete,
             meeting_read_file,
             meeting_summarize,
+            meeting_rename_speaker,
+            meeting_speakers,
             storage_summary,
             storage_clear,
             list_history,

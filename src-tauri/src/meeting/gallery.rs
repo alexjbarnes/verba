@@ -130,6 +130,44 @@ impl Gallery {
     }
 }
 
+/// Per-meeting speaker voiceprints, saved at stop keyed by meeting id, so a
+/// later "name Speaker N" can enroll that voiceprint into the gallery.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MeetingVoiceprint {
+    pub label: String,
+    pub embedding: Vec<f32>,
+}
+
+fn voiceprints_path(id: &str) -> Option<PathBuf> {
+    let safe: String =
+        id.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_').collect();
+    dirs::data_dir().map(|d| d.join("verba").join("voiceprints").join(format!("{safe}.json")))
+}
+
+pub fn save_meeting_voiceprints(id: &str, vps: &[MeetingVoiceprint]) -> Result<(), String> {
+    let path = voiceprints_path(id).ok_or("no data dir")?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("voiceprints dir: {e}"))?;
+    }
+    let raw = serde_json::to_string(vps).map_err(|e| e.to_string())?;
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, raw).map_err(|e| format!("voiceprints write: {e}"))?;
+    std::fs::rename(&tmp, &path).map_err(|e| format!("voiceprints rename: {e}"))
+}
+
+pub fn load_meeting_voiceprints(id: &str) -> Vec<MeetingVoiceprint> {
+    voiceprints_path(id)
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default()
+}
+
+pub fn delete_meeting_voiceprints(id: &str) {
+    if let Some(p) = voiceprints_path(id) {
+        let _ = std::fs::remove_file(p);
+    }
+}
+
 /// Unit-normalize an embedding for storage/comparison (cosine space).
 pub fn normalize(v: &[f32]) -> Vec<f32> {
     let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();

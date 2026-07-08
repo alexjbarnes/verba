@@ -437,6 +437,15 @@ fn refine_speakers(
         }
     }
 
+    // Persist every speaker's voiceprint so naming a "Speaker N" later can
+    // enroll it into the gallery for future meetings.
+    let vps: Vec<gallery::MeetingVoiceprint> = labels
+        .iter()
+        .zip(diar.voiceprints.iter())
+        .map(|((name, _), vp)| gallery::MeetingVoiceprint { label: name.clone(), embedding: vp.clone() })
+        .collect();
+    let _ = gallery::save_meeting_voiceprints(id, &vps);
+
     // Relabel system utterances by their segment's majority diarized speaker.
     let mut label_by_tms: std::collections::HashMap<u64, String> = std::collections::HashMap::new();
     {
@@ -630,4 +639,61 @@ pub fn summarize(app: tauri::AppHandle, id: String) -> Result<MeetingMeta, Strin
 
     emit("done", 1, 1);
     Ok(meta)
+}
+
+/// Rename a speaker in a finished meeting: enroll their stored voiceprint under
+/// the new name (so future meetings recognize them live) and rewrite the
+/// transcript. Renaming into a name that already appears merges the two.
+pub fn rename_speaker(id: String, from: String, to: String) -> Result<MeetingMeta, String> {
+    let to = to.trim().to_string();
+    if to.is_empty() {
+        return Err("name is empty".into());
+    }
+    let store = store::MeetingStore::global();
+    let meta = store.get(&id).ok_or("meeting not found")?;
+    if meta.transcript_path.is_empty() {
+        return Err("no transcript".into());
+    }
+
+    // Enroll the voiceprint we saved for `from` under `to`, then relabel it in
+    // the sidecar so a later merge/rename still resolves.
+    let mut vps = gallery::load_meeting_voiceprints(&id);
+    if let Some(v) = vps.iter().find(|v| v.label == from) {
+        gallery::Gallery::global().add(&to, v.embedding.clone())?;
+    }
+    for v in vps.iter_mut() {
+        if v.label == from {
+            v.label = to.clone();
+        }
+    }
+    let _ = gallery::save_meeting_voiceprints(&id, &vps);
+
+    // Rewrite the transcript with the renamed speaker.
+    let md = std::fs::read_to_string(&meta.transcript_path)
+        .map_err(|e| format!("read transcript: {e}"))?;
+    let new_md = store::rename_speaker_in_markdown(&md, &from, &to);
+    let path = std::path::PathBuf::from(&meta.transcript_path);
+    let dir = path.parent().and_then(|p| p.to_str()).ok_or("bad transcript path")?;
+    let filename = path.file_name().and_then(|f| f.to_str()).ok_or("bad transcript path")?;
+    store::write_markdown(dir, filename, &new_md)?;
+    Ok(meta)
+}
+
+/// Distinct non-"You" speakers in a finished meeting's transcript, for the UI's
+/// rename affordance.
+pub fn speakers(id: &str) -> Result<Vec<String>, String> {
+    let meta = store::MeetingStore::global().get(id).ok_or("meeting not found")?;
+    if meta.transcript_path.is_empty() {
+        return Err("no transcript".into());
+    }
+    let md = std::fs::read_to_string(&meta.transcript_path)
+        .map_err(|e| format!("read transcript: {e}"))?;
+    let (_, lines) = parse_transcript(&md);
+    let mut set = std::collections::BTreeSet::new();
+    for l in lines {
+        if l.speaker != "You" {
+            set.insert(l.speaker);
+        }
+    }
+    Ok(set.into_iter().collect())
 }

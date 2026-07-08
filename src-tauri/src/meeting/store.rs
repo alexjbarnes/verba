@@ -153,6 +153,27 @@ pub fn transcript_markdown(meta: &MeetingMeta, notes: &str, utterances: &[Uttera
     out
 }
 
+/// Rewrite a transcript's speaker labels, renaming `from` to `to` on the
+/// `**[MM:SS] Speaker:** text` lines (only the speaker field, never the text).
+pub fn rename_speaker_in_markdown(md: &str, from: &str, to: &str) -> String {
+    let mut out = String::with_capacity(md.len());
+    for line in md.lines() {
+        if let Some(rest) = line.strip_prefix("**[") {
+            if let Some((time, after)) = rest.split_once("] ") {
+                if let Some((speaker, text)) = after.split_once(":** ") {
+                    if speaker == from {
+                        out.push_str(&format!("**[{time}] {to}:** {text}\n"));
+                        continue;
+                    }
+                }
+            }
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
 /// Write markdown into `dir` (created if needed) as `filename`, tmp+rename.
 /// Returns the absolute path written.
 pub fn write_markdown(dir: &str, filename: &str, content: &str) -> Result<PathBuf, String> {
@@ -221,5 +242,15 @@ mod tests {
         assert_eq!(p, p2);
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "# hi2\n");
         assert!(!p.with_extension("md.tmp").exists());
+    }
+
+    #[test]
+    fn rename_speaker_only_touches_speaker_field() {
+        let md = "## Transcript\n\n**[00:01] You:** Speaker 2 is loud.\n\n**[00:04] Speaker 2:** Hello.\n\n";
+        let out = rename_speaker_in_markdown(md, "Speaker 2", "Bob");
+        // The speaker label changes, the word "Speaker 2" inside text does not.
+        assert!(out.contains("**[00:04] Bob:** Hello."));
+        assert!(out.contains("**[00:01] You:** Speaker 2 is loud."));
+        assert!(!out.contains("**[00:04] Speaker 2:**"));
     }
 }

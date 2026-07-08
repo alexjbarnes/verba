@@ -5090,7 +5090,15 @@ listen('meeting-utterance', (event) => {
 // A session ending from somewhere other than this tab's own Stop/Cancel must
 // still clear the mode-switch guard, or meetingRecording stays stuck true.
 listen('meeting-state', (event) => {
-  if (event.payload?.state === 'idle' && meetingRecording) endMeetingSession();
+  const state = event.payload?.state;
+  if (state === 'diarizing') {
+    // The offline speaker pass runs at stop and can take a while on long
+    // meetings; keep the user informed instead of a silent "Stopping…".
+    const btn = document.getElementById('meeting-stop-btn');
+    if (btn) btn.textContent = 'Analyzing speakers…';
+  } else if (state === 'idle' && meetingRecording) {
+    endMeetingSession();
+  }
 });
 
 function endMeetingSession() {
@@ -5403,6 +5411,7 @@ async function openMeetingView(id) {
     [formatTimestamp(meta.started), fmtMins(meta.duration_ms), `${meta.utterance_count} utterances`].join(' · ');
   showPanel('meeting-view');
   setBottomNavVisible(false);
+  renderMeetingSpeakers(id);
 
   const summaryBody = document.getElementById('meeting-summary-body');
   const summarizeBtn = document.getElementById('meeting-summarize-btn');
@@ -5452,6 +5461,71 @@ document.getElementById('meeting-transcript-toggle').addEventListener('click', a
     }
   }
 });
+
+// Show the meeting's speakers as chips; clicking one renames it, which enrolls
+// that voiceprint so future meetings identify the person automatically.
+async function renderMeetingSpeakers(id) {
+  const section = document.getElementById('meeting-speakers-section');
+  const wrap = document.getElementById('meeting-speakers');
+  let names = [];
+  try { names = await invoke('meeting_speakers', { id }); } catch (_) {}
+  if (!Array.isArray(names) || !names.length) {
+    section.classList.add('hidden');
+    wrap.innerHTML = '';
+    return;
+  }
+  section.classList.remove('hidden');
+  wrap.innerHTML = '';
+  for (const name of names) {
+    const chip = document.createElement('button');
+    chip.className = 'group inline-flex items-center gap-1.5 min-h-9 px-3 rounded-full bg-surface-container-highest text-sm text-on-surface hover:bg-primary/10 transition-colors cursor-pointer';
+    chip.innerHTML = `<span>${escapeHtml(name)}</span><span class="material-symbols-outlined text-sm text-on-surface-variant group-hover:text-primary">edit</span>`;
+    chip.addEventListener('click', () => startRenameSpeaker(id, name, chip));
+    wrap.appendChild(chip);
+  }
+}
+
+function startRenameSpeaker(id, from, chip) {
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.value = from;
+  input.spellcheck = false;
+  input.className = 'min-h-9 px-3 rounded-full bg-surface-container-highest text-sm text-on-surface border border-primary/60 focus:outline-none focus:ring-1 focus:ring-primary/50 w-36';
+  chip.replaceWith(input);
+  input.focus();
+  input.select();
+  let done = false;
+  const cancel = () => { if (!done) { done = true; renderMeetingSpeakers(id); } };
+  const commit = async () => {
+    if (done) return;
+    done = true;
+    const to = input.value.trim();
+    if (!to || to === from) { renderMeetingSpeakers(id); return; }
+    try {
+      await invoke('meeting_rename_speaker', { id, from, to });
+      showToast(`Named ${to}`);
+      // The transcript labels changed; reload it if it's open, and the chips.
+      const tView = document.getElementById('meeting-transcript-view');
+      meetingTranscriptLoaded = false;
+      if (!tView.classList.contains('hidden')) {
+        try {
+          document.getElementById('meeting-transcript-view-body').innerHTML =
+            renderMarkdownBasic(await invoke('meeting_read_file', { id, which: 'transcript' }));
+          meetingTranscriptLoaded = true;
+        } catch (_) {}
+      }
+      renderMeetingSpeakers(id);
+    } catch (err) {
+      showToast('Rename failed: ' + err);
+      renderMeetingSpeakers(id);
+    }
+  };
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); commit(); }
+    else if (e.key === 'Escape') { e.preventDefault(); cancel(); }
+  });
+  input.addEventListener('blur', commit);
+}
 
 // ── Meeting settings (Settings > Meeting) ──
 
