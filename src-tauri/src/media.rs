@@ -118,7 +118,8 @@ mod platform {
         let pair = std::sync::Arc::new((Mutex::new(None::<bool>), Condvar::new()));
         let pair_clone = pair.clone();
 
-        let block = block2::ConcreteBlock::new(move |info: CFDictionaryRef| {
+        let block = block2::RcBlock::new(move |info: *mut c_void| {
+            let info = info as CFDictionaryRef;
             let playing = if info.is_null() {
                 false
             } else {
@@ -143,7 +144,6 @@ mod platform {
             *lock.lock().unwrap() = Some(playing);
             cvar.notify_one();
         });
-        let block = block.copy();
 
         unsafe {
             let queue = dispatch_queue_create(
@@ -152,7 +152,7 @@ mod platform {
             );
             (mr.get_now_playing_info)(
                 queue as *mut c_void,
-                &*block as *const _ as *mut c_void,
+                block2::RcBlock::as_ptr(&block) as *mut c_void,
             );
         }
 

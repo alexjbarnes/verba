@@ -65,9 +65,12 @@ pub fn paste(text: &str, target: Option<&PasteTarget>) -> Result<PasteResult, St
     if let Some(t) = target {
         if let Some(pid) = t.pid {
             match ax::insert_text(text, pid) {
-                Ok(()) => {
+                Ok(true) => {
                     log::info!("Pasted via Accessibility API: {text}");
                     return Ok(PasteResult::Pasted);
+                }
+                Ok(false) => {
+                    log::info!("AX insert unverified, falling back to clipboard");
                 }
                 Err(e) => {
                     log::info!("AX insert failed ({e}), falling back to clipboard");
@@ -377,7 +380,7 @@ mod ax {
                 .as_ref().map(|s| s.len()).unwrap_or(0);
 
             if len_after > len_before || text.is_empty() {
-                return Ok(());
+                return Ok(true);
             }
 
             // Native apps update within ~50ms. Electron never will.
@@ -386,7 +389,7 @@ mod ax {
                 .as_ref().map(|s| s.len()).unwrap_or(0);
 
             if len_retry > len_before {
-                return Ok(());
+                return Ok(true);
             }
 
             Err("AX write silently discarded (Electron/Chromium app)".into())
