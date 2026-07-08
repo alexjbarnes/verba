@@ -5484,6 +5484,8 @@ async function openMeetingView(id) {
   showPanel('meeting-view');
   setBottomNavVisible(false);
   renderMeetingSpeakers(id);
+  exitSummaryEdit();
+  document.getElementById('meeting-summary-edit-btn').classList.remove('hidden');
 
   const summaryBody = document.getElementById('meeting-summary-body');
   const summarizeBtn = document.getElementById('meeting-summarize-btn');
@@ -5516,6 +5518,93 @@ document.getElementById('meeting-view-folder').addEventListener('click', () => {
 });
 document.getElementById('meeting-summarize-btn').addEventListener('click', () => {
   if (meetingViewId) summarizeMeeting(meetingViewId);
+});
+
+// ── Editable / dictatable summary ──
+let summaryDictating = false;
+
+function stripSummaryHeading(md) {
+  return md.replace(/^#[^\n]*\n\n?/, ''); // drop the leading "# Title" line
+}
+
+function setSummaryMic(recording) {
+  document.getElementById('meeting-summary-mic-label').textContent = recording ? 'Stop' : 'Dictate';
+  const icon = document.getElementById('meeting-summary-mic-icon');
+  icon.textContent = recording ? 'stop' : 'mic';
+  icon.classList.toggle('animate-pulse', recording);
+}
+
+async function enterSummaryEdit() {
+  const id = meetingViewId;
+  if (!id) return;
+  let text = '';
+  if (meetingViewMeta && meetingViewMeta.summary_path) {
+    try { text = stripSummaryHeading(await invoke('meeting_read_file', { id, which: 'summary' })); } catch (_) {}
+  }
+  document.getElementById('meeting-summary-edit').value = text;
+  document.getElementById('meeting-summary-body').classList.add('hidden');
+  document.getElementById('meeting-summarize-btn').classList.add('hidden');
+  document.getElementById('meeting-summary-edit-btn').classList.add('hidden');
+  document.getElementById('meeting-summary-editor').classList.remove('hidden');
+  document.getElementById('meeting-summary-edit').focus();
+}
+
+// Leave edit mode. Stops any dictation in progress. Button visibility is
+// re-established by the caller (openMeetingView or Cancel).
+function exitSummaryEdit() {
+  if (summaryDictating) {
+    invoke('ui_stop_and_transcribe_raw').catch(() => {});
+    summaryDictating = false;
+    setSummaryMic(false);
+  }
+  document.getElementById('meeting-summary-editor').classList.add('hidden');
+  document.getElementById('meeting-summary-body').classList.remove('hidden');
+}
+
+document.getElementById('meeting-summary-edit-btn').addEventListener('click', enterSummaryEdit);
+
+document.getElementById('meeting-summary-cancel').addEventListener('click', () => {
+  exitSummaryEdit();
+  document.getElementById('meeting-summary-edit-btn').classList.remove('hidden');
+  document.getElementById('meeting-summarize-btn').classList.remove('hidden');
+});
+
+document.getElementById('meeting-summary-mic').addEventListener('click', async () => {
+  const ta = document.getElementById('meeting-summary-edit');
+  if (summaryDictating) {
+    summaryDictating = false;
+    setSummaryMic(false);
+    try {
+      const text = ((await invoke('ui_stop_and_transcribe_raw')) || '').trim();
+      if (text) {
+        const sep = ta.value && !/\s$/.test(ta.value) ? ' ' : '';
+        ta.value = ta.value + sep + text;
+      }
+    } catch (err) { showToast('Dictation failed: ' + err); }
+    ta.focus();
+  } else {
+    try {
+      await invoke('ui_start_recording');
+      summaryDictating = true;
+      setSummaryMic(true);
+    } catch (err) { showToast('Could not start dictation: ' + err); }
+  }
+});
+
+document.getElementById('meeting-summary-save').addEventListener('click', async () => {
+  const id = meetingViewId;
+  if (!id) return;
+  if (summaryDictating) {
+    try { await invoke('ui_stop_and_transcribe_raw'); } catch (_) {}
+    summaryDictating = false;
+    setSummaryMic(false);
+  }
+  const body = document.getElementById('meeting-summary-edit').value;
+  try {
+    await invoke('meeting_set_summary', { id, body });
+    showToast('Summary saved');
+    openMeetingView(id); // re-render + reset edit mode/buttons
+  } catch (err) { showToast('Save failed: ' + err); }
 });
 document.getElementById('meeting-transcript-toggle').addEventListener('click', async () => {
   const body = document.getElementById('meeting-transcript-view');

@@ -894,10 +894,26 @@
       </section>
 
       <section>
-        <h3 class="text-xs font-semibold text-on-surface-variant uppercase tracking-wider mb-2">Summary</h3>
+        <div class="flex items-center justify-between mb-2">
+          <h3 class="text-xs font-semibold text-on-surface-variant uppercase tracking-wider">Summary</h3>
+          <button id="meeting-summary-edit-btn" class="hidden inline-flex items-center gap-1 text-xs font-semibold text-on-surface-variant hover:text-primary transition-colors cursor-pointer">
+            <span class="material-symbols-outlined text-sm">edit</span>Edit
+          </button>
+        </div>
         <div class="bg-surface-container-low rounded-xl p-4">
           <div id="meeting-summary-body" class="text-[15px] leading-relaxed text-on-surface/90 selectable"></div>
           <button id="meeting-summarize-btn" class="hidden mt-3 min-h-10 text-xs font-semibold px-4 bg-primary text-on-primary rounded-lg hover:brightness-110 transition-all cursor-pointer">Summarize</button>
+          <div id="meeting-summary-editor" class="hidden">
+            <textarea id="meeting-summary-edit" rows="8" placeholder="Dictate or type your summary" class="w-full bg-surface-container-highest border border-outline-variant/30 rounded-lg px-3 py-2.5 text-sm text-on-surface placeholder:text-on-surface-variant/50 focus:outline-none focus:ring-1 focus:ring-primary/50 transition-colors resize-y"></textarea>
+            <div class="flex items-center gap-2 mt-3">
+              <button id="meeting-summary-mic" class="inline-flex items-center gap-1.5 min-h-10 px-3 text-xs font-semibold rounded-lg bg-surface-container-highest text-on-surface hover:bg-primary/10 transition-colors cursor-pointer">
+                <span class="material-symbols-outlined text-base" id="meeting-summary-mic-icon">mic</span><span id="meeting-summary-mic-label">Dictate</span>
+              </button>
+              <div class="flex-1"></div>
+              <button id="meeting-summary-cancel" class="min-h-10 px-3 text-xs font-semibold text-on-surface-variant rounded-lg hover:bg-surface-container-highest transition-colors cursor-pointer">Cancel</button>
+              <button id="meeting-summary-save" class="min-h-10 px-4 text-xs font-semibold bg-primary text-on-primary rounded-lg hover:brightness-110 transition-all cursor-pointer">Save</button>
+            </div>
+          </div>
         </div>
       </section>
 

@@ -676,6 +676,13 @@ fn meeting_speakers(id: String) -> Result<Vec<meeting::SpeakerInfo>, String> {
     meeting::speakers(&id)
 }
 
+/// Replace a meeting's summary (from the editable/dictated summary panel).
+#[cfg(not(target_os = "android"))]
+#[tauri::command]
+fn meeting_set_summary(id: String, body: String) -> Result<meeting::store::MeetingMeta, String> {
+    meeting::set_summary(&id, &body)
+}
+
 // Android stubs: same names/signatures, always an error.
 #[cfg(target_os = "android")]
 #[tauri::command]
@@ -739,6 +746,11 @@ fn meeting_rename_speaker(_id: String, _from: String, _to: String) -> Result<ser
 #[cfg(target_os = "android")]
 #[tauri::command]
 fn meeting_speakers(_id: String) -> Result<serde_json::Value, String> {
+    Err("Meeting mode is desktop only".into())
+}
+#[cfg(target_os = "android")]
+#[tauri::command]
+fn meeting_set_summary(_id: String, _body: String) -> Result<serde_json::Value, String> {
     Err("Meeting mode is desktop only".into())
 }
 
@@ -1707,6 +1719,7 @@ pub fn run() {
             meeting_summarize,
             meeting_rename_speaker,
             meeting_speakers,
+            meeting_set_summary,
             storage_summary,
             storage_clear,
             list_history,

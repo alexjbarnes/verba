@@ -780,3 +780,26 @@ pub fn speakers(id: &str) -> Result<Vec<SpeakerInfo>, String> {
         })
         .collect())
 }
+
+/// Replace a meeting's summary markdown — used by the editable summary panel,
+/// where the user can dictate or type. Wraps the body under the title heading,
+/// matching what `summarize()` writes. Works even if no summary existed yet.
+pub fn set_summary(id: &str, body: &str) -> Result<MeetingMeta, String> {
+    let store = store::MeetingStore::global();
+    let mut meta = store.get(id).ok_or("meeting not found")?;
+    let cfg = crate::config::AppConfig::load();
+    let filename = if !meta.transcript_path.is_empty() {
+        let stem = std::path::Path::new(&meta.transcript_path)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("Meeting");
+        format!("{stem} Summary.md")
+    } else {
+        store::meeting_filename(&meta.title, "Summary")
+    };
+    let content = format!("# {}\n\n{}\n", meta.title, body.trim());
+    let path = store::write_markdown(&cfg.meeting_summary_dir, &filename, &content)?;
+    meta.summary_path = path.to_string_lossy().into_owned();
+    store.upsert(meta.clone())?;
+    Ok(meta)
+}
