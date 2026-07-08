@@ -44,6 +44,9 @@ pub struct MeetingMeta {
     /// Summarizer component that produced the summary ("" if none yet).
     #[serde(default)]
     pub summarizer_id: String,
+    /// Count of still-unnamed "Speaker N" speakers, for the meetings-list badge.
+    #[serde(default)]
+    pub unnamed_speakers: u32,
 }
 
 pub struct MeetingStore {
@@ -203,6 +206,7 @@ mod tests {
             transcript_path: String::new(),
             summary_path: String::new(),
             summarizer_id: String::new(),
+            unnamed_speakers: 0,
         }
     }
 

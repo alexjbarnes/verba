@@ -117,6 +117,7 @@ pub fn start(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
         transcript_path: String::new(),
         summary_path: String::new(),
         summarizer_id: String::new(),
+        unnamed_speakers: 0,
     };
     let filename = store::meeting_filename(&now.format("%Y-%m-%d %H-%M").to_string(), "Meeting");
 
@@ -370,6 +371,15 @@ pub fn stop(
             meta.title = t.to_string();
         }
     }
+    meta.unnamed_speakers = {
+        let mut s = std::collections::BTreeSet::new();
+        for u in &utts {
+            if u.source == "system" && u.speaker.starts_with("Speaker ") {
+                s.insert(u.speaker.clone());
+            }
+        }
+        s.len() as u32
+    };
     let started_local = chrono::DateTime::parse_from_rfc3339(&meta.started)
         .map(|d| d.with_timezone(&chrono::Local).format("%Y-%m-%d %H-%M").to_string())
         .unwrap_or_else(|_| "meeting".into());
@@ -686,6 +696,18 @@ pub fn rename_speaker(id: String, from: String, to: String) -> Result<MeetingMet
     let dir = path.parent().and_then(|p| p.to_str()).ok_or("bad transcript path")?;
     let filename = path.file_name().and_then(|f| f.to_str()).ok_or("bad transcript path")?;
     store::write_markdown(dir, filename, &new_md)?;
+
+    // Refresh the unnamed-speaker count so the meetings-list badge updates.
+    let (_, lines) = parse_transcript(&new_md);
+    let mut remaining = std::collections::BTreeSet::new();
+    for l in &lines {
+        if l.speaker != "You" && l.speaker.starts_with("Speaker ") {
+            remaining.insert(l.speaker.clone());
+        }
+    }
+    let mut meta = meta;
+    meta.unnamed_speakers = remaining.len() as u32;
+    store.upsert(meta.clone())?;
     Ok(meta)
 }
 

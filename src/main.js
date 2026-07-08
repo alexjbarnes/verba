@@ -5243,11 +5243,14 @@ function renderMeetingCard(m, i) {
   const indicator = m.summary_path
     ? '<span class="inline-flex items-center gap-1 text-xs text-primary"><span class="material-symbols-outlined text-sm">auto_awesome</span>Summarized</span>'
     : '<span class="inline-flex items-center gap-1 text-xs text-on-surface-variant"><span class="material-symbols-outlined text-sm">description</span>Transcript only</span>';
+  const nameBadge = m.unnamed_speakers > 0
+    ? `<span class="inline-flex items-center gap-1 text-xs text-primary"><span class="material-symbols-outlined text-sm">person_add</span>${m.unnamed_speakers} to name</span>`
+    : '';
   return `
   <div class="meeting-item stagger-in bg-surface-container rounded-xl px-4 py-3.5 cursor-pointer hover:bg-surface-container-high transition-colors" data-id="${escapeHtml(m.id)}" style="--i:${i}">
     <div class="text-[15px] font-semibold leading-snug text-on-surface truncate">${escapeHtml(m.title)}</div>
     <div class="text-xs text-on-surface-variant tabular-nums mt-1">${escapeHtml(meta)}</div>
-    <div class="mt-1.5">${indicator}</div>
+    <div class="mt-1.5 flex items-center gap-3">${indicator}${nameBadge}</div>
   </div>`;
 }
 
@@ -5536,6 +5539,11 @@ async function renderMeetingSpeakers(id) {
     }
     wrap.appendChild(row);
   }
+  const unnamed = speakers.filter((s) => s.unnamed).length;
+  document.getElementById('meeting-speakers-count').textContent = unnamed ? ` · ${unnamed} to name` : '';
+  document.getElementById('meeting-speakers-hint').textContent = unnamed
+    ? `${unnamed} speaker${unnamed > 1 ? 's' : ''} to name. Naming them lets Verba recognize them in future meetings.`
+    : 'Naming speakers lets Verba recognize them in future meetings.';
 }
 
 function startRenameSpeaker(id, from, chip) {
