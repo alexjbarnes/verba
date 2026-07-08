@@ -119,9 +119,11 @@ today's cfg-off builds and same as the <5-word skip).
 
 A third top-level manifest package, `meeting`, alongside `dictation` and
 `voices` (optional in the schema, so old manifests and old apps ignore it).
-It holds a `speaker` component (the embedding model for diarization) plus one
-`sum-*` component per offered summarizer LLM. The user installs the speaker
-component and exactly ONE summarizer — a RAM-tier recommendation preselects
+It holds a `speaker` component (the ERes2Net embedding model) and a
+`segmentation` component (the pyannote model) — both needed for diarization —
+plus one `sum-*` component per offered summarizer LLM. The user installs the
+speaker + segmentation components and exactly ONE summarizer — a RAM-tier
+recommendation preselects
 it (`recommended_summarizer`: <8 GB Qwen3-0.6B, 8-16 GB Qwen3-1.7B, ≥16 GB
 Llama-3.2-3B; Gemma-3-1b is always listed, never the recommendation). The
 chosen id lives in both `packages.json` (meeting_summarizer) and AppConfig.
@@ -141,9 +143,19 @@ entry `.onnx`.
 Summarization map-reduces the transcript (~1000-token chunks, 10% overlap on
 utterance boundaries → per-chunk bullets → one combine pass) with the user's
 own notes leading as authoritative anchors, emitting `## Summary` /
-`## Decisions` / `## Action items`. Speaker diarization is experimental and
-loopback-only: a per-segment embedding clustered online (cosine 0.65, ≤8
-speakers), embeddings in memory only, never persisted.
+`## Decisions` / `## Action items`.
+
+Speaker diarization is loopback-only and two-layered. LIVE, each utterance's
+embedding is matched (via its accumulated cluster voiceprint) against a
+persisted gallery — enrolled people get their name, others a provisional
+`Speaker N`. At STOP, `meeting/diarize.rs` runs sherpa
+`OfflineSpeakerDiarization` (pyannote segmentation + the ERes2Net embedding)
+over the reconstructed loopback waveform, then a pooled re-embed merge plus a
+relative-floor consolidate that recover the true speaker count automatically,
+and relabels the transcript (POC on AMI: ~13% DER, count recovered, vs ~37% for
+the old online clusterer). Naming a speaker enrolls their voiceprint into the
+gallery (`data_dir/verba/speakers.json`), so a person named once is recognized
+live in later meetings.
 
 ## Hosting layout on R2
 
@@ -156,7 +168,8 @@ manifest/v1.json
 ```
 
 ASR and summarizer WEIGHTS stay on their public hosts (Hugging Face for
-Parakeet + the LLMs, the sherpa GitHub release for the speaker model) — the
+Parakeet + the LLMs + the pyannote segmentation model, the sherpa GitHub
+release for the ERes2Net speaker model) — the
 manifest points straight at them, exactly like ASR does today. Only the
 authored `llm_config.json` files (a few hundred bytes each, no public home)
 ship from R2. This box has no R2 write credentials: artifacts are staged
