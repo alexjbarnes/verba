@@ -230,9 +230,12 @@
   <div id="general" class="tab-panel hidden flex-1 overflow-y-auto px-5 py-6 space-y-8">
 
     <!-- General group: Appearance, Updates, Storage -->
-    <div>
-      <p class="text-xs font-semibold text-on-surface-variant uppercase tracking-wider mb-3">General</p>
-      <div class="space-y-6">
+    <div class="settings-group" data-group="general">
+      <button type="button" class="settings-group-toggle w-full flex items-center justify-between mb-3 cursor-pointer" data-group-toggle="general">
+        <span class="text-xs font-semibold text-on-surface-variant uppercase tracking-wider">General</span>
+        <span class="material-symbols-outlined text-on-surface-variant/60 text-[20px] settings-chevron">expand_more</span>
+      </button>
+      <div class="space-y-6 settings-group-body">
         <!-- Appearance section -->
         <section>
           <div class="mb-2">
@@ -286,9 +289,12 @@
     </div>
 
     <!-- Speak group: Dictation, Vocabulary -->
-    <div>
-      <p class="text-xs font-semibold text-on-surface-variant uppercase tracking-wider mb-3">Speak</p>
-      <div class="space-y-6">
+    <div class="settings-group" data-group="speak">
+      <button type="button" class="settings-group-toggle w-full flex items-center justify-between mb-3 cursor-pointer" data-group-toggle="speak">
+        <span class="text-xs font-semibold text-on-surface-variant uppercase tracking-wider">Speak</span>
+        <span class="material-symbols-outlined text-on-surface-variant/60 text-[20px] settings-chevron">expand_more</span>
+      </button>
+      <div class="space-y-6 settings-group-body">
         <!-- Dictation section -->
         <section>
           <div class="mb-2">
@@ -342,9 +348,12 @@
     </div>
 
     <!-- Listen group: Reading -->
-    <div>
-      <p class="text-xs font-semibold text-on-surface-variant uppercase tracking-wider mb-3">Listen</p>
-      <div class="space-y-6">
+    <div class="settings-group" data-group="listen">
+      <button type="button" class="settings-group-toggle w-full flex items-center justify-between mb-3 cursor-pointer" data-group-toggle="listen">
+        <span class="text-xs font-semibold text-on-surface-variant uppercase tracking-wider">Listen</span>
+        <span class="material-symbols-outlined text-on-surface-variant/60 text-[20px] settings-chevron">expand_more</span>
+      </button>
+      <div class="space-y-6 settings-group-body">
         <!-- Reading section -->
         <section>
           <div class="mb-2">
@@ -362,9 +371,12 @@
     </div>
 
     <!-- Meeting group: desktop-only, unhidden by main.js at boot (isDesktop) -->
-    <div id="meeting-settings-group" class="hidden">
-      <p class="text-xs font-semibold text-on-surface-variant uppercase tracking-wider mb-3">Meeting</p>
-      <div class="space-y-6">
+    <div id="meeting-settings-group" class="settings-group hidden" data-group="meeting">
+      <button type="button" class="settings-group-toggle w-full flex items-center justify-between mb-3 cursor-pointer" data-group-toggle="meeting">
+        <span class="text-xs font-semibold text-on-surface-variant uppercase tracking-wider">Meeting</span>
+        <span class="material-symbols-outlined text-on-surface-variant/60 text-[20px] settings-chevron">expand_more</span>
+      </button>
+      <div class="space-y-6 settings-group-body">
         <!-- Audio devices: which mic (you) and which speaker output (everyone
              else, captured via loopback) Meeting mode records. -->
         <section>

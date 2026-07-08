@@ -54,6 +54,22 @@ select {
   transition: width 0.3s ease;
 }
 
+/* Collapsible Settings groups: the header stays a scannable index, the body
+   folds away. Toggling `.collapsed` on the group hides the body and rotates
+   the chevron. */
+.settings-chevron {
+  transition: transform 0.2s ease;
+}
+.settings-group.collapsed .settings-group-body {
+  display: none;
+}
+.settings-group.collapsed .settings-chevron {
+  transform: rotate(-90deg);
+}
+@media (prefers-reduced-motion: reduce) {
+  .settings-chevron { transition: none; }
+}
+
 /* Pill switch track + thumb (Speak/Listen, Articles/Books). The shadows are
    per-theme variables (see index.html palettes): dark builds its recess from a
    translucent black well + lip highlight since black inset shadows vanish on

@@ -101,7 +101,7 @@ const TAB_LOADERS = {
   // Re-check the dictation-package banner condition every time History is
   // shown, not just at boot (state changes when the user installs it).
   history: () => { loadHistory(); loadPackagesStatus(); },
-  general: () => { loadVocab(); loadPackagesStatus(); loadStorage(); if (isDesktop) loadMeetingModels(); },
+  general: () => { loadVocab(); loadPackagesStatus(); loadStorage(); if (isDesktop) loadMeetingModels(); applySettingsDefaultExpand(); },
   snippets: () => loadSnippets(),
   library: () => loadLibrary(),
   feeds: () => loadFeeds(),
@@ -683,6 +683,25 @@ const STORAGE_ROWS = [
   { key: 'unclaimed', label: 'Legacy files', category: 'unclaimed',
     warn: "Delete files left over from removed models? Nothing on this device uses them." },
 ];
+
+// ── Settings collapsible groups (findability) ──
+//
+// Each group (General / Speak / Listen / Meeting) folds behind its header, so
+// the headers act as a scannable index instead of one long scroll. Opening
+// Settings expands only the group for the mode you came from and collapses the
+// rest, so what you came for sits up top with General one tap away. Clicking a
+// header toggles that group.
+function applySettingsDefaultExpand() {
+  const open = new Set([currentMode]);
+  document.querySelectorAll('#general .settings-group').forEach(g => {
+    g.classList.toggle('collapsed', !open.has(g.dataset.group));
+  });
+}
+
+document.getElementById('general').addEventListener('click', (e) => {
+  const toggle = e.target.closest('.settings-group-toggle');
+  if (toggle) toggle.closest('.settings-group')?.classList.toggle('collapsed');
+});
 
 async function loadStorage() {
   let summary;
