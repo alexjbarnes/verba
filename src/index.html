@@ -173,6 +173,12 @@
         <span class="material-symbols-outlined text-[18px]" style="font-variation-settings:'FILL' 0">headphones</span>
         Listen
       </button>
+      <!-- Desktop-only third mode; unhidden and given a 3-way thumb width by
+           main.js at boot (isDesktop). Android stays a 2-mode pill. -->
+      <button id="mode-meeting-btn" class="mode-btn hidden relative z-10 flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded-full text-sm font-semibold transition-colors text-on-surface-variant" data-mode="meeting">
+        <span class="material-symbols-outlined text-[18px]" style="font-variation-settings:'FILL' 0">groups</span>
+        Meeting
+      </button>
     </div>
   </header>
 
@@ -350,6 +356,67 @@
               <span id="font-scale-label" class="text-xs font-mono text-on-surface-variant">100%</span>
             </div>
             <input id="font-scale-range" type="range" min="85" max="140" step="5" value="100" class="w-full accent-primary" />
+          </div>
+        </section>
+      </div>
+    </div>
+
+    <!-- Meeting group: desktop-only, unhidden by main.js at boot (isDesktop) -->
+    <div id="meeting-settings-group" class="hidden">
+      <p class="text-xs font-semibold text-on-surface-variant uppercase tracking-wider mb-3">Meeting</p>
+      <div class="space-y-6">
+        <!-- Summarizer section: radio-style picker from meeting_models(), one
+             shared download row (cloned from the pkg-dictation card) for
+             whichever choice is currently selected. -->
+        <section>
+          <div class="mb-2">
+            <h2 class="text-sm font-semibold text-on-surface">Summarizer</h2>
+            <p class="text-xs text-on-surface-variant mt-0.5">On-device model that writes the meeting summary</p>
+          </div>
+          <div class="bg-surface-container-low rounded-xl p-5 space-y-4">
+            <div id="meeting-model-list" class="space-y-1"></div>
+            <div class="border-t border-outline-variant/20 pt-4">
+              <div class="flex items-center justify-between gap-3">
+                <p id="pkg-meeting-status" class="text-xs text-on-surface-variant min-w-0">Checking…</p>
+                <button id="pkg-meeting-btn" class="text-xs font-semibold px-4 py-2 bg-primary text-on-primary rounded-lg hover:brightness-110 transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed shrink-0">Download</button>
+              </div>
+              <div id="pkg-meeting-progress" class="hidden mt-3">
+                <div class="progress-bar"><div id="pkg-meeting-fill" class="progress-bar-fill" style="width:0%"></div></div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Recording section: diarization + where files land -->
+        <section>
+          <div class="mb-2">
+            <h2 class="text-sm font-semibold text-on-surface">Recording</h2>
+          </div>
+          <div class="bg-surface-container-low rounded-xl p-5 space-y-4">
+            <div class="flex items-center justify-between">
+              <div>
+                <label class="text-sm font-medium text-on-surface">Identify speakers</label>
+                <p class="text-xs text-on-surface-variant mt-0.5">Label system audio by speaker instead of one block</p>
+              </div>
+              <label class="relative inline-flex items-center cursor-pointer">
+                <input id="cfg-meeting-diarize" type="checkbox" class="sr-only peer" />
+                <div class="w-9 h-5 bg-outline-variant/40 rounded-full peer peer-checked:bg-primary transition-colors after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:translate-x-full"></div>
+              </label>
+            </div>
+            <div class="border-t border-outline-variant/20 pt-4">
+              <label class="text-sm font-medium text-on-surface">Transcript folder</label>
+              <div class="flex items-center gap-2 mt-2">
+                <input id="cfg-meeting-transcript-dir" type="text" placeholder="Choose a folder" class="flex-1 min-w-0 bg-surface-container-highest border border-outline-variant/30 rounded-lg px-3 py-2 text-sm text-on-surface placeholder:text-on-surface-variant/50 focus:outline-none focus:ring-1 focus:ring-primary/50 transition-colors" />
+                <button id="cfg-meeting-transcript-browse" class="hidden shrink-0 text-xs font-semibold px-3 min-h-10 rounded-lg border border-outline-variant/30 text-on-surface hover:bg-surface-container-highest transition-colors cursor-pointer">Browse</button>
+              </div>
+            </div>
+            <div>
+              <label class="text-sm font-medium text-on-surface">Summary folder</label>
+              <div class="flex items-center gap-2 mt-2">
+                <input id="cfg-meeting-summary-dir" type="text" placeholder="Choose a folder" class="flex-1 min-w-0 bg-surface-container-highest border border-outline-variant/30 rounded-lg px-3 py-2 text-sm text-on-surface placeholder:text-on-surface-variant/50 focus:outline-none focus:ring-1 focus:ring-primary/50 transition-colors" />
+                <button id="cfg-meeting-summary-browse" class="hidden shrink-0 text-xs font-semibold px-3 min-h-10 rounded-lg border border-outline-variant/30 text-on-surface hover:bg-surface-container-highest transition-colors cursor-pointer">Browse</button>
+              </div>
+            </div>
           </div>
         </section>
       </div>
@@ -716,6 +783,85 @@
     <div id="log-output" class="flex-1 min-h-0 bg-surface-container-lowest rounded-xl border border-outline-variant/20 p-3 overflow-y-auto font-mono text-xs leading-relaxed"></div>
   </div>
 
+  <!-- Meetings tab (Meeting mode home) -->
+  <div id="meetings" class="tab-panel hidden flex-1 overflow-y-auto px-5 py-6 flex flex-col">
+    <div class="mb-4">
+      <h2 class="text-xl font-bold tracking-tight text-on-surface">Meetings</h2>
+      <p class="text-xs text-on-surface-variant mt-0.5">Recorded and transcribed on this device</p>
+    </div>
+    <div id="meetings-list" class="flex-1 min-h-0 space-y-3 overflow-y-auto">
+      <div class="flex flex-col items-center justify-center pt-16 text-on-surface-variant">
+        <span class="material-symbols-outlined text-4xl mb-3 opacity-30">groups</span>
+        <p id="meetings-placeholder" class="text-sm">No meetings yet</p>
+        <p class="text-xs mt-2 max-w-xs text-center opacity-70">Press the record button to capture and transcribe a meeting</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Meeting live view: recording in progress (opened from the record
+       button; not a nav item) -->
+  <div id="meeting-live" class="tab-panel hidden flex-1 flex flex-col px-5 py-6 min-h-0">
+    <div class="flex items-center gap-2">
+      <span class="w-2.5 h-2.5 rounded-full bg-error animate-pulse shrink-0"></span>
+      <span class="text-sm font-semibold text-on-surface">Recording</span>
+      <span id="meeting-live-clock" class="text-sm font-mono tabular-nums text-on-surface-variant">0:00</span>
+    </div>
+    <p id="meeting-live-notice" class="hidden flex items-center gap-1.5 text-xs text-tertiary mt-2">
+      <span class="material-symbols-outlined text-sm">info</span>
+      <span id="meeting-live-notice-text"></span>
+    </p>
+
+    <div class="flex-1 min-h-0 flex flex-col gap-3 mt-3">
+      <div class="relative flex-1 min-h-0">
+        <div id="meeting-transcript" class="h-full overflow-y-auto space-y-3 pr-1 selectable"></div>
+        <button id="meeting-jump-latest" class="hidden absolute bottom-2 left-1/2 -translate-x-1/2 min-h-9 text-xs font-semibold bg-surface-container-highest text-on-surface px-3.5 rounded-full shadow-lg border border-outline-variant/30 cursor-pointer">Jump to latest</button>
+      </div>
+      <div>
+        <label class="text-xs font-semibold text-on-surface-variant uppercase tracking-wider mb-1.5 block">Your notes</label>
+        <textarea id="meeting-notes" rows="3" placeholder="Jot notes — they'll shape the summary" class="w-full bg-surface-container-low border border-outline-variant/30 rounded-xl px-3 py-2.5 text-sm text-on-surface placeholder:text-on-surface-variant/50 focus:outline-none focus:ring-1 focus:ring-primary/50 transition-colors resize-none"></textarea>
+      </div>
+    </div>
+
+    <div class="flex items-center gap-3 mt-4 shrink-0">
+      <button id="meeting-cancel-btn" class="text-xs font-semibold text-on-surface-variant hover:text-error transition-colors px-4 min-h-11 rounded-xl hover:bg-error/10 cursor-pointer">Cancel</button>
+      <button id="meeting-stop-btn" class="flex-1 bg-primary text-on-primary text-sm font-bold min-h-11 rounded-xl hover:brightness-110 transition-all active:scale-[0.98] cursor-pointer">Stop</button>
+    </div>
+  </div>
+
+  <!-- Meeting detail view (opened from Meetings; not a nav item) -->
+  <div id="meeting-view" class="tab-panel hidden flex-1 flex flex-col px-5 py-6 min-h-0">
+    <div class="flex items-center gap-2 mb-1">
+      <button id="meeting-view-back" class="text-on-surface-variant hover:text-on-surface p-1 -ml-1 rounded-lg hover:bg-surface-container-highest transition-colors cursor-pointer">
+        <span class="material-symbols-outlined">arrow_back</span>
+      </button>
+      <h2 id="meeting-view-title" class="text-base font-bold tracking-tight text-on-surface truncate flex-1">Meeting</h2>
+      <button id="meeting-view-folder" class="w-10 h-10 shrink-0 flex items-center justify-center text-on-surface-variant hover:text-on-surface rounded-lg hover:bg-surface-container-highest transition-colors cursor-pointer" title="Open folder">
+        <span class="material-symbols-outlined text-[20px]">folder_open</span>
+      </button>
+    </div>
+    <p id="meeting-view-meta" class="text-xs text-on-surface-variant tabular-nums mb-4 ml-9"></p>
+
+    <div class="flex-1 min-h-0 overflow-y-auto space-y-5">
+      <section>
+        <h3 class="text-xs font-semibold text-on-surface-variant uppercase tracking-wider mb-2">Summary</h3>
+        <div class="bg-surface-container-low rounded-xl p-4">
+          <div id="meeting-summary-body" class="text-[15px] leading-relaxed text-on-surface/90 selectable"></div>
+          <button id="meeting-summarize-btn" class="hidden mt-3 min-h-10 text-xs font-semibold px-4 bg-primary text-on-primary rounded-lg hover:brightness-110 transition-all cursor-pointer">Summarize</button>
+        </div>
+      </section>
+
+      <section>
+        <button id="meeting-transcript-toggle" class="flex items-center gap-1.5 min-h-10 text-xs font-semibold text-on-surface-variant uppercase tracking-wider cursor-pointer hover:text-primary transition-colors">
+          <span id="meeting-transcript-toggle-label">Show transcript</span>
+          <span class="material-symbols-outlined text-base">expand_more</span>
+        </button>
+        <div id="meeting-transcript-view" class="hidden bg-surface-container-low rounded-xl p-4">
+          <div id="meeting-transcript-view-body" class="text-sm leading-relaxed text-on-surface/90 selectable"></div>
+        </div>
+      </section>
+    </div>
+  </div>
+
   <!-- Bottom navigation bar (rendered per mode by main.js) -->
   <nav id="bottom-nav" class="shrink-0 bg-surface-container-low border-t border-outline-variant/20 flex items-stretch justify-around px-1 pt-1" style="padding-bottom: max(0.25rem, env(safe-area-inset-bottom));"></nav>
 
@@ -736,6 +882,16 @@
       <div class="w-10 h-1 bg-outline-variant/40 rounded-full mx-auto mt-3 mb-4 shrink-0"></div>
       <p id="lib-action-title" class="text-sm font-bold text-on-surface px-5 mb-2 shrink-0 truncate">Item</p>
       <div id="lib-action-list" class="overflow-y-auto px-3 pb-2"></div>
+    </div>
+  </div>
+
+  <!-- Meeting row long-press action sheet -->
+  <div id="meeting-action-sheet" class="fixed inset-0 z-50 hidden">
+    <div id="meeting-action-overlay" class="absolute inset-0 bg-black/50"></div>
+    <div class="sheet-anim absolute bottom-0 left-0 right-0 bg-surface-container-high rounded-t-2xl shadow-xl border-t border-outline-variant/20 max-h-[70vh] flex flex-col" style="padding-bottom: max(1.25rem, env(safe-area-inset-bottom));">
+      <div class="w-10 h-1 bg-outline-variant/40 rounded-full mx-auto mt-3 mb-4 shrink-0"></div>
+      <p id="meeting-action-title" class="text-sm font-bold text-on-surface px-5 mb-2 shrink-0 truncate">Meeting</p>
+      <div id="meeting-action-list" class="overflow-y-auto px-3 pb-2"></div>
     </div>
   </div>
 

@@ -91,7 +91,7 @@ Third top-level mode beside Speak/Listen — a local meeting assistant. Live-tra
 
 ### Platform-specific code
 
-Desktop-only deps (arboard, enigo, global-shortcut) gated with `cfg(not(target_os = "android"))`. Use `#[cfg(desktop)]` / `#[cfg(mobile)]` (Tauri aliases) or `#[cfg(target_os = "android")]` for platform splits.
+Desktop-only deps (arboard, enigo, global-shortcut, tauri-plugin-dialog — the meeting folder picker) gated with `cfg(not(target_os = "android"))`; the dialog plugin is registered in the `#[cfg(desktop)]` builder block and its `dialog:default` permission lives in `capabilities/desktop.json` (not `default.json`) so Android never sees it. Plugin JS globals (`window.__TAURI__.opener`, `.dialog`) are exposed by `withGlobalTauri` via each plugin's `api-iife.js` — no npm import needed. Use `#[cfg(desktop)]` / `#[cfg(mobile)]` (Tauri aliases) or `#[cfg(target_os = "android")]` for platform splits.
 
 ### Frontend (`src/`)
 

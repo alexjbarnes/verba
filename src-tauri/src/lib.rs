@@ -1342,7 +1342,9 @@ pub fn run() {
 
     #[cfg(desktop)]
     {
-        builder = builder.plugin(tauri_plugin_global_shortcut::Builder::new().build());
+        builder = builder
+            .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+            .plugin(tauri_plugin_dialog::init());
     }
 
     builder.setup(|app| {

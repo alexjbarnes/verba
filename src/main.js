@@ -45,12 +45,12 @@ async function confirmVoiceDownload(model) {
 // ── Sidebar & navigation ──
 
 const isDesktop = !navigator.userAgent.includes('Android');
-const modeDefaultTab = { speak: 'history', listen: 'library' };
+const modeDefaultTab = { speak: 'history', listen: 'library', meeting: 'meetings' };
 let currentMode = 'speak';
 let activeTab = null;
 
 // Detail views hide the bottom nav (and drop the player bar to the screen edge).
-const DETAIL_PANELS = new Set(['reading', 'feed-entries', 'book-chapters']);
+const DETAIL_PANELS = new Set(['reading', 'feed-entries', 'book-chapters', 'meeting-live', 'meeting-view']);
 
 // Bottom-nav layout per mode. `center` is the prominent circular action button
 // (Listen's Add); `overflow` opens the More sheet.
@@ -68,6 +68,13 @@ const BOTTOM_NAV = {
     { tab: 'general', label: 'Settings', icon: 'settings' },
     { overflow: true, label: 'More', icon: 'more_horiz' },
   ],
+  // Desktop-only mode (see isDesktop gating at boot); the record button is
+  // the center action, wired to startMeeting() in the bottomNav click handler.
+  meeting: [
+    { tab: 'meetings', label: 'Meetings', icon: 'event_note' },
+    { action: 'meeting-start', label: 'Record', icon: 'fiber_manual_record', center: true },
+    { overflow: true, label: 'More', icon: 'more_horiz' },
+  ],
 };
 // Pages reachable only through the More sheet, per mode.
 const MORE_ITEMS = {
@@ -80,6 +87,10 @@ const MORE_ITEMS = {
     ...(isDesktop ? [{ tab: 'audio', label: 'Audio', icon: 'mic' }] : []),
     { tab: 'debug', label: 'Debug', icon: 'bug_report' },
   ],
+  meeting: [
+    { tab: 'general', label: 'Settings', icon: 'settings' },
+    { tab: 'debug', label: 'Debug', icon: 'bug_report' },
+  ],
 };
 
 const bottomNav = document.getElementById('bottom-nav');
@@ -90,12 +101,13 @@ const TAB_LOADERS = {
   // Re-check the dictation-package banner condition every time History is
   // shown, not just at boot (state changes when the user installs it).
   history: () => { loadHistory(); loadPackagesStatus(); },
-  general: () => { loadVocab(); loadPackagesStatus(); loadStorage(); },
+  general: () => { loadVocab(); loadPackagesStatus(); loadStorage(); if (isDesktop) loadMeetingModels(); },
   snippets: () => loadSnippets(),
   library: () => loadLibrary(),
   feeds: () => loadFeeds(),
   voices: () => loadVoices(),
   reports: () => loadReports(),
+  meetings: () => { loadMeetings(); loadPackagesStatus(); },
 };
 
 // Show a top-level tab: swap the panel, refresh its data, keep/hide the player
@@ -145,6 +157,7 @@ bottomNav.addEventListener('click', (e) => {
   const slot = e.target.closest('.nav-slot');
   if (!slot) return;
   if (slot.dataset.action === 'add') { openAddModal(); return; }
+  if (slot.dataset.action === 'meeting-start') { startMeeting(); return; }
   if (slot.dataset.overflow) { openMoreSheet(); return; }
   if (slot.dataset.tab) navigateTo(slot.dataset.tab);
 });
@@ -174,10 +187,20 @@ document.getElementById('nav-more-list').addEventListener('click', (e) => {
 // ── Speak / Listen mode ──
 
 const modeThumb = document.getElementById('mode-thumb');
+// Fixed regardless of how many mode buttons are visible: translateX(N * 100%)
+// moves the thumb N of its own widths, which lines up under button N whether
+// the pill holds 2 slots (Android) or 3 (desktop, see the isDesktop boot check).
+const MODE_ORDER = ['speak', 'listen', 'meeting'];
 
 function setMode(mode) {
+  // A recording meeting owns the mic; leaving it mid-session would strand the
+  // session with no visible Stop/Cancel. Entering meeting mode is always fine.
+  if (meetingRecording && currentMode === 'meeting' && mode !== 'meeting') {
+    showToast('Stop or cancel the meeting before switching modes');
+    return;
+  }
   currentMode = mode;
-  if (modeThumb) modeThumb.style.transform = mode === 'listen' ? 'translateX(100%)' : 'translateX(0)';
+  if (modeThumb) modeThumb.style.transform = `translateX(${MODE_ORDER.indexOf(mode) * 100}%)`;
   document.querySelectorAll('.mode-btn').forEach(b => {
     const active = b.dataset.mode === mode;
     b.classList.toggle('text-primary', active);
@@ -186,7 +209,14 @@ function setMode(mode) {
     if (icon) icon.style.fontVariationSettings = `'FILL' ${active ? 1 : 0}`;
   });
   renderBottomNav();
-  navigateTo(modeDefaultTab[mode]);
+  // Re-entering meeting mode while its session is still recording (rehydrate
+  // at boot, or switching back) goes straight to the live view, not the list.
+  if (mode === 'meeting' && meetingRecording) {
+    showPanel('meeting-live');
+    setBottomNavVisible(false);
+  } else {
+    navigateTo(modeDefaultTab[mode]);
+  }
 }
 
 document.querySelectorAll('.mode-btn').forEach(b => {
@@ -719,12 +749,28 @@ listen('download-progress', (event) => {
     btn.disabled = true;
     btn.textContent = `${pct}%`;
   }
+
+  // Settings > Meeting: the summarizer package's download row.
+  if (id === 'pkg-meeting') {
+    document.getElementById('pkg-meeting-progress').classList.remove('hidden');
+    document.getElementById('pkg-meeting-fill').style.width = `${pct}%`;
+    document.getElementById('pkg-meeting-status').textContent = `Downloading… ${pct}%`;
+    const btn = document.getElementById('pkg-meeting-btn');
+    btn.disabled = true;
+    btn.textContent = `${pct}%`;
+  }
 });
 
 listen('download-complete', async (event) => {
   if (event.payload?.id === 'pkg-dictation') {
     await loadPackagesStatus();
     showToast('Dictation models installed');
+    return;
+  }
+  if (event.payload?.id === 'pkg-meeting') {
+    await loadPackagesStatus();
+    if (isDesktop) await loadMeetingModels();
+    showToast('Summarizer installed');
     return;
   }
   await updateTtsPanel();
@@ -791,6 +837,17 @@ async function loadConfig() {
   document.getElementById('cfg-haptic').addEventListener('change', saveConfig);
   document.getElementById('audio-device').addEventListener('change', saveConfig);
   document.getElementById('cfg-threads').addEventListener('change', applyThreads);
+
+  // Meeting settings (desktop only): diarization toggle + transcript/summary
+  // folders. Persisted through the same saveConfig round-trip.
+  if (isDesktop) {
+    document.getElementById('cfg-meeting-diarize').checked = cfg.meeting_diarize !== false;
+    document.getElementById('cfg-meeting-transcript-dir').value = cfg.meeting_transcript_dir || '';
+    document.getElementById('cfg-meeting-summary-dir').value = cfg.meeting_summary_dir || '';
+    document.getElementById('cfg-meeting-diarize').addEventListener('change', saveConfig);
+    document.getElementById('cfg-meeting-transcript-dir').addEventListener('change', saveConfig);
+    document.getElementById('cfg-meeting-summary-dir').addEventListener('change', saveConfig);
+  }
 }
 
 async function saveConfig() {
@@ -798,6 +855,11 @@ async function saveConfig() {
   cfg.device_index = parseInt(document.getElementById('audio-device').value, 10);
   cfg.haptic_feedback = document.getElementById('cfg-haptic').checked;
   cfg.threads = parseInt(document.getElementById('cfg-threads').value, 10);
+  if (isDesktop) {
+    cfg.meeting_diarize = document.getElementById('cfg-meeting-diarize').checked;
+    cfg.meeting_transcript_dir = document.getElementById('cfg-meeting-transcript-dir').value.trim();
+    cfg.meeting_summary_dir = document.getElementById('cfg-meeting-summary-dir').value.trim();
+  }
   try {
     await invoke('save_config', { cfg });
   } catch (err) {
@@ -4862,6 +4924,614 @@ attachPullToRefresh(
   () => pollFeeds({ interactive: true }),
 );
 
+// ── Meeting mode (desktop only) ──
+//
+// A third mode alongside Speak/Listen: record a meeting (mic + system-audio
+// loopback when available), watch utterances arrive live, jot notes, then
+// stop to get a transcript. With a summarizer installed, the meeting view can
+// then run a local LLM over the transcript (map-reduce, notes as anchors) to
+// produce a Summary / Decisions / Action items block.
+// Every invoke() below is gated on isDesktop even though a couple of the
+// backend commands happen to be safe cross-platform (see packages_status) —
+// this UI never renders on Android, so it should never call the backend either.
+
+let meetingRecording = false; // true for the life of an active recording session
+let meetingUtterances = []; // live transcript for the in-progress session
+let meetingAutoFollow = true; // live transcript auto-scroll; off once the user scrolls up
+let meetingNotesSaveTimer = null; // debounce handle for meeting_note_set
+let meetingClockTimer = null;
+let meetingClockBaseMs = 0; // elapsed ms as of meetingClockBaseAt
+let meetingClockBaseAt = 0; // performance.now() when the base was captured
+
+let meetingItems = []; // last meetings_list() result
+let meetingViewId = null; // id shown by #meeting-view
+let meetingViewMeta = null; // its MeetingMeta, for the folder button
+
+function formatMmSs(ms) {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+}
+
+function meetingClockNow() {
+  return meetingClockBaseMs + (performance.now() - meetingClockBaseAt);
+}
+
+function startMeetingClock(elapsedMs) {
+  stopMeetingClock();
+  meetingClockBaseMs = elapsedMs;
+  meetingClockBaseAt = performance.now();
+  const clock = document.getElementById('meeting-live-clock');
+  clock.textContent = formatMmSs(meetingClockNow());
+  meetingClockTimer = setInterval(() => { clock.textContent = formatMmSs(meetingClockNow()); }, 500);
+}
+
+function stopMeetingClock() {
+  if (meetingClockTimer) { clearInterval(meetingClockTimer); meetingClockTimer = null; }
+}
+
+function setMeetingLoopbackNotice(notice) {
+  const el = document.getElementById('meeting-live-notice');
+  document.getElementById('meeting-live-notice-text').textContent = notice || '';
+  el.classList.toggle('hidden', !notice);
+}
+
+function meetingUtteranceHtml(u) {
+  const speakerClass = u.speaker === 'You' ? 'text-primary' : 'text-on-surface-variant';
+  return `
+  <div class="meeting-utterance">
+    <div class="flex items-baseline gap-2">
+      <span class="text-xs font-semibold ${speakerClass}">${escapeHtml(u.speaker)}</span>
+      <span class="text-[11px] text-on-surface-variant/60 tabular-nums">${formatMmSs(u.t_ms)}</span>
+    </div>
+    <p class="text-[15px] leading-relaxed text-on-surface mt-0.5">${escapeHtml(u.text)}</p>
+  </div>`;
+}
+
+function renderMeetingTranscript() {
+  const el = document.getElementById('meeting-transcript');
+  el.innerHTML = meetingUtterances.map(meetingUtteranceHtml).join('');
+  el.scrollTop = el.scrollHeight;
+}
+
+function appendMeetingUtterance(u) {
+  meetingUtterances.push(u);
+  const el = document.getElementById('meeting-transcript');
+  el.insertAdjacentHTML('beforeend', meetingUtteranceHtml(u));
+  if (meetingAutoFollow) {
+    el.scrollTop = el.scrollHeight;
+  } else {
+    document.getElementById('meeting-jump-latest').classList.remove('hidden');
+  }
+}
+
+// Auto-follow tracks scroll position directly (simpler than the reader's
+// wheel/touchmove flag — a live transcript is an append-only log, so "near
+// the bottom" is the whole story): scrolling away disables it, scrolling back
+// to the bottom resumes it, mirroring how the reading view resumes following
+// once the highlighted word is back in view.
+(function () {
+  const el = document.getElementById('meeting-transcript');
+  el.addEventListener('scroll', () => {
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
+    meetingAutoFollow = atBottom;
+    if (atBottom) document.getElementById('meeting-jump-latest').classList.add('hidden');
+  });
+})();
+
+document.getElementById('meeting-jump-latest').addEventListener('click', () => {
+  meetingAutoFollow = true;
+  const el = document.getElementById('meeting-transcript');
+  el.scrollTop = el.scrollHeight;
+  document.getElementById('meeting-jump-latest').classList.add('hidden');
+});
+
+listen('meeting-utterance', (event) => {
+  if (meetingRecording) appendMeetingUtterance(event.payload);
+});
+
+// A session ending from somewhere other than this tab's own Stop/Cancel must
+// still clear the mode-switch guard, or meetingRecording stays stuck true.
+listen('meeting-state', (event) => {
+  if (event.payload?.state === 'idle' && meetingRecording) endMeetingSession();
+});
+
+function endMeetingSession() {
+  meetingRecording = false;
+  stopMeetingClock();
+  meetingUtterances = [];
+  meetingAutoFollow = true;
+}
+
+async function startMeeting() {
+  if (!isDesktop) return;
+  let res;
+  try {
+    res = await invoke('meeting_start');
+  } catch (err) {
+    showToast('Could not start meeting: ' + err);
+    return;
+  }
+  meetingRecording = true;
+  meetingUtterances = [];
+  meetingAutoFollow = true;
+  document.getElementById('meeting-transcript').innerHTML = '';
+  document.getElementById('meeting-jump-latest').classList.add('hidden');
+  document.getElementById('meeting-notes').value = '';
+  const stopBtn = document.getElementById('meeting-stop-btn');
+  stopBtn.disabled = false;
+  stopBtn.textContent = 'Stop';
+  setMeetingLoopbackNotice(res.notice);
+  startMeetingClock(0);
+  showPanel('meeting-live');
+  setBottomNavVisible(false);
+}
+
+// Restores an in-progress meeting after a reload (or first paint) so the live
+// view isn't just abandoned mid-recording. Called at boot; see DOMContentLoaded.
+async function checkMeetingRehydrate() {
+  if (!isDesktop) return;
+  let status;
+  try {
+    status = await invoke('meeting_status');
+  } catch (err) {
+    console.error('meeting_status failed:', err);
+    return;
+  }
+  if (status.state !== 'recording') return;
+  meetingRecording = true;
+  meetingUtterances = Array.isArray(status.utterances) ? status.utterances.slice() : [];
+  meetingAutoFollow = true;
+  renderMeetingTranscript();
+  document.getElementById('meeting-jump-latest').classList.add('hidden');
+  document.getElementById('meeting-notes').value = status.notes || '';
+  const stopBtn = document.getElementById('meeting-stop-btn');
+  stopBtn.disabled = false;
+  stopBtn.textContent = 'Stop';
+  setMeetingLoopbackNotice(status.notice);
+  startMeetingClock(status.elapsed_ms || 0);
+  setMode('meeting');
+}
+
+document.getElementById('meeting-notes').addEventListener('input', (e) => {
+  clearTimeout(meetingNotesSaveTimer);
+  const text = e.target.value;
+  meetingNotesSaveTimer = setTimeout(() => {
+    invoke('meeting_note_set', { text }).catch(() => {});
+  }, 800);
+});
+
+document.getElementById('meeting-stop-btn').addEventListener('click', async () => {
+  const btn = document.getElementById('meeting-stop-btn');
+  btn.disabled = true;
+  btn.textContent = 'Stopping…';
+  clearTimeout(meetingNotesSaveTimer);
+  try {
+    const notes = document.getElementById('meeting-notes').value;
+    const meta = await invoke('meeting_stop', { notes });
+    endMeetingSession();
+    showToast('Meeting saved');
+    openMeetingView(meta.id);
+  } catch (err) {
+    showToast('Stop failed: ' + err);
+    btn.disabled = false;
+    btn.textContent = 'Stop';
+  }
+});
+
+document.getElementById('meeting-cancel-btn').addEventListener('click', async () => {
+  if (!await showConfirm('Discard this meeting? The recording will not be saved.', { okLabel: 'Discard' })) return;
+  clearTimeout(meetingNotesSaveTimer);
+  try {
+    await invoke('meeting_cancel');
+  } catch (err) {
+    showToast('Cancel failed: ' + err);
+  }
+  endMeetingSession();
+  navigateTo('meetings');
+});
+
+// ── Meetings list ──
+
+function renderMeetingCard(m, i) {
+  const meta = [formatTimestamp(m.started), fmtMins(m.duration_ms),
+    `${m.utterance_count} ${m.utterance_count === 1 ? 'utterance' : 'utterances'}`].join(' · ');
+  const indicator = m.summary_path
+    ? '<span class="inline-flex items-center gap-1 text-xs text-primary"><span class="material-symbols-outlined text-sm">auto_awesome</span>Summarized</span>'
+    : '<span class="inline-flex items-center gap-1 text-xs text-on-surface-variant"><span class="material-symbols-outlined text-sm">description</span>Transcript only</span>';
+  return `
+  <div class="meeting-item stagger-in bg-surface-container rounded-xl px-4 py-3.5 cursor-pointer hover:bg-surface-container-high transition-colors" data-id="${escapeHtml(m.id)}" style="--i:${i}">
+    <div class="text-[15px] font-semibold leading-snug text-on-surface truncate">${escapeHtml(m.title)}</div>
+    <div class="text-xs text-on-surface-variant tabular-nums mt-1">${escapeHtml(meta)}</div>
+    <div class="mt-1.5">${indicator}</div>
+  </div>`;
+}
+
+async function loadMeetings() {
+  if (!isDesktop) return;
+  try {
+    meetingItems = await invoke('meetings_list');
+  } catch (err) {
+    console.error('Failed to load meetings:', err);
+    return;
+  }
+  const list = document.getElementById('meetings-list');
+  if (!meetingItems.length) {
+    list.innerHTML = `
+      <div class="flex flex-col items-center justify-center pt-16 text-on-surface-variant">
+        <span class="material-symbols-outlined text-4xl mb-3 opacity-30">groups</span>
+        <p class="text-sm">No meetings yet</p>
+        <p class="text-xs mt-2 max-w-xs text-center opacity-70">Press the record button to capture and transcribe a meeting</p>
+      </div>`;
+    return;
+  }
+  list.innerHTML = meetingItems.map(renderMeetingCard).join('');
+  list.querySelectorAll('.meeting-item').forEach(el => {
+    el.addEventListener('click', () => {
+      if (el._longPressed) { el._longPressed = false; return; }
+      openMeetingView(el.dataset.id);
+    });
+    attachLongPress(el, () => openMeetingActionSheet(el.dataset.id));
+  });
+}
+
+// ── Meeting row long-press action sheet ──
+
+const meetingActionSheet = document.getElementById('meeting-action-sheet');
+let meetingActionTarget = null; // meeting id
+
+function openMeetingActionSheet(id) {
+  const m = meetingItems.find(x => x.id === id);
+  if (!m) return;
+  meetingActionTarget = id;
+  document.getElementById('meeting-action-title').textContent = m.title;
+  const summarizerReady = !!(pkgStatus && pkgStatus.meeting && pkgStatus.meeting.state === 'installed');
+  const actions = [
+    { action: 'open', icon: 'visibility', label: 'Open' },
+    ...(summarizerReady ? [{ action: 'summarize', icon: 'auto_awesome', label: 'Summarize' }] : []),
+    { action: 'open-folder', icon: 'folder_open', label: 'Open folder' },
+    { action: 'delete', icon: 'delete', label: 'Delete', danger: true },
+  ];
+  document.getElementById('meeting-action-list').innerHTML = actions.map(a =>
+    `<button class="more-item w-full flex items-center gap-3 px-4 py-3 rounded-xl text-left cursor-pointer hover:bg-surface-container-highest ${a.danger ? 'text-error' : 'text-on-surface'}" data-action="${a.action}">
+      <span class="material-symbols-outlined text-lg ${a.danger ? 'text-error/80' : 'text-on-surface-variant'}">${a.icon}</span>
+      <span class="text-sm">${a.label}</span>
+    </button>`).join('');
+  meetingActionSheet.classList.remove('hidden');
+}
+function closeMeetingActionSheet() { meetingActionSheet.classList.add('hidden'); }
+document.getElementById('meeting-action-overlay').addEventListener('click', closeMeetingActionSheet);
+document.getElementById('meeting-action-list').addEventListener('click', async (e) => {
+  const btn = e.target.closest('.more-item');
+  if (!btn || !meetingActionTarget) return;
+  const id = meetingActionTarget;
+  const action = btn.dataset.action;
+  closeMeetingActionSheet();
+  if (action === 'open') openMeetingView(id);
+  else if (action === 'summarize') { await openMeetingView(id); summarizeMeeting(id); }
+  else if (action === 'open-folder') openMeetingFolder(id);
+  else if (action === 'delete') deleteMeeting(id);
+});
+
+async function deleteMeeting(id) {
+  const m = meetingItems.find(x => x.id === id);
+  if (!await showConfirm(`Delete "${m ? m.title : 'this meeting'}"? This also deletes its transcript and summary files.`)) return;
+  try {
+    await invoke('meeting_delete', { id, deleteFiles: true });
+    showToast('Meeting deleted');
+    if (meetingViewId === id) navigateTo('meetings'); else loadMeetings();
+  } catch (err) {
+    showToast('Delete failed: ' + err);
+  }
+}
+
+// Path used by the "Open folder" affordance, from whichever cache has it —
+// the list (meetings_list) or the detail view (meeting_get) — so it works
+// from either entry point without an extra round trip.
+function meetingPathFor(id) {
+  const fromList = meetingItems.find(x => x.id === id);
+  if (fromList) return fromList.transcript_path || fromList.summary_path || '';
+  if (meetingViewMeta && meetingViewMeta.id === id) return meetingViewMeta.transcript_path || meetingViewMeta.summary_path || '';
+  return '';
+}
+
+// tauri-plugin-opener (installed) exposes revealItemInDir under window.__TAURI__
+// when the bundled global picks it up; feature-detect rather than assume, same
+// caution as the Settings folder dialog below.
+async function openMeetingFolder(id) {
+  const path = meetingPathFor(id);
+  const reveal = window.__TAURI__.opener?.revealItemInDir;
+  if (!path || !reveal) { showToast('Open folder is not available'); return; }
+  try {
+    await reveal(path);
+  } catch (err) {
+    showToast('Could not open folder: ' + err);
+  }
+}
+
+let meetingSummarizingId = null; // meeting id whose summary is being generated
+
+// Human-readable line for a meeting-summary-progress event. The backend runs
+// loading -> map (per chunk) -> combine -> done; short transcripts skip map.
+function meetingSummaryProgressText(stage, done, total) {
+  if (stage === 'map') return `Reading transcript… (${done}/${total})`;
+  if (stage === 'combine') return 'Writing summary…';
+  return 'Loading summarizer…';
+}
+
+// The LLM runs on a blocking backend thread; the invoke resolves only when the
+// summary file is written. That can take tens of seconds, so drive a live
+// status from meeting-summary-progress and lock the trigger against re-entry.
+async function summarizeMeeting(id) {
+  if (meetingSummarizingId) return; // one job at a time
+  meetingSummarizingId = id;
+  const inView = meetingViewId === id;
+  const summaryBody = document.getElementById('meeting-summary-body');
+  const summarizeBtn = document.getElementById('meeting-summarize-btn');
+  if (inView) {
+    summaryBody.textContent = 'Loading summarizer…';
+    summarizeBtn.classList.add('hidden');
+  }
+  try {
+    await invoke('meeting_summarize', { id });
+    showToast('Summary ready');
+    if (meetingViewId === id) openMeetingView(id); // re-render with the summary
+    loadMeetings(); // refresh the list's Summarized badge
+  } catch (err) {
+    showToast('Summarize: ' + err);
+    // Restore the prior view — an existing summary (re-run) or the button.
+    if (meetingViewId === id) openMeetingView(id);
+  } finally {
+    meetingSummarizingId = null;
+  }
+}
+
+listen('meeting-summary-progress', (event) => {
+  const p = event.payload;
+  if (!p || p.id !== meetingViewId || p.id !== meetingSummarizingId) return;
+  if (p.stage === 'done') return;
+  document.getElementById('meeting-summary-body').textContent =
+    meetingSummaryProgressText(p.stage, p.done, p.total);
+});
+
+// ── Meeting detail view ──
+
+// Minimal, safe Markdown -> HTML for the summary/transcript blocks. Handles the
+// shape we write ourselves: '#'/'##' headings, '-'/'*' bullets, **bold**, and
+// blank-line-separated paragraphs. Text is HTML-escaped first, so neither LLM
+// output nor transcript text can inject markup. The leading '# Title' H1 is
+// dropped — the view already shows the title in its header.
+function renderMarkdownBasic(md) {
+  const inline = (s) => escapeHtml(s).replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  const blocks = [];
+  let list = null;
+  const flushList = () => {
+    if (list) { blocks.push(`<ul class="list-disc pl-5 space-y-1 my-2">${list.join('')}</ul>`); list = null; }
+  };
+  for (const raw of String(md).split('\n')) {
+    const line = raw.trim();
+    if (!line) { flushList(); continue; }
+    let m;
+    if (line.match(/^#\s+/)) { flushList(); continue; } // drop redundant H1 title
+    if ((m = line.match(/^##+\s+(.*)/))) {
+      flushList();
+      blocks.push(`<h4 class="text-xs font-semibold text-on-surface-variant uppercase tracking-wider mt-4 mb-1.5 first:mt-0">${inline(m[1])}</h4>`);
+    } else if ((m = line.match(/^[-*]\s+(.*)/))) {
+      (list || (list = [])).push(`<li>${inline(m[1])}</li>`);
+    } else {
+      flushList();
+      blocks.push(`<p class="mb-2">${inline(line)}</p>`);
+    }
+  }
+  flushList();
+  return blocks.join('') || '<p class="text-on-surface-variant">Empty.</p>';
+}
+
+let meetingTranscriptLoaded = false; // lazy-load guard for the collapsible transcript
+
+async function openMeetingView(id) {
+  if (!isDesktop) return;
+  let meta;
+  try {
+    meta = await invoke('meeting_get', { id });
+  } catch (err) {
+    showToast('Open failed: ' + err);
+    return;
+  }
+  if (!meta) { showToast('Meeting not found'); return; }
+  meetingViewId = id;
+  meetingViewMeta = meta;
+  document.getElementById('meeting-view-title').textContent = meta.title;
+  document.getElementById('meeting-view-meta').textContent =
+    [formatTimestamp(meta.started), fmtMins(meta.duration_ms), `${meta.utterance_count} utterances`].join(' · ');
+  showPanel('meeting-view');
+  setBottomNavVisible(false);
+
+  const summaryBody = document.getElementById('meeting-summary-body');
+  const summarizeBtn = document.getElementById('meeting-summarize-btn');
+  if (meta.summary_path) {
+    // Already summarized: render it and offer a re-run (the LLM is
+    // nondeterministic, and notes may have changed since).
+    summarizeBtn.textContent = 'Re-summarize';
+    summarizeBtn.classList.remove('hidden');
+    try {
+      summaryBody.innerHTML = renderMarkdownBasic(await invoke('meeting_read_file', { id, which: 'summary' }));
+    } catch (err) {
+      summaryBody.textContent = 'Could not load summary: ' + err;
+    }
+  } else {
+    summarizeBtn.textContent = 'Summarize';
+    summarizeBtn.classList.remove('hidden');
+    summaryBody.textContent = 'Not summarized yet.';
+  }
+
+  meetingTranscriptLoaded = false;
+  document.getElementById('meeting-transcript-view-body').textContent = '';
+  document.getElementById('meeting-transcript-view').classList.add('hidden');
+  document.getElementById('meeting-transcript-toggle-label').textContent = 'Show transcript';
+  document.querySelector('#meeting-transcript-toggle .material-symbols-outlined').textContent = 'expand_more';
+}
+
+document.getElementById('meeting-view-back').addEventListener('click', () => navigateTo('meetings'));
+document.getElementById('meeting-view-folder').addEventListener('click', () => {
+  if (meetingViewId) openMeetingFolder(meetingViewId);
+});
+document.getElementById('meeting-summarize-btn').addEventListener('click', () => {
+  if (meetingViewId) summarizeMeeting(meetingViewId);
+});
+document.getElementById('meeting-transcript-toggle').addEventListener('click', async () => {
+  const body = document.getElementById('meeting-transcript-view');
+  const opening = body.classList.contains('hidden');
+  body.classList.toggle('hidden', !opening);
+  document.getElementById('meeting-transcript-toggle-label').textContent = opening ? 'Hide transcript' : 'Show transcript';
+  document.querySelector('#meeting-transcript-toggle .material-symbols-outlined').textContent = opening ? 'expand_less' : 'expand_more';
+  if (opening && !meetingTranscriptLoaded && meetingViewId) {
+    meetingTranscriptLoaded = true;
+    try {
+      document.getElementById('meeting-transcript-view-body').innerHTML =
+        renderMarkdownBasic(await invoke('meeting_read_file', { id: meetingViewId, which: 'transcript' }));
+    } catch (err) {
+      document.getElementById('meeting-transcript-view-body').textContent = 'Could not load transcript: ' + err;
+    }
+  }
+});
+
+// ── Meeting settings (Settings > Meeting) ──
+
+let meetingModels = []; // last meeting_models() result
+let meetingSelectedSummarizer = ''; // radio selection; not necessarily installed yet
+
+function pkgMeetingStatusLine(d, model) {
+  if (d.state === 'downloading') return `Downloading… ${Math.round((d.progress || 0) * 100)}%`;
+  if (model && model.installed) return 'Installed';
+  return model ? `Not downloaded - ${model.size}` : 'Select a summarizer';
+}
+
+function renderPkgMeeting() {
+  const btn = document.getElementById('pkg-meeting-btn');
+  if (!btn || !pkgStatus) return;
+  const d = pkgStatus.meeting || { state: 'unavailable' };
+  const model = meetingModels.find(m => m.id === meetingSelectedSummarizer);
+  document.getElementById('pkg-meeting-status').textContent = pkgMeetingStatusLine(d, model);
+  const progress = document.getElementById('pkg-meeting-progress');
+  const downloading = d.state === 'downloading';
+  progress.classList.toggle('hidden', !downloading);
+  if (downloading) {
+    document.getElementById('pkg-meeting-fill').style.width = `${Math.round((d.progress || 0) * 100)}%`;
+    btn.disabled = true;
+    btn.textContent = `${Math.round((d.progress || 0) * 100)}%`;
+  } else if (model && model.installed) {
+    btn.disabled = true;
+    btn.textContent = 'Installed';
+  } else {
+    btn.disabled = !model;
+    btn.textContent = 'Download';
+  }
+}
+
+function renderMeetingModelList() {
+  const list = document.getElementById('meeting-model-list');
+  if (!list) return;
+  list.innerHTML = meetingModels.map(m => {
+    const selected = m.id === meetingSelectedSummarizer;
+    const rowClass = selected ? 'ring-1 ring-primary bg-primary/5' : 'hover:bg-surface-container-highest';
+    const radio = selected
+      ? '<span class="material-symbols-outlined text-primary text-[20px]">radio_button_checked</span>'
+      : '<span class="material-symbols-outlined text-on-surface-variant/50 text-[20px]">radio_button_unchecked</span>';
+    const recChip = m.recommended
+      ? '<span class="text-[10px] font-semibold text-primary bg-primary/10 rounded-full px-2 py-0.5">Recommended</span>'
+      : '';
+    const installedIcon = m.installed
+      ? '<span class="material-symbols-outlined text-on-surface-variant text-[18px]" title="Downloaded">check_circle</span>'
+      : '';
+    return `
+    <div class="meeting-model-row flex items-center gap-3 rounded-lg px-3 py-2.5 cursor-pointer transition-colors ${rowClass}" data-id="${escapeHtml(m.id)}">
+      ${radio}
+      <div class="min-w-0 flex-1">
+        <div class="flex items-center gap-2">
+          <span class="text-sm font-medium text-on-surface truncate">${escapeHtml(m.name)}</span>
+          ${recChip}
+        </div>
+        <p class="text-xs text-on-surface-variant mt-0.5">${escapeHtml(m.size)}</p>
+      </div>
+      ${installedIcon}
+    </div>`;
+  }).join('');
+  list.querySelectorAll('.meeting-model-row').forEach(el => {
+    el.addEventListener('click', () => selectSummarizer(el.dataset.id));
+  });
+  renderPkgMeeting();
+}
+
+// Picking an already-downloaded summarizer just switches the active choice
+// (save_config); picking one that isn't downloaded waits for the Download
+// button below — package_install_meeting is what actually sets it server-side.
+async function selectSummarizer(id) {
+  meetingSelectedSummarizer = id;
+  renderMeetingModelList();
+  const model = meetingModels.find(m => m.id === id);
+  if (!model || !model.installed) return;
+  try {
+    const cfg = await invoke('get_config');
+    if (cfg.meeting_summarizer !== id) {
+      cfg.meeting_summarizer = id;
+      await invoke('save_config', { cfg });
+    }
+  } catch (err) {
+    showToast('Save failed: ' + err);
+  }
+}
+
+async function loadMeetingModels() {
+  if (!isDesktop) return;
+  try {
+    meetingModels = await invoke('meeting_models');
+  } catch (err) {
+    console.error('Failed to load meeting models:', err);
+    meetingModels = [];
+  }
+  if (!meetingModels.some(m => m.id === meetingSelectedSummarizer)) {
+    let active = '';
+    try { active = (await invoke('get_config')).meeting_summarizer || ''; } catch (_) {}
+    const recommended = meetingModels.find(m => m.recommended);
+    meetingSelectedSummarizer = meetingModels.some(m => m.id === active) ? active
+      : (recommended ? recommended.id : (meetingModels[0] ? meetingModels[0].id : ''));
+  }
+  renderMeetingModelList();
+}
+
+document.getElementById('pkg-meeting-btn').addEventListener('click', async () => {
+  if (!meetingSelectedSummarizer) return;
+  const btn = document.getElementById('pkg-meeting-btn');
+  btn.disabled = true;
+  try {
+    await invoke('package_install_meeting', { summarizerId: meetingSelectedSummarizer });
+  } catch (err) {
+    showToast('Install failed: ' + err);
+  }
+  await loadPackagesStatus();
+  await loadMeetingModels();
+});
+
+// Folder pickers via tauri-plugin-dialog (desktop-only, registered in
+// lib.rs under cfg(desktop)). Feature-detect the global anyway so the harness
+// and any build without the plugin fall back to typing into the text input.
+function wireMeetingDirBrowse(inputId, btnId) {
+  const openDialog = window.__TAURI__.dialog?.open;
+  if (!openDialog) return;
+  const btn = document.getElementById(btnId);
+  btn.classList.remove('hidden');
+  btn.addEventListener('click', async () => {
+    const input = document.getElementById(inputId);
+    const dir = await openDialog({ directory: true, defaultPath: input.value || undefined });
+    if (typeof dir === 'string') {
+      input.value = dir;
+      await saveConfig();
+    }
+  });
+}
+wireMeetingDirBrowse('cfg-meeting-transcript-dir', 'cfg-meeting-transcript-browse');
+wireMeetingDirBrowse('cfg-meeting-summary-dir', 'cfg-meeting-summary-browse');
+
 // ── Debug tab ──
 
 const logOutput = document.getElementById('log-output');
@@ -4965,6 +5635,15 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Show desktop-only UI elements when not on Android
   if (isDesktop) {
     document.getElementById('hotkey-row')?.classList.remove('hidden');
+    // Meeting is a desktop-only third mode: reveal its pill button and its
+    // Settings group (both ship hidden so Android stays a two-mode app).
+    document.getElementById('mode-meeting-btn')?.classList.remove('hidden');
+    document.getElementById('meeting-settings-group')?.classList.remove('hidden');
+    // The thumb ships sized for two modes (50%); with three it must be a third
+    // so translateX(idx*100%) lands under each button (see setMode). The p-1
+    // track padding is 0.25rem, split three ways -> 0.1667rem.
+    const mt = document.getElementById('mode-thumb');
+    if (mt) mt.style.width = 'calc(33.333% - 0.1667rem)';
   }
 
   await loadHistory();
@@ -4974,6 +5653,10 @@ document.addEventListener('DOMContentLoaded', async () => {
   await loadSnippets();
 
   setMode('speak');
+
+  // Restore a meeting that was still recording when the webview reloaded; this
+  // switches to Meeting mode and reopens the live view when one is found.
+  checkMeetingRehydrate();
 
   if (!engineReady && await invoke('is_engine_ready')) {
     engineReady = true;

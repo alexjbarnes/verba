@@ -65,6 +65,8 @@ jni = "0.21"
 arboard = "3"
 enigo = "0.3"
 tauri-plugin-global-shortcut = "2"
+# Native folder picker for the meeting transcript/summary directories.
+tauri-plugin-dialog = "2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = "0.6"
