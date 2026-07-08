@@ -29,3 +29,24 @@ pub fn list_input_devices() -> Vec<AudioDevice> {
 
     devices
 }
+
+/// Enumerate OUTPUT devices (speakers/headphones). Meeting mode captures one of
+/// these as a loopback source. Mirrors `list_input_devices`: dedup by name and
+/// skip devices whose description can't be read.
+pub fn list_output_devices() -> Vec<AudioDevice> {
+    let host = cpal::default_host();
+    let mut devices = Vec::new();
+    let mut seen_names = std::collections::HashSet::new();
+
+    if let Ok(outputs) = host.output_devices() {
+        for (i, dev) in outputs.enumerate() {
+            if let Ok(name) = dev.description().map(|d| d.name().to_string()) {
+                if seen_names.insert(name.clone()) {
+                    devices.push(AudioDevice { name, index: i });
+                }
+            }
+        }
+    }
+
+    devices
+}

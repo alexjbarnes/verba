@@ -4,5 +4,9 @@
 <dict>
     <key>LSUIElement</key>
     <true/>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Verba records your microphone for dictation and to capture your voice in meetings.</string>
+    <key>NSAudioCaptureUsageDescription</key>
+    <string>Verba captures system audio so it can transcribe the other participants in your meetings.</string>
 </dict>
 </plist>

@@ -44,6 +44,13 @@ pub struct AppConfig {
     /// Label remote speakers via embedding clustering (experimental).
     #[serde(default = "default_true")]
     pub meeting_diarize: bool,
+    /// Meeting-mode microphone by device name; "" = default/dictation input.
+    #[serde(default)]
+    pub meeting_mic_device: String,
+    /// Meeting-mode system audio to capture (loopback) by output device name;
+    /// "" = default output. macOS/Windows only.
+    #[serde(default)]
+    pub meeting_output_device: String,
     /// Playback speed remembered per voice (voice string -> speed multiplier).
     /// Selecting a voice restores its last speed (default 1.0). MUST stay the
     /// last field: `toml` emits map fields as `[tables]`, which must follow all
@@ -78,6 +85,8 @@ impl Default for AppConfig {
             meeting_summary_dir: default_meetings_dir(),
             meeting_summarizer: String::new(),
             meeting_diarize: true,
+            meeting_mic_device: String::new(),
+            meeting_output_device: String::new(),
             tts_voice_speeds: HashMap::new(),
         }
     }
@@ -178,6 +187,8 @@ tts_model = ""
             meeting_summary_dir: "/tmp/meet-s".into(),
             meeting_summarizer: "sum-qwen3-1.7b".into(),
             meeting_diarize: false,
+            meeting_mic_device: String::new(),
+            meeting_output_device: "MacBook Pro Speakers".into(),
             tts_voice_speeds: HashMap::from([("7".to_string(), 0.75f32)]),
         };
 
@@ -191,6 +202,8 @@ tts_model = ""
         assert_eq!(deserialized.meeting_transcript_dir, "/tmp/meet-t");
         assert_eq!(deserialized.meeting_summarizer, "sum-qwen3-1.7b");
         assert!(!deserialized.meeting_diarize);
+        assert_eq!(deserialized.meeting_output_device, "MacBook Pro Speakers");
+        assert!(deserialized.meeting_mic_device.is_empty());
         assert_eq!(deserialized.active_model_id, "parakeet-v3-int8");
         assert!(!deserialized.haptic_feedback);
         assert_eq!(deserialized.tts_favourite_sids, vec![3, 7]);

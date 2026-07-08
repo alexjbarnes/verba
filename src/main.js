@@ -812,6 +812,38 @@ async function loadAudioDevices() {
   }
 }
 
+// Meeting-mode device pickers (desktop). Values are device NAMES ("" = system
+// default), matching the backend's InputByName / LoopbackByName specs.
+async function loadMeetingDevices() {
+  const [inputs, outputs] = await Promise.all([
+    invoke('list_audio_devices'),
+    invoke('list_audio_output_devices'),
+  ]);
+  const fill = (sel, devices) => {
+    sel.innerHTML = '<option value="">System Default</option>';
+    for (const dev of devices) {
+      const opt = document.createElement('option');
+      opt.value = dev.name;
+      opt.textContent = dev.name;
+      sel.appendChild(opt);
+    }
+  };
+  fill(document.getElementById('cfg-meeting-mic'), inputs);
+  fill(document.getElementById('cfg-meeting-speaker'), outputs);
+}
+
+// Select a device by name, adding a placeholder option first if it isn't
+// currently connected, so a saved choice survives the device being unplugged.
+function selectDeviceOption(sel, value) {
+  if (value && !Array.from(sel.options).some((o) => o.value === value)) {
+    const opt = document.createElement('option');
+    opt.value = value;
+    opt.textContent = `${value} (not connected)`;
+    sel.appendChild(opt);
+  }
+  sel.value = value || '';
+}
+
 // ── General tab ──
 
 async function loadConfig() {
@@ -841,12 +873,17 @@ async function loadConfig() {
   // Meeting settings (desktop only): diarization toggle + transcript/summary
   // folders. Persisted through the same saveConfig round-trip.
   if (isDesktop) {
+    await loadMeetingDevices();
     document.getElementById('cfg-meeting-diarize').checked = cfg.meeting_diarize !== false;
     document.getElementById('cfg-meeting-transcript-dir').value = cfg.meeting_transcript_dir || '';
     document.getElementById('cfg-meeting-summary-dir').value = cfg.meeting_summary_dir || '';
+    selectDeviceOption(document.getElementById('cfg-meeting-mic'), cfg.meeting_mic_device || '');
+    selectDeviceOption(document.getElementById('cfg-meeting-speaker'), cfg.meeting_output_device || '');
     document.getElementById('cfg-meeting-diarize').addEventListener('change', saveConfig);
     document.getElementById('cfg-meeting-transcript-dir').addEventListener('change', saveConfig);
     document.getElementById('cfg-meeting-summary-dir').addEventListener('change', saveConfig);
+    document.getElementById('cfg-meeting-mic').addEventListener('change', saveConfig);
+    document.getElementById('cfg-meeting-speaker').addEventListener('change', saveConfig);
   }
 }
 
@@ -859,6 +896,8 @@ async function saveConfig() {
     cfg.meeting_diarize = document.getElementById('cfg-meeting-diarize').checked;
     cfg.meeting_transcript_dir = document.getElementById('cfg-meeting-transcript-dir').value.trim();
     cfg.meeting_summary_dir = document.getElementById('cfg-meeting-summary-dir').value.trim();
+    cfg.meeting_mic_device = document.getElementById('cfg-meeting-mic').value;
+    cfg.meeting_output_device = document.getElementById('cfg-meeting-speaker').value;
   }
   try {
     await invoke('save_config', { cfg });

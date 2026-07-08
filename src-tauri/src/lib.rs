@@ -66,6 +66,11 @@ fn list_audio_devices() -> Vec<audio::AudioDevice> {
 }
 
 #[tauri::command]
+fn list_audio_output_devices() -> Vec<audio::AudioDevice> {
+    audio::list_output_devices()
+}
+
+#[tauri::command]
 fn get_config() -> config::AppConfig {
     config::AppConfig::load()
 }
@@ -1639,6 +1644,7 @@ pub fn run() {
             is_engine_ready,
             list_models,
             list_audio_devices,
+            list_audio_output_devices,
             get_config,
             save_config,
             download_model,

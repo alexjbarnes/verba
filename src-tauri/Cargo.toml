@@ -70,7 +70,19 @@ tauri-plugin-dialog = "2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = "0.6"
+# Used by media.rs for the (unrelated) MediaRemote now-playing CFDictionary.
 core-foundation = "0.10"
+# Pure-Rust (no xcodebuild) Apple-framework bindings for the global CoreAudio
+# process tap that backs Meeting mode's system-audio capture
+# (meeting/system_tap.rs). These are plain header-translator output around the
+# real macOS SDK headers, with no native build step, so — unlike cidre — they
+# build with Xcode Command Line Tools alone. macOS-only; never enters Android
+# builds.
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-core-audio = "0.3"
+objc2-core-audio-types = "0.3"
+objc2-core-foundation = "0.3"
 
 [dev-dependencies]
 rustfft = "6"

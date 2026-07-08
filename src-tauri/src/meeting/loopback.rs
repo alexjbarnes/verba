@@ -2,9 +2,13 @@
 //! current OS, and reporting when the platform can't do it.
 //!
 //! Meeting mode captures what comes OUT of the speakers (everyone else on the
-//! call) alongside the microphone (you). cpal 0.18 exposes this uniformly:
-//!   - Windows: the default output device opened as an input = WASAPI loopback.
-//!   - macOS 14.6+: a Core Audio process tap behind the same output-as-input.
+//! call) alongside the microphone (you):
+//!   - Windows: cpal's default output device opened as an input = WASAPI loopback.
+//!   - macOS 14.6+: a GLOBAL CoreAudio process tap (`meeting/system_tap.rs`),
+//!     device-independent — it captures all process audio pre-routing rather
+//!     than being bound to one output device's UID. cpal's device-bound tap
+//!     (opening a specific output as an input) silently delivered silence for
+//!     some outputs, notably Bluetooth, which is why this isn't cpal-based.
 //!   - Linux: the default sink's `.monitor` source, enumerated as an input by
 //!     the native PipeWire/PulseAudio hosts (the `linux-audio-hosts` feature).
 //!
@@ -22,35 +26,53 @@ pub enum Loopback {
     Unsupported(String),
 }
 
-/// Resolve system-audio capture for the current platform.
-pub fn resolve() -> Loopback {
+/// Resolve system-audio capture for the current platform. `preferred_output` is
+/// a specific output device name the user chose in Meeting settings (None for
+/// the default output). Honored on Windows/macOS, where loopback opens an OUTPUT
+/// device as input; ignored on Linux, where loopback is a monitor input source.
+pub fn resolve(preferred_output: Option<&str>) -> Loopback {
     #[cfg(target_os = "windows")]
     {
-        // WASAPI loopback: any default output device works, opened as input.
-        Loopback::Available(DeviceSpec::LoopbackDefaultOutput)
+        // WASAPI loopback: any output device works, opened as input.
+        Loopback::Available(output_spec(preferred_output))
     }
     #[cfg(target_os = "macos")]
     {
-        resolve_macos()
+        resolve_macos(preferred_output)
     }
     #[cfg(target_os = "linux")]
     {
+        let _ = preferred_output; // not yet mapped to a specific monitor source
         resolve_linux()
     }
     #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
     {
+        let _ = preferred_output;
         Loopback::Unsupported("System audio capture isn't supported on this platform".into())
     }
 }
 
-/// Core Audio process taps land in cpal 0.18 but need macOS 14.6+. Gate on the
-/// runtime OS version (a build could run on an older host than it was compiled
+/// Loopback spec for Windows: the named output when the user picked one,
+/// else the default output.
+#[cfg(target_os = "windows")]
+fn output_spec(preferred: Option<&str>) -> DeviceSpec {
+    match preferred {
+        Some(name) if !name.is_empty() => DeviceSpec::LoopbackByName(name.to_string()),
+        _ => DeviceSpec::LoopbackDefaultOutput,
+    }
+}
+
+/// A global CoreAudio process tap needs macOS 14.6+. Gate on the runtime OS
+/// version (a build could run on an older host than it was compiled
 /// against), falling back to mic-only with a clear reason below the floor.
+/// `preferred_output` is unused here: a global tap captures all process
+/// audio pre-routing, independent of whichever output device is selected.
 #[cfg(target_os = "macos")]
-fn resolve_macos() -> Loopback {
+fn resolve_macos(preferred_output: Option<&str>) -> Loopback {
+    let _ = preferred_output;
     match macos_product_version() {
         Some((major, minor)) if (major, minor) >= (14, 6) => {
-            Loopback::Available(DeviceSpec::LoopbackDefaultOutput)
+            Loopback::Available(DeviceSpec::SystemTapGlobal)
         }
         Some((major, minor)) => Loopback::Unsupported(format!(
             "System audio capture needs macOS 14.6 or newer (this is {major}.{minor}). Recording microphone only."

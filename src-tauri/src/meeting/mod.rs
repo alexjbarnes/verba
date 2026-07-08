@@ -17,6 +17,8 @@ pub mod loopback;
 pub mod speakers;
 pub mod store;
 pub mod summarize;
+#[cfg(target_os = "macos")]
+pub mod system_tap;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -80,9 +82,16 @@ pub fn start(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
         None
     };
 
-    // Mic on the configured input; system audio when the platform can.
-    let mic = AudioRecorder::new_with_device(Some(&vad_path), DeviceSpec::ConfigInput)?;
-    let (loopback_rec, loopback_notice) = match loopback::resolve() {
+    // Mic: the meeting-specific device if chosen, else the configured/default
+    // input. System audio: the chosen output (loopback) when the platform can.
+    let mic_spec = if cfg.meeting_mic_device.is_empty() {
+        DeviceSpec::ConfigInput
+    } else {
+        DeviceSpec::InputByName(cfg.meeting_mic_device.clone())
+    };
+    let mic = AudioRecorder::new_with_device(Some(&vad_path), mic_spec)?;
+    let preferred_output = Some(cfg.meeting_output_device.as_str()).filter(|s| !s.is_empty());
+    let (loopback_rec, loopback_notice) = match loopback::resolve(preferred_output) {
         loopback::Loopback::Available(spec) => {
             match AudioRecorder::new_with_device(Some(&vad_path), spec) {
                 Ok(r) => (Some(r), None),

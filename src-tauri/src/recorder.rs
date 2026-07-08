@@ -99,8 +99,21 @@ enum LoopExit {
     Disconnected,
 }
 
+/// The underlying audio backend behind a `StreamHandle`. Almost always a
+/// cpal input stream; on macOS, Meeting mode's system-audio path instead
+/// holds a global CoreAudio tap (see `meeting/system_tap.rs`), which cpal
+/// cannot express (it's not bound to any single device). Both variants are
+/// held purely for RAII (drop = stop capture) and never read back out,
+/// hence `allow(dead_code)`.
+#[allow(dead_code)]
+enum StreamKind {
+    Cpal(cpal::Stream),
+    #[cfg(target_os = "macos")]
+    SystemTap(crate::meeting::system_tap::SystemTapHandle),
+}
+
 struct StreamHandle {
-    stream: cpal::Stream,
+    stream: StreamKind,
     audio_rx: mpsc::Receiver<Vec<f32>>,
     resampler: Option<LinearResampler>,
     disconnected: Arc<AtomicBool>,
@@ -120,6 +133,13 @@ pub enum DeviceSpec {
     /// The default OUTPUT device opened as an input (WASAPI loopback on
     /// Windows, Core Audio process tap on macOS 14.6+).
     LoopbackDefaultOutput,
+    /// A specific OUTPUT device (by human name) opened as an input for loopback
+    /// capture. Meeting mode uses this when the user picks a non-default
+    /// speaker/output to record. macOS/Windows only.
+    LoopbackByName(String),
+    /// macOS global system-audio process tap (captures all output,
+    /// device-independent). Meeting-mode loopback on macOS.
+    SystemTapGlobal,
 }
 
 /// Audio recorder with a dedicated worker thread.
@@ -410,10 +430,50 @@ fn resolve_device(host: &cpal::Host, spec: &DeviceSpec) -> Result<cpal::Device, 
             }
             Ok(dev)
         }
+        DeviceSpec::LoopbackByName(name) => {
+            if let Ok(outputs) = host.output_devices() {
+                for dev in outputs {
+                    if dev.description().map(|d| d.name() == name).unwrap_or(false) {
+                        log::info!("Loopback: capturing output device: {name}");
+                        return Ok(dev);
+                    }
+                }
+            }
+            log::warn!("Loopback output '{name}' not found, using default output");
+            host.default_output_device()
+                .ok_or_else(|| format!("output device not found: {name}"))
+        }
+        // Handled before this function is called (see open_stream); this
+        // arm only exists so the match stays exhaustive on all platforms.
+        DeviceSpec::SystemTapGlobal => Err("system tap is not a cpal device".into()),
     }
 }
 
 fn open_stream(spec: &DeviceSpec) -> Result<StreamHandle, String> {
+    // macOS system audio bypasses cpal entirely: a global CoreAudio process
+    // tap isn't bound to any single device, so there's no cpal Device to
+    // resolve/configure below. Everything else (mic input, Windows/Linux
+    // loopback) stays on the normal cpal path.
+    #[cfg(target_os = "macos")]
+    if matches!(spec, DeviceSpec::SystemTapGlobal) {
+        let (audio_tx, audio_rx) = mpsc::channel::<Vec<f32>>();
+        let (handle, rate, _channels) = crate::meeting::system_tap::start_global_tap(audio_tx)?;
+        let resampler = if rate as i32 != TARGET_SAMPLE_RATE {
+            Some(
+                LinearResampler::create(rate as i32, TARGET_SAMPLE_RATE)
+                    .ok_or("failed to create resampler")?,
+            )
+        } else {
+            None
+        };
+        return Ok(StreamHandle {
+            stream: StreamKind::SystemTap(handle),
+            audio_rx,
+            resampler,
+            disconnected: Arc::new(AtomicBool::new(false)),
+        });
+    }
+
     let t = std::time::Instant::now();
     let host = cpal::default_host();
     let device = resolve_device(&host, spec)?;
@@ -421,7 +481,7 @@ fn open_stream(spec: &DeviceSpec) -> Result<StreamHandle, String> {
     // Loopback captures an OUTPUT device, so its stream shape comes from the
     // output config; every other spec is a normal input.
     let supported = match spec {
-        DeviceSpec::LoopbackDefaultOutput => device
+        DeviceSpec::LoopbackDefaultOutput | DeviceSpec::LoopbackByName(_) => device
             .default_output_config()
             .map_err(|e| format!("no output config for loopback: {e}"))?,
         _ => device
@@ -467,10 +527,44 @@ fn open_stream(spec: &DeviceSpec) -> Result<StreamHandle, String> {
     let disconnected = Arc::new(AtomicBool::new(false));
     let disc_flag = disconnected.clone();
 
+    // Diagnostic level metering: log peak amplitude ~once/second per stream so
+    // we can tell whether a stream (especially the Meeting loopback tap) is
+    // delivering real audio, pure silence (peak ~0), or nothing (no lines).
+    let meter_label = match spec {
+        DeviceSpec::LoopbackDefaultOutput => "loopback:default-output".to_string(),
+        DeviceSpec::LoopbackByName(n) => format!("loopback:{n}"),
+        DeviceSpec::InputByName(n) => format!("mic:{n}"),
+        DeviceSpec::ConfigInput => "mic:config".to_string(),
+        // Unreachable: open_stream returns before here on macOS (see the
+        // early branch above); kept so this match stays exhaustive.
+        DeviceSpec::SystemTapGlobal => "system-tap".to_string(),
+    };
+    let mut meter_frames: usize = 0;
+    let mut meter_peak: f32 = 0.0;
+    // Opt-in (VERBA_AUDIO_METER): keep this diagnostic logging quiet by default.
+    let meter_on = std::env::var_os("VERBA_AUDIO_METER").is_some();
+
     let stream = device
         .build_input_stream(
             stream_config,
             move |data: &[f32], _: &cpal::InputCallbackInfo| {
+                if meter_on {
+                    for &s in data {
+                        let a = s.abs();
+                        if a > meter_peak {
+                            meter_peak = a;
+                        }
+                    }
+                    meter_frames += if channels > 0 { data.len() / channels } else { data.len() };
+                    if meter_frames >= device_rate.max(1) as usize {
+                        log::info!(
+                            "audio level [{meter_label}]: peak {meter_peak:.4} over ~{}ms",
+                            meter_frames * 1000 / device_rate.max(1) as usize
+                        );
+                        meter_frames = 0;
+                        meter_peak = 0.0;
+                    }
+                }
                 let mono: Vec<f32> = if channels > 1 {
                     data.chunks(channels)
                         .map(|frame| frame.iter().sum::<f32>() / channels as f32)
@@ -495,7 +589,7 @@ fn open_stream(spec: &DeviceSpec) -> Result<StreamHandle, String> {
     log::info!("Recording at {device_rate}Hz, {channels}ch -> {TARGET_SAMPLE_RATE}Hz (stream opened in {}ms)", t.elapsed().as_millis());
 
     Ok(StreamHandle {
-        stream,
+        stream: StreamKind::Cpal(stream),
         audio_rx,
         resampler,
         disconnected,

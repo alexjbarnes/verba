@@ -36,7 +36,7 @@ fn main() {
     // Mic and loopback run on independent recorder worker threads.
     let mic_handle = std::thread::spawn(|| capture("mic", DeviceSpec::ConfigInput, SECS));
 
-    let loop_result = match loopback::resolve() {
+    let loop_result = match loopback::resolve(None) {
         Loopback::Available(spec) => {
             println!("loopback: available ({spec:?})");
             capture("loopback", spec, SECS)

@@ -365,6 +365,31 @@
     <div id="meeting-settings-group" class="hidden">
       <p class="text-xs font-semibold text-on-surface-variant uppercase tracking-wider mb-3">Meeting</p>
       <div class="space-y-6">
+        <!-- Audio devices: which mic (you) and which speaker output (everyone
+             else, captured via loopback) Meeting mode records. -->
+        <section>
+          <div class="mb-2">
+            <h2 class="text-sm font-semibold text-on-surface">Audio</h2>
+            <p class="text-xs text-on-surface-variant mt-0.5">Devices Meeting mode records from</p>
+          </div>
+          <div class="bg-surface-container-low rounded-xl p-5 space-y-4">
+            <div>
+              <label class="text-sm font-medium text-on-surface">Microphone</label>
+              <p class="text-xs text-on-surface-variant mt-0.5">Captures your voice</p>
+              <select id="cfg-meeting-mic" class="w-full mt-2 bg-surface-container-highest border border-outline-variant/30 rounded-lg px-3 py-2.5 text-sm text-on-surface focus:outline-none focus:ring-1 focus:ring-primary/50 transition-colors cursor-pointer">
+                <option value="">System Default</option>
+              </select>
+            </div>
+            <div class="border-t border-outline-variant/20 pt-4">
+              <label class="text-sm font-medium text-on-surface">System audio</label>
+              <p class="text-xs text-on-surface-variant mt-0.5">Speaker output to capture — everyone else on the call</p>
+              <select id="cfg-meeting-speaker" class="w-full mt-2 bg-surface-container-highest border border-outline-variant/30 rounded-lg px-3 py-2.5 text-sm text-on-surface focus:outline-none focus:ring-1 focus:ring-primary/50 transition-colors cursor-pointer">
+                <option value="">System Default</option>
+              </select>
+            </div>
+          </div>
+        </section>
+
         <!-- Summarizer section: radio-style picker from meeting_models(), one
              shared download row (cloned from the pkg-dictation card) for
              whichever choice is currently selected. -->

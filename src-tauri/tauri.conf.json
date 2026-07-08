@@ -26,6 +26,12 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "macOS": {
+      "entitlements": "Entitlements.plist",
+      "signingIdentity": "-",
+      "hardenedRuntime": true,
+      "minimumSystemVersion": "14.4"
+    },
     "android": {
       "minSdkVersion": 26
     },
