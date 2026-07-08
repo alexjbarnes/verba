@@ -2,7 +2,8 @@
 #
 # Usage:
 #   just setup         # first-time desktop setup: shared-ORT libs + grammar models
-#   just dev           # run desktop dev server (sets SHERPA_ONNX_LIB_DIR)
+#   just dev           # fast desktop dev loop (hot-reload; NO system-audio capture)
+#   just desktop       # build + run the signed .app (Meeting system-audio works)
 #   just setup-android # first-time Android setup: sherpa-onnx, ORT, grammar models
 #   just apk           # build debug APK
 #   just apk-release   # build release APK
@@ -39,9 +40,32 @@ export JAVA_HOME := env("JAVA_HOME", "/usr")
 # First-time desktop setup: shared-ORT sherpa-onnx libs + grammar models
 setup: _setup-sherpa-desktop _setup-grammar
 
-# Run desktop dev server with shared-ORT environment
+# Bare binary: macOS Meeting-mode system-audio capture does NOT work here
+# (CoreAudio taps are gated to signed bundled apps launched via LaunchServices —
+# use `just desktop` for that).
+# Fast desktop dev loop: hot-reload, shared-ORT env (no Meeting system-audio).
 dev:
     SHERPA_ONNX_LIB_DIR="{{desktop_deps}}/sherpa-onnx/lib" npx tauri dev
+
+# Rebuilds the debug bundle, re-signs it ad-hoc with tauri.conf.json's
+# entitlements, and launches via LaunchServices (logs -> /tmp/verba-desktop.log).
+# No hot-reload — re-run after code changes.
+# Build + run the signed desktop .app — Meeting-mode system-audio works here.
+desktop:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "==> Building + signing debug .app bundle (first build takes a while)..."
+    SHERPA_ONNX_LIB_DIR="{{desktop_deps}}/sherpa-onnx/lib" npx tauri build --debug --bundles app
+    APP="{{tauri_dir}}/target/debug/bundle/macos/Verba.app"
+    LOG="/tmp/verba-desktop.log"
+    : > "$LOG"
+    # Replace any previous instance so the fresh build is what runs.
+    pkill -f "Verba.app/Contents/MacOS/verba-rs" 2>/dev/null || true
+    open "$APP" --stdout "$LOG" --stderr "$LOG"
+    echo ""
+    echo "==> Launched $APP"
+    echo "    logs:  tail -f $LOG"
+    echo "    On the first meeting, macOS prompts to record system audio — click Allow."
 
 # ── Desktop setup internals ──
 
