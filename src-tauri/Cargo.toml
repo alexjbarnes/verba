@@ -95,3 +95,8 @@ tempfile = "3"
 # shipped binary links none of their code. Same crate version (1.12.34).
 [patch.crates-io]
 sherpa-onnx-sys = { path = "vendor/sherpa-onnx-sys" }
+
+# Full debuginfo across this dep tree (ort, tokenizers, sherpa, tauri) balloons
+# target/ to ~12G. Line tables keep usable backtraces at a fraction of the size.
+[profile.dev]
+debug = "line-tables-only"
