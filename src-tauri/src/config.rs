@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 fn default_true() -> bool { true }
+fn default_silence_timeout() -> u32 { 300 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -51,6 +52,10 @@ pub struct AppConfig {
     /// "" = default output. macOS/Windows only.
     #[serde(default)]
     pub meeting_output_device: String,
+    /// Offer to stop the meeting after this many seconds with no speech from
+    /// either stream (end-of-meeting detection). 0 disables it.
+    #[serde(default = "default_silence_timeout")]
+    pub meeting_silence_timeout_secs: u32,
     /// Playback speed remembered per voice (voice string -> speed multiplier).
     /// Selecting a voice restores its last speed (default 1.0). MUST stay the
     /// last field: `toml` emits map fields as `[tables]`, which must follow all
@@ -87,6 +92,7 @@ impl Default for AppConfig {
             meeting_diarize: true,
             meeting_mic_device: String::new(),
             meeting_output_device: String::new(),
+            meeting_silence_timeout_secs: 300,
             tts_voice_speeds: HashMap::new(),
         }
     }
@@ -189,6 +195,7 @@ tts_model = ""
             meeting_diarize: false,
             meeting_mic_device: String::new(),
             meeting_output_device: "MacBook Pro Speakers".into(),
+            meeting_silence_timeout_secs: 600,
             tts_voice_speeds: HashMap::from([("7".to_string(), 0.75f32)]),
         };
 

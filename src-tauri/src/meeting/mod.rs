@@ -59,6 +59,9 @@ struct Session {
     /// offline batch pass at stop can reconstruct the timeline and diarize.
     /// Held only for the meeting's life, discarded with the Session.
     loopback_audio: Arc<Mutex<Vec<(u64, Vec<f32>)>>>,
+    /// Wall-clock of the last speech segment from either stream, for
+    /// end-of-meeting (silence) detection.
+    last_activity: Arc<Mutex<Instant>>,
     consumers: Vec<std::thread::JoinHandle<()>>,
     autosaver: Option<std::thread::JoinHandle<()>>,
 }
@@ -142,6 +145,7 @@ pub fn start(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
     MEETING_ACTIVE.store(true, Ordering::SeqCst);
 
     let loopback_audio = Arc::new(Mutex::new(Vec::<(u64, Vec<f32>)>::new()));
+    let last_activity = Arc::new(Mutex::new(Instant::now()));
     let mut consumers = Vec::new();
     consumers.push(spawn_consumer(
         mic_rx,
@@ -152,6 +156,7 @@ pub fn start(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
         app.clone(),
         None,
         None,
+        last_activity.clone(),
     ));
     if let Some(rx) = loop_rx {
         consumers.push(spawn_consumer(
@@ -163,6 +168,7 @@ pub fn start(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
             app.clone(),
             labeler,
             Some(loopback_audio.clone()),
+            last_activity.clone(),
         ));
     }
 
@@ -174,13 +180,28 @@ pub fn start(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
         let filename = filename.clone();
         let notes = notes.clone();
         let utterances = utterances.clone();
+        let app = app.clone();
+        let last_activity = last_activity.clone();
+        let silence_timeout = crate::config::AppConfig::load().meeting_silence_timeout_secs;
         std::thread::Builder::new()
             .name("meeting-autosave".into())
             .spawn(move || {
                 let mut ticks = 0u32;
+                let mut silence_notified = false;
                 while MEETING_ACTIVE.load(Ordering::SeqCst) {
                     std::thread::sleep(std::time::Duration::from_secs(1));
                     ticks += 1;
+                    // End-of-meeting: offer to stop after a long quiet stretch.
+                    if silence_timeout > 0 {
+                        let silent = last_activity.lock().unwrap().elapsed().as_secs() as u32;
+                        if silent >= silence_timeout && !silence_notified {
+                            silence_notified = true;
+                            let _ = app
+                                .emit("meeting-silence", serde_json::json!({ "silent_secs": silent }));
+                        } else if silent < silence_timeout {
+                            silence_notified = false; // activity resumed; re-arm
+                        }
+                    }
                     if ticks % 30 != 0 {
                         continue;
                     }
@@ -215,6 +236,7 @@ pub fn start(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
         loopback: loopback_rec,
         loopback_notice,
         loopback_audio,
+        last_activity,
         consumers,
         autosaver,
     });
@@ -240,6 +262,7 @@ fn spawn_consumer(
     app: tauri::AppHandle,
     mut labeler: Option<speakers::SpeakerLabeler>,
     audio_buf: Option<Arc<Mutex<Vec<(u64, Vec<f32>)>>>>,
+    last_activity: Arc<Mutex<Instant>>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::Builder::new()
         .name(format!("meeting-{source}"))
@@ -248,6 +271,7 @@ fn spawn_consumer(
                 if segment.len() < MIN_SEGMENT_SAMPLES {
                     continue;
                 }
+                *last_activity.lock().unwrap() = Instant::now();
                 // Tag with when the segment STARTED: elapsed minus its length.
                 let seg_ms = (segment.len() as u64) * 1000 / 16_000;
                 let t_ms = started_at.elapsed().as_millis() as u64;

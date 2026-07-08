@@ -5116,7 +5116,10 @@ document.getElementById('meeting-jump-latest').addEventListener('click', () => {
 });
 
 listen('meeting-utterance', (event) => {
-  if (meetingRecording) appendMeetingUtterance(event.payload);
+  if (meetingRecording) {
+    appendMeetingUtterance(event.payload);
+    hideSilenceBanner(); // speech resumed
+  }
 });
 
 // A session ending from somewhere other than this tab's own Stop/Cancel must
@@ -5133,11 +5136,37 @@ listen('meeting-state', (event) => {
   }
 });
 
+// End-of-meeting nudge: the backend flags a long silence; we offer to stop
+// (never a hard auto-stop, so a merely-paused meeting is never lost).
+listen('meeting-silence', (event) => {
+  if (!meetingRecording) return;
+  const secs = event.payload?.silent_secs || 0;
+  const mins = Math.max(1, Math.round(secs / 60));
+  document.getElementById('meeting-silence-text').textContent =
+    `No one's spoken for ${mins} min. Stop and save the meeting?`;
+  const banner = document.getElementById('meeting-silence-banner');
+  banner.classList.remove('hidden');
+  banner.classList.add('flex');
+});
+
+function hideSilenceBanner() {
+  const banner = document.getElementById('meeting-silence-banner');
+  banner.classList.add('hidden');
+  banner.classList.remove('flex');
+}
+
+document.getElementById('meeting-silence-stop').addEventListener('click', () => {
+  hideSilenceBanner();
+  document.getElementById('meeting-stop-btn').click(); // reuse the full stop flow
+});
+document.getElementById('meeting-silence-dismiss').addEventListener('click', hideSilenceBanner);
+
 function endMeetingSession() {
   meetingRecording = false;
   stopMeetingClock();
   meetingUtterances = [];
   meetingAutoFollow = true;
+  hideSilenceBanner();
 }
 
 async function startMeeting() {
@@ -5155,6 +5184,7 @@ async function startMeeting() {
   document.getElementById('meeting-transcript').innerHTML = '';
   document.getElementById('meeting-jump-latest').classList.add('hidden');
   document.getElementById('meeting-notes').value = '';
+  hideSilenceBanner();
   const stopBtn = document.getElementById('meeting-stop-btn');
   stopBtn.disabled = false;
   stopBtn.textContent = 'Stop';
