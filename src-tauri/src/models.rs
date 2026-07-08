@@ -413,13 +413,15 @@ impl ModelManager {
         })
     }
 
-    /// The meeting components an install covers: `speaker` plus the chosen
-    /// summarizer (empty choice -> speaker only, which is never offered alone
-    /// by the UI).
+    /// The meeting components an install covers: `speaker` + `segmentation`
+    /// (both needed for diarization) plus the chosen summarizer (empty choice
+    /// -> models only, which is never offered alone by the UI).
     fn meeting_components(spec: &MeetingSpec, summarizer_id: &str) -> Vec<(String, ComponentSpec)> {
         let mut out = Vec::new();
-        if let Some(c) = spec.components.get("speaker") {
-            out.push(("speaker".to_string(), c.clone()));
+        for name in ["speaker", "segmentation"] {
+            if let Some(c) = spec.components.get(name) {
+                out.push((name.to_string(), c.clone()));
+            }
         }
         if let Some(c) = spec.components.get(summarizer_id) {
             out.push((summarizer_id.to_string(), c.clone()));
@@ -631,6 +633,13 @@ impl ModelManager {
     pub fn speaker_model_path(&self) -> Option<PathBuf> {
         let m = self.manifest();
         let c = m.meeting.as_ref()?.components.get("speaker")?.clone();
+        c.files.first().and_then(|f| self.find_file(&f.rel_path))
+    }
+
+    /// Pyannote segmentation model for offline diarization (meeting stop).
+    pub fn segmentation_model_path(&self) -> Option<PathBuf> {
+        let m = self.manifest();
+        let c = m.meeting.as_ref()?.components.get("segmentation")?.clone();
         c.files.first().and_then(|f| self.find_file(&f.rel_path))
     }
 

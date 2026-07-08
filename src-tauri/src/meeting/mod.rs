@@ -13,6 +13,8 @@
 //! checks `is_active()` on every dictation start path, and `meeting_start`
 //! refuses while dictation records.
 
+pub mod diarize;
+pub mod gallery;
 pub mod loopback;
 pub mod speakers;
 pub mod store;
@@ -53,6 +55,10 @@ struct Session {
     mic: AudioRecorder,
     loopback: Option<AudioRecorder>,
     loopback_notice: Option<String>,
+    /// Loopback speech buffered as (segment-start ms, 16kHz samples) so the
+    /// offline batch pass at stop can reconstruct the timeline and diarize.
+    /// Held only for the meeting's life, discarded with the Session.
+    loopback_audio: Arc<Mutex<Vec<(u64, Vec<f32>)>>>,
     consumers: Vec<std::thread::JoinHandle<()>>,
     autosaver: Option<std::thread::JoinHandle<()>>,
 }
@@ -134,6 +140,7 @@ pub fn start(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
 
     MEETING_ACTIVE.store(true, Ordering::SeqCst);
 
+    let loopback_audio = Arc::new(Mutex::new(Vec::<(u64, Vec<f32>)>::new()));
     let mut consumers = Vec::new();
     consumers.push(spawn_consumer(
         mic_rx,
@@ -142,6 +149,7 @@ pub fn start(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
         started_at,
         utterances.clone(),
         app.clone(),
+        None,
         None,
     ));
     if let Some(rx) = loop_rx {
@@ -153,6 +161,7 @@ pub fn start(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
             utterances.clone(),
             app.clone(),
             labeler,
+            Some(loopback_audio.clone()),
         ));
     }
 
@@ -204,6 +213,7 @@ pub fn start(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
         mic,
         loopback: loopback_rec,
         loopback_notice,
+        loopback_audio,
         consumers,
         autosaver,
     });
@@ -227,7 +237,8 @@ fn spawn_consumer(
     started_at: Instant,
     utterances: Arc<Mutex<Vec<Utterance>>>,
     app: tauri::AppHandle,
-    labeler: Option<speakers::SpeakerLabeler>,
+    mut labeler: Option<speakers::SpeakerLabeler>,
+    audio_buf: Option<Arc<Mutex<Vec<(u64, Vec<f32>)>>>>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::Builder::new()
         .name(format!("meeting-{source}"))
@@ -244,11 +255,16 @@ fn spawn_consumer(
                 // transcriber consumes them. Mic is always "You".
                 let speaker = if source == "mic" {
                     "You".to_string()
-                } else if let Some(l) = labeler.as_ref() {
+                } else if let Some(l) = labeler.as_mut() {
                     l.label(&segment)
                 } else {
                     "Speaker 1".to_string()
                 };
+                // Keep the loopback audio (with its start time) for the batch
+                // diarization pass at stop. Cloned before transcribe consumes it.
+                if let Some(buf) = &audio_buf {
+                    buf.lock().unwrap().push((t_ms, segment.clone()));
+                }
                 match transcriber.transcribe(segment, 16_000) {
                     Ok(text) => {
                         let text = text.trim().to_string();
@@ -313,6 +329,10 @@ pub fn stop(app: tauri::AppHandle, final_notes: String) -> Result<MeetingMeta, S
                 continue;
             }
             let seg_ms = (samples.len() as u64) * 1000 / 16_000;
+            let t_ms = duration_ms.saturating_sub(seg_ms);
+            if source == "system" {
+                session.loopback_audio.lock().unwrap().push((t_ms, samples.clone()));
+            }
             if let Ok(text) = t.transcribe(samples, 16_000) {
                 let text = text.trim().to_string();
                 if !text.is_empty() {
@@ -320,12 +340,17 @@ pub fn stop(app: tauri::AppHandle, final_notes: String) -> Result<MeetingMeta, S
                         source: source.into(),
                         speaker: (if source == "mic" { "You" } else { "Speaker 1" }).into(),
                         text,
-                        t_ms: duration_ms.saturating_sub(seg_ms),
+                        t_ms,
                     });
                 }
             }
         }
     }
+
+    // Offline batch diarization: reconstruct the loopback timeline and relabel
+    // the system utterances accurately. Best-effort — leaves live labels on any
+    // gap (models missing, no system audio, diarizer failure).
+    refine_speakers(&app, &session.meta.id, &session.loopback_audio, duration_ms, &session.utterances);
 
     // Final transcript + index entry.
     let cfg = crate::config::AppConfig::load();
@@ -346,6 +371,109 @@ pub fn stop(app: tauri::AppHandle, final_notes: String) -> Result<MeetingMeta, S
 
     let _ = app.emit("meeting-state", serde_json::json!({ "state": "idle" }));
     Ok(meta)
+}
+
+/// Reconstruct the loopback timeline from buffered speech, run offline
+/// diarization, and relabel the `system` utterances with accurate, gallery-
+/// matched speaker names. Best-effort: returns quietly if the models aren't
+/// present or the diarizer fails, leaving the live labels in place.
+fn refine_speakers(
+    app: &tauri::AppHandle,
+    id: &str,
+    buffer: &Arc<Mutex<Vec<(u64, Vec<f32>)>>>,
+    duration_ms: u64,
+    utterances: &Arc<Mutex<Vec<Utterance>>>,
+) {
+    let mm = crate::models::ModelManager::global();
+    let (Some(seg_model), Some(emb_model)) = (mm.segmentation_model_path(), mm.speaker_model_path())
+    else {
+        return;
+    };
+
+    // Reconstruct a continuous 16kHz waveform: silence everywhere, each buffered
+    // speech segment placed at its start offset (pyannote needs the timeline).
+    let total = (duration_ms as usize) * 16 + 16_000;
+    let mut wave = vec![0.0f32; total];
+    {
+        let buf = buffer.lock().unwrap();
+        if buf.is_empty() {
+            return;
+        }
+        for (t_ms, samples) in buf.iter() {
+            let start = (*t_ms as usize) * 16;
+            if start >= wave.len() {
+                continue;
+            }
+            let end = (start + samples.len()).min(wave.len());
+            wave[start..end].copy_from_slice(&samples[..end - start]);
+        }
+    }
+
+    let _ = app.emit("meeting-state", serde_json::json!({ "state": "diarizing", "id": id }));
+    let Some(diar) = diarize::diarize(&seg_model, &emb_model, &wave) else {
+        return;
+    };
+    if diar.spans.is_empty() {
+        return;
+    }
+
+    // Name each final speaker: gallery match on its voiceprint, else "Speaker N".
+    let dim = diar.voiceprints.first().map(|v| v.len() as i32).unwrap_or(0);
+    let manager = gallery::Gallery::global().build_manager(dim);
+    let labels: Vec<(String, bool)> = diar
+        .voiceprints
+        .iter()
+        .enumerate()
+        .map(|(i, vp)| match manager.as_ref().and_then(|m| m.search(vp, 0.5)) {
+            Some(name) => (name, true),
+            None => (format!("Speaker {}", i + 1), false),
+        })
+        .collect();
+
+    // Strengthen the gallery for anyone we recognized with this fresh voiceprint.
+    for (i, (name, matched)) in labels.iter().enumerate() {
+        if *matched {
+            let _ = gallery::Gallery::global().add(name, diar.voiceprints[i].clone());
+        }
+    }
+
+    // Relabel system utterances by their segment's majority diarized speaker.
+    let mut label_by_tms: std::collections::HashMap<u64, String> = std::collections::HashMap::new();
+    {
+        let buf = buffer.lock().unwrap();
+        for (t_ms, samples) in buf.iter() {
+            let start = *t_ms as f32 / 1000.0;
+            let end = start + samples.len() as f32 / 16_000.0;
+            if let Some(sid) = majority_speaker(&diar.spans, start, end) {
+                if let Some((name, _)) = labels.get(sid) {
+                    label_by_tms.insert(*t_ms, name.clone());
+                }
+            }
+        }
+    }
+
+    let mut utts = utterances.lock().unwrap();
+    for u in utts.iter_mut() {
+        if u.source == "system" {
+            if let Some(name) = label_by_tms.get(&u.t_ms) {
+                u.speaker = name.clone();
+            }
+        }
+    }
+}
+
+/// The diarized speaker with the most overlap over `[start, end)` seconds.
+fn majority_speaker(spans: &[diarize::Span], start: f32, end: f32) -> Option<usize> {
+    let mut acc: std::collections::HashMap<usize, f32> = std::collections::HashMap::new();
+    for s in spans {
+        let overlap = (s.end.min(end) - s.start.max(start)).max(0.0);
+        if overlap > 0.0 {
+            *acc.entry(s.speaker).or_insert(0.0) += overlap;
+        }
+    }
+    acc.into_iter()
+        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|(k, _)| k)
 }
 
 /// Abandon the meeting: stop capture, remove any autosaved transcript and

@@ -352,6 +352,18 @@
           }
         ]
       },
+      "segmentation": {
+        "version": 1,
+        "verify_bytes": true,
+        "files": [
+          {
+            "url": "https://huggingface.co/csukuangfj/sherpa-onnx-pyannote-segmentation-3-0/resolve/main/model.onnx",
+            "rel_path": "segmentation/pyannote_seg_3.onnx",
+            "bytes": 5992913,
+            "role": "model"
+          }
+        ]
+      },
       "sum-qwen3-0.6b": {
         "version": 1,
         "verify_bytes": true,

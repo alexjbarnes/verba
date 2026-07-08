@@ -1,71 +1,80 @@
-//! Experimental speaker labelling for the loopback (system-audio) channel.
+//! Live speaker labelling for the loopback (system-audio) channel.
 //!
-//! Per VAD segment we extract a fixed-dim speaker embedding (sherpa-onnx
-//! 3D-Speaker ERes2Net) and assign it to a running cluster by cosine
-//! similarity — a new "Speaker N" when nothing is close enough. Only the
-//! embeddings and running centroids live in memory; they are dropped when
-//! the meeting ends. No cross-meeting voiceprints are stored: a transcript
-//! doesn't need them and persisted voiceprints are a privacy surface with no
-//! payoff here.
+//! Per VAD segment we extract a speaker embedding (sherpa 3D-Speaker ERes2Net)
+//! and do two things:
+//!   1. Group it into a provisional online cluster with a running voiceprint.
+//!   2. Match that cluster's ACCUMULATED voiceprint against the persisted
+//!      gallery (people named in past meetings). A hit labels the cluster with
+//!      the enrolled name (e.g. "Alex"); otherwise it stays "Speaker N".
 //!
-//! The mic channel is never diarized — it's always "You".
+//! Matching on the running voiceprint (not a single short segment) is what
+//! makes short utterances resolve: a two-word "yeah" inherits its cluster's
+//! identity once the cluster has heard enough. Online clustering is imperfect,
+//! so the FINAL, accurate labels come from the offline batch pass at stop
+//! (mod.rs). The mic channel is never diarized — it is always "You".
 
 use std::path::Path;
-use std::sync::Mutex;
 
-use sherpa_onnx::{SpeakerEmbeddingExtractor, SpeakerEmbeddingExtractorConfig};
+use sherpa_onnx::{SpeakerEmbeddingExtractor, SpeakerEmbeddingExtractorConfig, SpeakerEmbeddingManager};
 
-/// Cosine-similarity threshold for "same speaker". Above it, a segment joins
-/// the nearest cluster; below, it opens a new one. 0.65 is the middle of the
-/// range sherpa's own diarization uses for these embeddings.
-const SIMILARITY_THRESHOLD: f32 = 0.65;
-/// Cap on distinct speakers. Beyond this, a segment folds into its nearest
-/// cluster rather than inventing an (N+1)th label — meetings rarely have
-/// more, and unbounded growth just produces noise.
+use super::gallery::{normalize, Gallery};
+
+/// Cosine threshold for identifying a cluster as an enrolled gallery speaker.
+/// 0.5 was the best live-ID default in the POC (high recall on >=3s of speech,
+/// few false names).
+const MATCH_THRESHOLD: f32 = 0.5;
+/// Cosine threshold for grouping segments into the same provisional cluster.
+const CLUSTER_THRESHOLD: f32 = 0.5;
+/// Cap on distinct provisional speakers so a run of odd embeddings can't invent
+/// an unbounded number of "Speaker N"s live.
 const MAX_SPEAKERS: usize = 8;
 
-/// Owns the embedding extractor plus the running clusterer. `label()` is the
-/// only entry point the session calls, per loopback segment.
+/// Owns the embedding extractor, the enrolled-speaker gallery, and the live
+/// provisional clusterer. `label()` is the only entry the session calls.
 pub struct SpeakerLabeler {
     extractor: SpeakerEmbeddingExtractor,
-    clusterer: Mutex<OnlineClusterer>,
+    gallery: SpeakerEmbeddingManager,
+    clusterer: ProvisionalClusterer,
 }
 
-// The sherpa extractor wraps a raw ORT-session pointer that is safe to use
-// from a single thread but not shared. A SpeakerLabeler is MOVED into exactly
-// one consumer thread (the loopback consumer) and never shared, so asserting
-// Send is sound — the same single-owner pattern recorder.rs's SendPtr uses.
+// The sherpa handles wrap raw ORT pointers that are safe from a single thread
+// but not shared. A SpeakerLabeler is MOVED into exactly one consumer thread
+// (the loopback consumer) and never shared, so asserting Send is sound — the
+// same single-owner pattern recorder.rs's SendPtr uses.
 unsafe impl Send for SpeakerLabeler {}
 
 impl SpeakerLabeler {
-    /// Load the embedding model. `None` when the model isn't downloaded or
-    /// the extractor fails to build — the caller then labels everything
-    /// "Speaker 1".
+    /// Load the embedding model and seed the gallery from disk. `None` when the
+    /// model isn't downloaded or a handle fails to build — the caller then
+    /// labels everything "Speaker 1".
     pub fn new(model_path: &Path) -> Option<Self> {
-        let config = SpeakerEmbeddingExtractorConfig {
+        let extractor = SpeakerEmbeddingExtractor::create(&SpeakerEmbeddingExtractorConfig {
             model: Some(model_path.to_string_lossy().into_owned()),
             num_threads: 1,
             debug: false,
             provider: Some("cpu".into()),
-        };
-        let extractor = SpeakerEmbeddingExtractor::create(&config)?;
-        Some(Self {
-            extractor,
-            clusterer: Mutex::new(OnlineClusterer::new()),
-        })
+        })?;
+        let gallery = Gallery::global().build_manager(extractor.dim())?;
+        Some(Self { extractor, gallery, clusterer: ProvisionalClusterer::new() })
     }
 
     /// Label a 16kHz mono loopback segment. Any failure (too short, embed
-    /// error) falls back to "Speaker 1" so a diarization hiccup never drops
-    /// the utterance.
-    pub fn label(&self, samples: &[f32]) -> String {
-        match self.embed(samples) {
-            Some(emb) => {
-                let id = self.clusterer.lock().unwrap().assign(&emb);
-                format!("Speaker {}", id + 1)
+    /// error) falls back to "Speaker 1" so a hiccup never drops the utterance.
+    pub fn label(&mut self, samples: &[f32]) -> String {
+        let emb = match self.embed(samples) {
+            Some(e) => normalize(&e),
+            None => return "Speaker 1".into(),
+        };
+        let cid = self.clusterer.assign(&emb);
+        // Try to name the cluster from its accumulated voiceprint (stable),
+        // once, then keep the name.
+        if self.clusterer.name(cid).is_none() {
+            let centroid = self.clusterer.centroid(cid);
+            if let Some(name) = self.gallery.search(&centroid, MATCH_THRESHOLD) {
+                self.clusterer.set_name(cid, name);
             }
-            None => "Speaker 1".into(),
         }
+        self.clusterer.name(cid).unwrap_or_else(|| format!("Speaker {}", cid + 1))
     }
 
     fn embed(&self, samples: &[f32]) -> Option<Vec<f32>> {
@@ -79,53 +88,49 @@ impl SpeakerLabeler {
     }
 }
 
-/// Online agglomerative clustering over unit-normalized embeddings. Keeps a
-/// centroid (mean direction) and count per cluster; assignment is nearest
-/// centroid above threshold, else a new cluster.
-pub struct OnlineClusterer {
-    centroids: Vec<Centroid>,
+/// Online agglomerative clustering over unit embeddings, with a running
+/// voiceprint (summed direction = mean) and an optional resolved name per
+/// cluster. Model-free, so it unit-tests without ONNX.
+pub struct ProvisionalClusterer {
+    clusters: Vec<Cluster>,
 }
 
-struct Centroid {
-    /// Sum of the normalized embeddings assigned so far (its direction is the
-    /// mean; magnitude carries the count for incremental update).
+struct Cluster {
+    /// Sum of the assigned unit embeddings; its direction is the mean.
     sum: Vec<f32>,
     count: u32,
+    /// Enrolled name once the gallery has matched this cluster.
+    name: Option<String>,
 }
 
-impl OnlineClusterer {
+impl ProvisionalClusterer {
     pub fn new() -> Self {
-        Self { centroids: Vec::new() }
+        Self { clusters: Vec::new() }
     }
 
-    /// Assign an embedding to a cluster, returning its 0-based index.
+    /// Assign an embedding to the nearest cluster above threshold, else open a
+    /// new one (capped). Returns the 0-based cluster index and folds the
+    /// embedding into that cluster's running voiceprint.
     pub fn assign(&mut self, embedding: &[f32]) -> usize {
         let emb = normalize(embedding);
-
-        // Best existing cluster by cosine similarity (centroids compared by
-        // their mean direction).
         let mut best = None;
-        let mut best_sim = SIMILARITY_THRESHOLD;
-        for (i, c) in self.centroids.iter().enumerate() {
+        let mut best_sim = CLUSTER_THRESHOLD;
+        for (i, c) in self.clusters.iter().enumerate() {
             let sim = cosine_to_mean(&emb, c);
             if sim >= best_sim {
                 best_sim = sim;
                 best = Some(i);
             }
         }
-
         let idx = match best {
             Some(i) => i,
-            None if self.centroids.len() < MAX_SPEAKERS => {
-                self.centroids.push(Centroid { sum: vec![0.0; emb.len()], count: 0 });
-                self.centroids.len() - 1
+            None if self.clusters.len() < MAX_SPEAKERS => {
+                self.clusters.push(Cluster { sum: vec![0.0; emb.len()], count: 0, name: None });
+                self.clusters.len() - 1
             }
-            // At the cap: fold into the nearest cluster regardless of the
-            // threshold (never invent a 9th speaker).
             None => self.nearest(&emb),
         };
-
-        let c = &mut self.centroids[idx];
+        let c = &mut self.clusters[idx];
         for (s, e) in c.sum.iter_mut().zip(emb.iter()) {
             *s += *e;
         }
@@ -133,10 +138,25 @@ impl OnlineClusterer {
         idx
     }
 
-    /// Index of the closest centroid by mean direction (used only at the cap,
-    /// where at least one centroid exists).
+    /// The cluster's mean direction (unit vector), for gallery matching.
+    pub fn centroid(&self, idx: usize) -> Vec<f32> {
+        normalize(&self.clusters[idx].sum)
+    }
+
+    pub fn name(&self, idx: usize) -> Option<String> {
+        self.clusters[idx].name.clone()
+    }
+
+    pub fn set_name(&mut self, idx: usize, name: String) {
+        self.clusters[idx].name = Some(name);
+    }
+
+    pub fn speaker_count(&self) -> usize {
+        self.clusters.len()
+    }
+
     fn nearest(&self, emb: &[f32]) -> usize {
-        self.centroids
+        self.clusters
             .iter()
             .enumerate()
             .max_by(|(_, a), (_, b)| {
@@ -147,24 +167,11 @@ impl OnlineClusterer {
             .map(|(i, _)| i)
             .unwrap_or(0)
     }
-
-    pub fn speaker_count(&self) -> usize {
-        self.centroids.len()
-    }
 }
 
-fn normalize(v: &[f32]) -> Vec<f32> {
-    let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if norm <= f32::EPSILON {
-        return v.to_vec();
-    }
-    v.iter().map(|x| x / norm).collect()
-}
-
-/// Cosine similarity between a unit vector and a centroid's MEAN direction
-/// (sum normalized on the fly, so centroids don't have to be re-normalized on
-/// every update).
-fn cosine_to_mean(unit: &[f32], c: &Centroid) -> f32 {
+/// Cosine similarity between a unit vector and a cluster's MEAN direction (its
+/// sum normalized on the fly, so clusters aren't renormalized every update).
+fn cosine_to_mean(unit: &[f32], c: &Cluster) -> f32 {
     let mean_norm = c.sum.iter().map(|x| x * x).sum::<f32>().sqrt();
     if mean_norm <= f32::EPSILON {
         return 0.0;
@@ -176,11 +183,9 @@ fn cosine_to_mean(unit: &[f32], c: &Centroid) -> f32 {
 mod tests {
     use super::*;
 
-    // Two clearly-separated directions in embedding space must stay in
-    // separate clusters; repeats of each must merge.
     #[test]
     fn separates_and_merges() {
-        let mut c = OnlineClusterer::new();
+        let mut c = ProvisionalClusterer::new();
         let a1 = vec![1.0, 0.0, 0.0, 0.0];
         let a2 = vec![0.98, 0.02, 0.0, 0.0];
         let b1 = vec![0.0, 0.0, 1.0, 0.0];
@@ -191,20 +196,8 @@ mod tests {
     }
 
     #[test]
-    fn near_duplicates_single_cluster() {
-        let mut c = OnlineClusterer::new();
-        for i in 0..5 {
-            let v = vec![1.0, 0.01 * i as f32, 0.0, 0.0];
-            assert_eq!(c.assign(&v), 0);
-        }
-        assert_eq!(c.speaker_count(), 1);
-    }
-
-    #[test]
     fn caps_at_max_speakers() {
-        let mut c = OnlineClusterer::new();
-        // Nine mutually near-orthogonal vectors; the 9th must fold in, not
-        // create a 9th cluster.
+        let mut c = ProvisionalClusterer::new();
         for i in 0..9 {
             let mut v = vec![0.0; 9];
             v[i] = 1.0;
@@ -215,10 +208,29 @@ mod tests {
 
     #[test]
     fn magnitude_invariant() {
-        // Scaling an embedding must not change its cluster (cosine only).
-        let mut c = OnlineClusterer::new();
+        let mut c = ProvisionalClusterer::new();
         assert_eq!(c.assign(&[3.0, 0.0, 0.0]), 0);
         assert_eq!(c.assign(&[0.5, 0.0, 0.0]), 0);
         assert_eq!(c.speaker_count(), 1);
+    }
+
+    #[test]
+    fn name_sticks_once_set() {
+        let mut c = ProvisionalClusterer::new();
+        let idx = c.assign(&[1.0, 0.0, 0.0]);
+        assert!(c.name(idx).is_none());
+        c.set_name(idx, "Alex".into());
+        c.assign(&[0.97, 0.03, 0.0]); // same cluster, more audio
+        assert_eq!(c.name(idx).as_deref(), Some("Alex"));
+    }
+
+    #[test]
+    fn centroid_tracks_mean_direction() {
+        let mut c = ProvisionalClusterer::new();
+        c.assign(&[1.0, 0.0]);
+        c.assign(&[0.0, 1.0]); // orthogonal opens a 2nd cluster... check first
+        let cen = c.centroid(0);
+        let len = (cen[0] * cen[0] + cen[1] * cen[1]).sqrt();
+        assert!((len - 1.0).abs() < 1e-6);
     }
 }
