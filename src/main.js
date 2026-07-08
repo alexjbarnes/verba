@@ -31,6 +31,38 @@ function showConfirm(message, { okLabel = 'Delete', danger = true } = {}) {
   });
 }
 
+// Text-input dialog (window.prompt is unavailable in the webview). Resolves to
+// the trimmed string on confirm (may be empty), or null if cancelled.
+function showPrompt(message, { value = '', okLabel = 'Save', placeholder = '' } = {}) {
+  return new Promise((resolve) => {
+    const dialog = document.getElementById('prompt-dialog');
+    document.getElementById('prompt-msg').textContent = message;
+    const input = document.getElementById('prompt-input');
+    input.value = value;
+    input.placeholder = placeholder;
+    document.getElementById('prompt-ok').textContent = okLabel;
+    dialog.classList.remove('hidden');
+    dialog.classList.add('flex');
+    input.focus();
+    input.select();
+
+    const cleanup = (result) => {
+      dialog.classList.add('hidden');
+      dialog.classList.remove('flex');
+      document.getElementById('prompt-ok').onclick = null;
+      document.getElementById('prompt-cancel').onclick = null;
+      input.onkeydown = null;
+      resolve(result);
+    };
+    document.getElementById('prompt-ok').onclick = () => cleanup(input.value.trim());
+    document.getElementById('prompt-cancel').onclick = () => cleanup(null);
+    input.onkeydown = (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); cleanup(input.value.trim()); }
+      else if (e.key === 'Escape') { e.preventDefault(); cleanup(null); }
+    };
+  });
+}
+
 // Gate a voice's (possibly large) model download behind a prompt. Returns true
 // if the model is already on disk or the user agreed to fetch it.
 async function confirmVoiceDownload(model) {
@@ -5168,12 +5200,19 @@ document.getElementById('meeting-notes').addEventListener('input', (e) => {
 
 document.getElementById('meeting-stop-btn').addEventListener('click', async () => {
   const btn = document.getElementById('meeting-stop-btn');
+  // Ask for a name before stopping. Cancel backs out (keeps recording); an
+  // empty name keeps the auto-generated "Meeting <date>" title.
+  const title = await showPrompt('Name this meeting', {
+    okLabel: 'Save & stop',
+    placeholder: 'e.g. Weekly sync',
+  });
+  if (title === null) return;
   btn.disabled = true;
   btn.textContent = 'Stopping…';
   clearTimeout(meetingNotesSaveTimer);
   try {
     const notes = document.getElementById('meeting-notes').value;
-    const meta = await invoke('meeting_stop', { notes });
+    const meta = await invoke('meeting_stop', { notes, title: title || null });
     endMeetingSession();
     showToast('Meeting saved');
     openMeetingView(meta.id);
@@ -5467,21 +5506,35 @@ document.getElementById('meeting-transcript-toggle').addEventListener('click', a
 async function renderMeetingSpeakers(id) {
   const section = document.getElementById('meeting-speakers-section');
   const wrap = document.getElementById('meeting-speakers');
-  let names = [];
-  try { names = await invoke('meeting_speakers', { id }); } catch (_) {}
-  if (!Array.isArray(names) || !names.length) {
+  let speakers = [];
+  try { speakers = await invoke('meeting_speakers', { id }); } catch (_) {}
+  if (!Array.isArray(speakers) || !speakers.length) {
     section.classList.add('hidden');
     wrap.innerHTML = '';
     return;
   }
   section.classList.remove('hidden');
+  wrap.className = 'space-y-2.5';
   wrap.innerHTML = '';
-  for (const name of names) {
+  for (const sp of speakers) {
+    const row = document.createElement('div');
+    row.className = 'flex items-center gap-3';
     const chip = document.createElement('button');
-    chip.className = 'group inline-flex items-center gap-1.5 min-h-9 px-3 rounded-full bg-surface-container-highest text-sm text-on-surface hover:bg-primary/10 transition-colors cursor-pointer';
-    chip.innerHTML = `<span>${escapeHtml(name)}</span><span class="material-symbols-outlined text-sm text-on-surface-variant group-hover:text-primary">edit</span>`;
-    chip.addEventListener('click', () => startRenameSpeaker(id, name, chip));
-    wrap.appendChild(chip);
+    // Unnamed speakers are highlighted so the "who is this?" ask stands out.
+    chip.className = 'group shrink-0 inline-flex items-center gap-1.5 min-h-9 px-3 rounded-full text-sm cursor-pointer transition-colors ' +
+      (sp.unnamed
+        ? 'bg-primary/15 text-primary hover:bg-primary/25'
+        : 'bg-surface-container-highest text-on-surface hover:bg-primary/10');
+    chip.innerHTML = `<span>${escapeHtml(sp.name)}</span><span class="material-symbols-outlined text-sm opacity-70 group-hover:opacity-100">edit</span>`;
+    chip.addEventListener('click', () => startRenameSpeaker(id, sp.name, chip));
+    row.appendChild(chip);
+    if (sp.sample) {
+      const snip = document.createElement('p');
+      snip.className = 'text-xs text-on-surface-variant/70 truncate flex-1 min-w-0';
+      snip.textContent = `“${sp.sample}”`;
+      row.appendChild(snip);
+    }
+    wrap.appendChild(row);
   }
 }
 

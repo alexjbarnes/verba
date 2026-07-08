@@ -578,10 +578,14 @@ fn meeting_start(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
 
 #[cfg(not(target_os = "android"))]
 #[tauri::command]
-async fn meeting_stop(app: tauri::AppHandle, notes: Option<String>) -> Result<meeting::store::MeetingMeta, String> {
-    // Stop flushes tails through the transcriber — real work, so async off
-    // the main thread.
-    tauri::async_runtime::spawn_blocking(move || meeting::stop(app, notes.unwrap_or_default()))
+async fn meeting_stop(
+    app: tauri::AppHandle,
+    notes: Option<String>,
+    title: Option<String>,
+) -> Result<meeting::store::MeetingMeta, String> {
+    // Stop flushes tails through the transcriber and runs the offline speaker
+    // pass — real work, so async off the main thread.
+    tauri::async_runtime::spawn_blocking(move || meeting::stop(app, notes.unwrap_or_default(), title))
         .await
         .map_err(|e| format!("stop task: {e}"))?
 }
@@ -668,7 +672,7 @@ fn meeting_rename_speaker(
 /// Distinct non-"You" speakers in a finished meeting, for the rename UI.
 #[cfg(not(target_os = "android"))]
 #[tauri::command]
-fn meeting_speakers(id: String) -> Result<Vec<String>, String> {
+fn meeting_speakers(id: String) -> Result<Vec<meeting::SpeakerInfo>, String> {
     meeting::speakers(&id)
 }
 
@@ -680,7 +684,11 @@ fn meeting_start(_app: tauri::AppHandle) -> Result<serde_json::Value, String> {
 }
 #[cfg(target_os = "android")]
 #[tauri::command]
-async fn meeting_stop(_app: tauri::AppHandle, _notes: Option<String>) -> Result<serde_json::Value, String> {
+async fn meeting_stop(
+    _app: tauri::AppHandle,
+    _notes: Option<String>,
+    _title: Option<String>,
+) -> Result<serde_json::Value, String> {
     Err("Meeting mode is desktop only".into())
 }
 #[cfg(target_os = "android")]

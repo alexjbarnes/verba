@@ -289,7 +289,11 @@ fn spawn_consumer(
 
 /// Stop the meeting: flush tails, write the final transcript, index it.
 /// Returns the finished meta (summarization is a separate step).
-pub fn stop(app: tauri::AppHandle, final_notes: String) -> Result<MeetingMeta, String> {
+pub fn stop(
+    app: tauri::AppHandle,
+    final_notes: String,
+    title: Option<String>,
+) -> Result<MeetingMeta, String> {
     let session = session_slot()
         .lock()
         .unwrap()
@@ -360,6 +364,12 @@ pub fn stop(app: tauri::AppHandle, final_notes: String) -> Result<MeetingMeta, S
     let mut meta = session.meta.clone();
     meta.duration_ms = duration_ms;
     meta.utterance_count = utts.len() as u32;
+    if let Some(t) = title {
+        let t = t.trim();
+        if !t.is_empty() {
+            meta.title = t.to_string();
+        }
+    }
     let started_local = chrono::DateTime::parse_from_rfc3339(&meta.started)
         .map(|d| d.with_timezone(&chrono::Local).format("%Y-%m-%d %H-%M").to_string())
         .unwrap_or_else(|_| "meeting".into());
@@ -679,9 +689,19 @@ pub fn rename_speaker(id: String, from: String, to: String) -> Result<MeetingMet
     Ok(meta)
 }
 
-/// Distinct non-"You" speakers in a finished meeting's transcript, for the UI's
-/// rename affordance.
-pub fn speakers(id: &str) -> Result<Vec<String>, String> {
+/// A speaker in a finished meeting, with a recognizable sample utterance so the
+/// user can tell who "Speaker 2" is when naming them.
+#[derive(serde::Serialize)]
+pub struct SpeakerInfo {
+    pub name: String,
+    pub sample: String,
+    /// Whether the label is still an unnamed "Speaker N".
+    pub unnamed: bool,
+}
+
+/// Distinct non-"You" speakers in a finished meeting's transcript, each with
+/// their longest utterance as a sample, for the naming UI.
+pub fn speakers(id: &str) -> Result<Vec<SpeakerInfo>, String> {
     let meta = store::MeetingStore::global().get(id).ok_or("meeting not found")?;
     if meta.transcript_path.is_empty() {
         return Err("no transcript".into());
@@ -689,11 +709,28 @@ pub fn speakers(id: &str) -> Result<Vec<String>, String> {
     let md = std::fs::read_to_string(&meta.transcript_path)
         .map_err(|e| format!("read transcript: {e}"))?;
     let (_, lines) = parse_transcript(&md);
-    let mut set = std::collections::BTreeSet::new();
+    // Longest utterance per speaker is the most recognizable sample.
+    let mut best: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
     for l in lines {
-        if l.speaker != "You" {
-            set.insert(l.speaker);
+        if l.speaker == "You" {
+            continue;
+        }
+        let entry = best.entry(l.speaker).or_default();
+        if l.text.len() > entry.len() {
+            *entry = l.text;
         }
     }
-    Ok(set.into_iter().collect())
+    Ok(best
+        .into_iter()
+        .map(|(name, text)| {
+            let s = text.trim();
+            let sample = if s.chars().count() > 140 {
+                format!("{}…", s.chars().take(140).collect::<String>())
+            } else {
+                s.to_string()
+            };
+            let unnamed = name.starts_with("Speaker ");
+            SpeakerInfo { name, sample, unnamed }
+        })
+        .collect())
 }
