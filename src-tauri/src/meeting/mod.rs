@@ -764,6 +764,17 @@ pub fn rename_speaker(id: String, from: String, to: String) -> Result<MeetingMet
     let filename = path.file_name().and_then(|f| f.to_str()).ok_or("bad transcript path")?;
     store::write_markdown(dir, filename, &new_md)?;
 
+    // Keep the structured sidecar (what transcript() reads) in sync with the
+    // markdown, carrying voiceprints forward under the new label.
+    if let Some(mut utts) = store::load_transcript(&id) {
+        for u in utts.iter_mut() {
+            if u.speaker == from {
+                u.speaker = to.clone();
+            }
+        }
+        let _ = store::save_transcript(&id, &utts);
+    }
+
     // Refresh the unnamed-speaker count so the meetings-list badge updates.
     let (_, lines) = parse_transcript(&new_md);
     let mut remaining = std::collections::BTreeSet::new();
