@@ -76,3 +76,6 @@ __pycache__/
 
 # Local R2 upload staging (models live on R2, not in git)
 r2-staging/
+
+# TTS A/B sample WAVs (local, throwaway)
+tts-samples/
