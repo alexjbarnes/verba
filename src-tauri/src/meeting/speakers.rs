@@ -126,6 +126,10 @@ impl Embedder {
 /// cluster. Model-free, so it unit-tests without ONNX.
 pub struct ProvisionalClusterer {
     clusters: Vec<Cluster>,
+    /// Cosine below which a segment opens a new cluster. Live labelling uses the
+    /// between-speaker default; the within-speaker split pass raises it so one
+    /// person's noisy short utterances don't fracture into phantom signatures.
+    threshold: f32,
 }
 
 struct Cluster {
@@ -138,7 +142,12 @@ struct Cluster {
 
 impl ProvisionalClusterer {
     pub fn new() -> Self {
-        Self { clusters: Vec::new() }
+        Self { clusters: Vec::new(), threshold: CLUSTER_THRESHOLD }
+    }
+
+    /// A clusterer with a custom split threshold (higher = more conservative).
+    pub fn with_threshold(threshold: f32) -> Self {
+        Self { clusters: Vec::new(), threshold }
     }
 
     /// Assign an embedding to the nearest cluster above threshold, else open a
@@ -147,7 +156,7 @@ impl ProvisionalClusterer {
     pub fn assign(&mut self, embedding: &[f32]) -> usize {
         let emb = normalize(embedding);
         let mut best = None;
-        let mut best_sim = CLUSTER_THRESHOLD;
+        let mut best_sim = self.threshold;
         for (i, c) in self.clusters.iter().enumerate() {
             let sim = cosine_to_mean(&emb, c);
             if sim >= best_sim {

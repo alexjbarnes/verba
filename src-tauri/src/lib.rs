@@ -684,6 +684,25 @@ fn meeting_transcript(id: String) -> Result<Vec<meeting::TranscriptEntry>, Strin
     meeting::transcript(&id)
 }
 
+/// Voiceprint signatures within each speaker (the split UI groups by these).
+#[cfg(not(target_os = "android"))]
+#[tauri::command]
+fn meeting_signatures(id: String) -> Result<Vec<meeting::SpeakerSignatures>, String> {
+    meeting::signatures(&id)
+}
+
+/// Split: reassign the given transcript lines to another speaker (each line's
+/// voiceprint travels with it).
+#[cfg(not(target_os = "android"))]
+#[tauri::command]
+fn meeting_reassign_lines(
+    id: String,
+    lines: Vec<usize>,
+    to: String,
+) -> Result<meeting::store::MeetingMeta, String> {
+    meeting::reassign_lines(&id, lines, to)
+}
+
 /// Replace a meeting's summary (from the editable/dictated summary panel).
 #[cfg(not(target_os = "android"))]
 #[tauri::command]
@@ -782,6 +801,16 @@ fn meeting_speakers(_id: String) -> Result<serde_json::Value, String> {
 #[cfg(target_os = "android")]
 #[tauri::command]
 fn meeting_transcript(_id: String) -> Result<serde_json::Value, String> {
+    Err("Meeting mode is desktop only".into())
+}
+#[cfg(target_os = "android")]
+#[tauri::command]
+fn meeting_signatures(_id: String) -> Result<serde_json::Value, String> {
+    Err("Meeting mode is desktop only".into())
+}
+#[cfg(target_os = "android")]
+#[tauri::command]
+fn meeting_reassign_lines(_id: String, _lines: Vec<usize>, _to: String) -> Result<serde_json::Value, String> {
     Err("Meeting mode is desktop only".into())
 }
 #[cfg(target_os = "android")]
@@ -1771,6 +1800,8 @@ pub fn run() {
             meeting_rename_speaker,
             meeting_speakers,
             meeting_transcript,
+            meeting_signatures,
+            meeting_reassign_lines,
             meeting_set_summary,
             meeting_gallery_speakers,
             meeting_gallery_rename,

@@ -742,10 +742,14 @@ pub fn rename_speaker(id: String, from: String, to: String) -> Result<MeetingMet
         return Err("no transcript".into());
     }
 
-    // Enroll the voiceprint we saved for `from` under `to`, then relabel it in
-    // the sidecar so a later merge/rename still resolves.
+    // Enroll `from`'s voiceprint under `to`. Prefer the per-utterance embeddings
+    // in the structured sidecar (they also cover split-created speakers, which
+    // the stop-time per-speaker sidecar never had); fall back to that sidecar for
+    // meetings recorded before per-utterance voiceprints.
     let mut vps = gallery::load_meeting_voiceprints(&id);
-    if let Some(v) = vps.iter().find(|v| v.label == from) {
+    if let Some(vp) = store::load_transcript(&id).and_then(|utts| speaker_voiceprint_from(&utts, &from)) {
+        gallery::Gallery::global().add(&to, vp)?;
+    } else if let Some(v) = vps.iter().find(|v| v.label == from) {
         gallery::Gallery::global().add(&to, v.embedding.clone())?;
     }
     for v in vps.iter_mut() {
@@ -893,6 +897,155 @@ pub fn transcript(id: &str) -> Result<Vec<TranscriptEntry>, String> {
         }
     }
     Ok(out)
+}
+
+/// A cluster of one speaker's utterances that share a voiceprint — the unit of a
+/// split. A speaker holding more than one signature is a blend the diarizer
+/// merged, and the UI offers to peel a signature out to another speaker.
+#[derive(serde::Serialize)]
+pub struct Signature {
+    /// Structured-transcript line indices in this signature.
+    pub lines: Vec<usize>,
+    pub count: usize,
+    /// The signature's longest line, so the user can recognize the voice.
+    pub sample: String,
+}
+
+#[derive(serde::Serialize)]
+pub struct SpeakerSignatures {
+    pub speaker: String,
+    pub signatures: Vec<Signature>,
+}
+
+/// Group each non-"You" speaker's utterances by voiceprint into sub-signatures,
+/// so the UI can offer to split a stray one out. Needs the structured sidecar
+/// (per-utterance embeddings); meetings recorded before it return an error.
+pub fn signatures(id: &str) -> Result<Vec<SpeakerSignatures>, String> {
+    let utts = store::load_transcript(id)
+        .ok_or("this meeting has no per-utterance voiceprints (recorded before the change)")?;
+    let mut by_speaker: std::collections::BTreeMap<String, Vec<usize>> =
+        std::collections::BTreeMap::new();
+    for (i, u) in utts.iter().enumerate() {
+        if u.speaker != "You" {
+            by_speaker.entry(u.speaker.clone()).or_default().push(i);
+        }
+    }
+    let mut out = Vec::new();
+    for (speaker, idxs) in by_speaker {
+        // Cluster this speaker's utterance voiceprints. One person -> one group;
+        // a blend of two -> two groups (the same threshold that separates people
+        // live). Lines without an embedding are left in no group.
+        // Conservative threshold: only a clearly different voice breaks off, so
+        // one person's short/noisy utterances don't fracture into phantom splits.
+        let mut clusterer = speakers::ProvisionalClusterer::with_threshold(0.62);
+        let mut groups: std::collections::BTreeMap<usize, Vec<usize>> =
+            std::collections::BTreeMap::new();
+        for &i in &idxs {
+            let Some(emb) = &utts[i].embedding else { continue };
+            let c = clusterer.assign(emb);
+            groups.entry(c).or_default().push(i);
+        }
+        let signatures: Vec<Signature> = groups
+            .into_values()
+            .map(|lines| {
+                let sample: String = lines
+                    .iter()
+                    .map(|&i| utts[i].text.as_str())
+                    .max_by_key(|t| t.len())
+                    .unwrap_or("")
+                    .chars()
+                    .take(100)
+                    .collect();
+                Signature { count: lines.len(), lines, sample }
+            })
+            .collect();
+        out.push(SpeakerSignatures { speaker, signatures });
+    }
+    Ok(out)
+}
+
+/// Reassign transcript lines (by structured-transcript index) to a different
+/// speaker — the split. Each line's voiceprint moves with it. Rewrites the
+/// sidecar (source of truth) and regenerates the markdown export, preserving the
+/// user's notes, then enrolls the moved voiceprint under `to` if it's a name.
+pub fn reassign_lines(id: &str, indices: Vec<usize>, to: String) -> Result<MeetingMeta, String> {
+    let to = to.trim().to_string();
+    if to.is_empty() {
+        return Err("name is empty".into());
+    }
+    let store = store::MeetingStore::global();
+    let mut meta = store.get(id).ok_or("meeting not found")?;
+    if meta.transcript_path.is_empty() {
+        return Err("no transcript".into());
+    }
+    let mut utts = store::load_transcript(id).ok_or("no structured transcript for this meeting")?;
+    let set: std::collections::HashSet<usize> = indices.into_iter().collect();
+    let mut changed = false;
+    for (i, u) in utts.iter_mut().enumerate() {
+        if set.contains(&i) && u.speaker != to {
+            u.speaker = to.clone();
+            changed = true;
+        }
+    }
+    if !changed {
+        return Ok(meta);
+    }
+    store::save_transcript(id, &utts)?;
+
+    // Regenerate the markdown export from the sidecar, preserving the notes.
+    let md = std::fs::read_to_string(&meta.transcript_path).unwrap_or_default();
+    let (notes, _) = parse_transcript(&md);
+    let new_md = store::transcript_markdown(&meta, &notes, &utts);
+    let path = std::path::PathBuf::from(&meta.transcript_path);
+    let dir = path.parent().and_then(|p| p.to_str()).ok_or("bad transcript path")?;
+    let filename = path.file_name().and_then(|f| f.to_str()).ok_or("bad transcript path")?;
+    store::write_markdown(dir, filename, &new_md)?;
+
+    // A named target (not "Speaker N") enrolls, so the split person is
+    // recognized in future meetings.
+    if !to.starts_with("Speaker ") {
+        if let Some(vp) = speaker_voiceprint_from(&utts, &to) {
+            let _ = gallery::Gallery::global().add(&to, vp);
+        }
+    }
+
+    meta.unnamed_speakers = count_unnamed(&utts);
+    store.upsert(meta.clone())?;
+    Ok(meta)
+}
+
+/// Mean, unit-normalized voiceprint of a speaker's utterances (from the
+/// structured sidecar), or None if none carry an embedding.
+fn speaker_voiceprint_from(utts: &[Utterance], speaker: &str) -> Option<Vec<f32>> {
+    let mut sum: Vec<f32> = Vec::new();
+    let mut n = 0u32;
+    for u in utts {
+        if u.speaker == speaker {
+            if let Some(e) = &u.embedding {
+                if sum.is_empty() {
+                    sum = vec![0.0; e.len()];
+                }
+                if sum.len() == e.len() {
+                    for (s, x) in sum.iter_mut().zip(e) {
+                        *s += x;
+                    }
+                    n += 1;
+                }
+            }
+        }
+    }
+    (n > 0).then(|| gallery::normalize(&sum))
+}
+
+/// Distinct still-unnamed "Speaker N" system speakers, for the meetings badge.
+fn count_unnamed(utts: &[Utterance]) -> u32 {
+    let mut s = std::collections::BTreeSet::new();
+    for u in utts {
+        if u.source == "system" && u.speaker.starts_with("Speaker ") {
+            s.insert(u.speaker.clone());
+        }
+    }
+    s.len() as u32
 }
 
 /// Replace a meeting's summary markdown — used by the editable summary panel,

@@ -5722,6 +5722,13 @@ async function renderMeetingSpeakers(id) {
   section.classList.remove('hidden');
   wrap.className = 'space-y-2.5';
   wrap.innerHTML = '';
+  // Voiceprint signatures per speaker: more than one means the diarizer blended
+  // two voices, and we offer to split the stray one out.
+  let sigMap = {};
+  try {
+    const sigs = await invoke('meeting_signatures', { id });
+    for (const s of sigs) if (s.signatures.length > 1) sigMap[s.speaker] = s.signatures;
+  } catch (_) {}
   for (const sp of speakers) {
     const row = document.createElement('div');
     row.className = 'flex items-center gap-3';
@@ -5751,12 +5758,62 @@ async function renderMeetingSpeakers(id) {
       row.appendChild(snip);
     }
     wrap.appendChild(row);
+    if (sigMap[sp.name]) appendSplitPanel(wrap, id, sp.name, sigMap[sp.name], speakers);
   }
   const unnamed = speakers.filter((s) => s.unnamed).length;
   document.getElementById('meeting-speakers-count').textContent = unnamed ? ` · ${unnamed} to name` : '';
   document.getElementById('meeting-speakers-hint').textContent = unnamed
     ? `${unnamed} speaker${unnamed > 1 ? 's' : ''} to name. Naming them lets Verba recognize them in future meetings.`
     : 'Naming speakers lets Verba recognize them in future meetings.';
+}
+
+// A speaker holding more than one voiceprint signature is a blend. Show each
+// signature with a sample line so the user can split the stray voice out to a
+// fresh speaker (its lines and their voiceprints move together).
+function appendSplitPanel(wrap, id, speaker, sigs, speakers) {
+  const panel = document.createElement('div');
+  panel.className = 'ml-3 pl-3 border-l-2 border-primary/30 space-y-1.5';
+  const head = document.createElement('p');
+  head.className = 'text-xs text-on-surface-variant/80 flex items-center gap-1';
+  head.innerHTML = `<span class="material-symbols-outlined text-sm">alt_route</span>${sigs.length} voices detected in ${escapeHtml(speaker)} — split any that isn't them`;
+  panel.appendChild(head);
+  for (const sig of sigs) {
+    const r = document.createElement('div');
+    r.className = 'flex items-center gap-2';
+    const info = document.createElement('span');
+    info.className = 'text-xs text-on-surface-variant flex-1 min-w-0 truncate';
+    const n = sig.count;
+    info.textContent = `${n} line${n > 1 ? 's' : ''} · “${sig.sample}”`;
+    const btn = document.createElement('button');
+    btn.className = 'shrink-0 min-h-8 px-2.5 text-xs font-semibold text-primary rounded-lg hover:bg-primary/10 transition cursor-pointer';
+    btn.textContent = 'Split out';
+    btn.addEventListener('click', async () => {
+      const to = nextSpeakerName(speakers);
+      try {
+        await invoke('meeting_reassign_lines', { id, lines: sig.lines, to });
+        showToast(`Split ${n} line${n > 1 ? 's' : ''} to ${to}`);
+        if (meetingTranscriptFilter === speaker) meetingTranscriptFilter = null;
+        await loadMeetingTranscript(id);
+        renderMeetingSpeakers(id);
+      } catch (err) {
+        showToast('Split failed: ' + err);
+      }
+    });
+    r.appendChild(info);
+    r.appendChild(btn);
+    panel.appendChild(r);
+  }
+  wrap.appendChild(panel);
+}
+
+// The next free "Speaker N" for a split-out voice; the user renames it after.
+function nextSpeakerName(speakers) {
+  let max = 0;
+  for (const s of speakers) {
+    const m = /^Speaker (\d+)$/.exec(s.name);
+    if (m) max = Math.max(max, Number(m[1]));
+  }
+  return `Speaker ${max + 1}`;
 }
 
 function startRenameSpeaker(id, from, chip) {
