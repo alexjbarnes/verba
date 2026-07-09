@@ -690,6 +690,29 @@ fn meeting_set_summary(id: String, body: String) -> Result<meeting::store::Meeti
     meeting::set_summary(&id, &body)
 }
 
+/// Cross-meeting known speakers — the enrolled voiceprint gallery, for the
+/// Settings > Meeting speaker-management section.
+#[cfg(not(target_os = "android"))]
+#[tauri::command]
+fn meeting_gallery_speakers() -> Vec<String> {
+    meeting::gallery::Gallery::global().names()
+}
+
+/// Rename a known speaker everywhere they're enrolled.
+#[cfg(not(target_os = "android"))]
+#[tauri::command]
+fn meeting_gallery_rename(from: String, to: String) -> Result<(), String> {
+    meeting::gallery::Gallery::global().rename(&from, &to)
+}
+
+/// Forget a known speaker (drops their enrolled voiceprints so they're no
+/// longer recognized in future meetings).
+#[cfg(not(target_os = "android"))]
+#[tauri::command]
+fn meeting_gallery_forget(name: String) -> Result<(), String> {
+    meeting::gallery::Gallery::global().remove(&name)
+}
+
 // Android stubs: same names/signatures, always an error.
 #[cfg(target_os = "android")]
 #[tauri::command]
@@ -763,6 +786,21 @@ fn meeting_transcript(_id: String) -> Result<serde_json::Value, String> {
 #[cfg(target_os = "android")]
 #[tauri::command]
 fn meeting_set_summary(_id: String, _body: String) -> Result<serde_json::Value, String> {
+    Err("Meeting mode is desktop only".into())
+}
+#[cfg(target_os = "android")]
+#[tauri::command]
+fn meeting_gallery_speakers() -> Vec<String> {
+    Vec::new()
+}
+#[cfg(target_os = "android")]
+#[tauri::command]
+fn meeting_gallery_rename(_from: String, _to: String) -> Result<(), String> {
+    Err("Meeting mode is desktop only".into())
+}
+#[cfg(target_os = "android")]
+#[tauri::command]
+fn meeting_gallery_forget(_name: String) -> Result<(), String> {
     Err("Meeting mode is desktop only".into())
 }
 
@@ -1733,6 +1771,9 @@ pub fn run() {
             meeting_speakers,
             meeting_transcript,
             meeting_set_summary,
+            meeting_gallery_speakers,
+            meeting_gallery_rename,
+            meeting_gallery_forget,
             storage_summary,
             storage_clear,
             list_history,

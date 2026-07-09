@@ -133,7 +133,7 @@ const TAB_LOADERS = {
   // Re-check the dictation-package banner condition every time History is
   // shown, not just at boot (state changes when the user installs it).
   history: () => { loadHistory(); loadPackagesStatus(); },
-  general: () => { loadVocab(); loadPackagesStatus(); loadStorage(); if (isDesktop) loadMeetingModels(); applySettingsDefaultExpand(); },
+  general: () => { loadVocab(); loadPackagesStatus(); loadStorage(); if (isDesktop) { loadMeetingModels(); loadMeetingGallery(); } applySettingsDefaultExpand(); },
   snippets: () => loadSnippets(),
   library: () => loadLibrary(),
   feeds: () => loadFeeds(),
@@ -5905,6 +5905,50 @@ async function loadMeetingModels() {
       : (recommended ? recommended.id : (meetingModels[0] ? meetingModels[0].id : ''));
   }
   renderMeetingModelList();
+}
+
+// Cross-meeting known speakers (Settings > Meeting > Known speakers): the
+// enrolled voiceprint gallery, with rename + forget.
+async function loadMeetingGallery() {
+  if (!isDesktop) return;
+  const list = document.getElementById('meeting-gallery-list');
+  const empty = document.getElementById('meeting-gallery-empty');
+  if (!list) return;
+  let names = [];
+  try { names = await invoke('meeting_gallery_speakers'); } catch (_) {}
+  list.innerHTML = '';
+  empty.classList.toggle('hidden', names.length > 0);
+  for (const name of names) {
+    const row = document.createElement('div');
+    row.className = 'flex items-center gap-2 py-1.5';
+    const label = document.createElement('span');
+    label.className = 'flex-1 min-w-0 truncate text-sm text-on-surface';
+    label.textContent = name;
+    const rename = document.createElement('button');
+    rename.className = 'shrink-0 w-9 h-9 flex items-center justify-center text-on-surface-variant hover:text-primary rounded-lg hover:bg-surface-container-highest transition-colors cursor-pointer';
+    rename.title = `Rename ${name}`;
+    rename.innerHTML = '<span class="material-symbols-outlined text-[20px]">edit</span>';
+    rename.addEventListener('click', async () => {
+      const to = await showPrompt('Rename speaker', { value: name, okLabel: 'Rename' });
+      if (!to || to === name) return;
+      try { await invoke('meeting_gallery_rename', { from: name, to }); loadMeetingGallery(); }
+      catch (err) { showToast('Rename failed: ' + err); }
+    });
+    const forget = document.createElement('button');
+    forget.className = 'shrink-0 w-9 h-9 flex items-center justify-center text-on-surface-variant hover:text-error rounded-lg hover:bg-surface-container-highest transition-colors cursor-pointer';
+    forget.title = `Forget ${name}`;
+    forget.innerHTML = '<span class="material-symbols-outlined text-[20px]">delete</span>';
+    forget.addEventListener('click', async () => {
+      const ok = await showConfirm(`Forget ${name}? Verba will stop recognizing them in future meetings.`, { okLabel: 'Forget' });
+      if (!ok) return;
+      try { await invoke('meeting_gallery_forget', { name }); loadMeetingGallery(); }
+      catch (err) { showToast('Forget failed: ' + err); }
+    });
+    row.appendChild(label);
+    row.appendChild(rename);
+    row.appendChild(forget);
+    list.appendChild(row);
+  }
 }
 
 document.getElementById('pkg-meeting-btn').addEventListener('click', async () => {
