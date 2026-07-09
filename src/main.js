@@ -5946,9 +5946,58 @@ async function loadMeetingGallery() {
     });
     row.appendChild(label);
     row.appendChild(rename);
+    // Merge is only meaningful with someone to merge into. It reuses the
+    // gallery rename, which unions voiceprints when the target already exists.
+    if (names.length > 1) {
+      const merge = document.createElement('button');
+      merge.className = 'shrink-0 w-9 h-9 flex items-center justify-center text-on-surface-variant hover:text-primary rounded-lg hover:bg-surface-container-highest transition-colors cursor-pointer';
+      merge.title = `Merge ${name} into another speaker`;
+      merge.innerHTML = '<span class="material-symbols-outlined text-[20px]">call_merge</span>';
+      merge.addEventListener('click', () => startMergeSpeaker(name, names, row));
+      row.appendChild(merge);
+    }
     row.appendChild(forget);
     list.appendChild(row);
   }
+}
+
+// Merge one known speaker into another (same person enrolled twice). Swaps the
+// row for a target picker; confirming unions their voiceprints under the target.
+function startMergeSpeaker(from, names, row) {
+  const others = names.filter((n) => n !== from);
+  if (!others.length) return;
+  row.innerHTML = '';
+  const lbl = document.createElement('span');
+  lbl.className = 'text-sm text-on-surface-variant shrink-0';
+  lbl.textContent = `Merge ${from} into`;
+  const sel = document.createElement('select');
+  sel.className = 'flex-1 min-w-0 bg-surface-container-highest border border-outline-variant/30 rounded-lg px-2 py-1.5 text-sm text-on-surface cursor-pointer';
+  for (const n of others) {
+    const o = document.createElement('option');
+    o.value = n; o.textContent = n;
+    sel.appendChild(o);
+  }
+  const go = document.createElement('button');
+  go.className = 'shrink-0 min-h-9 px-3 text-xs font-semibold bg-primary text-on-primary rounded-lg hover:brightness-110 transition cursor-pointer';
+  go.textContent = 'Merge';
+  go.addEventListener('click', async () => {
+    const to = sel.value;
+    try {
+      await invoke('meeting_gallery_rename', { from, to });
+      showToast(`Merged into ${to}`);
+    } catch (err) {
+      showToast('Merge failed: ' + err);
+    }
+    loadMeetingGallery();
+  });
+  const cancel = document.createElement('button');
+  cancel.className = 'shrink-0 w-9 h-9 flex items-center justify-center text-on-surface-variant hover:text-on-surface rounded-lg hover:bg-surface-container-highest transition cursor-pointer';
+  cancel.innerHTML = '<span class="material-symbols-outlined text-[20px]">close</span>';
+  cancel.addEventListener('click', () => loadMeetingGallery());
+  row.appendChild(lbl);
+  row.appendChild(sel);
+  row.appendChild(go);
+  row.appendChild(cancel);
 }
 
 document.getElementById('pkg-meeting-btn').addEventListener('click', async () => {
