@@ -4,6 +4,7 @@
 #   just setup         # first-time desktop setup: shared-ORT libs + grammar models
 #   just dev           # fast desktop dev loop (hot-reload; NO system-audio capture)
 #   just desktop       # build + run the signed .app (Meeting system-audio works)
+#   just dev-cert      # one-time macOS: self-signed cert so TCC grants persist
 #   just setup-android # first-time Android setup: sherpa-onnx, ORT, grammar models
 #   just apk           # build debug APK
 #   just apk-release   # build release APK
@@ -55,17 +56,52 @@ desktop:
     #!/usr/bin/env bash
     set -euo pipefail
     echo "==> Building + signing debug .app bundle (first build takes a while)..."
+    # Prefer the stable self-signed dev cert (see 'just dev-cert') so macOS TCC
+    # grants (Accessibility, system audio) persist across rebuilds. Without it,
+    # tauri.conf's ad-hoc "-" is used, whose cdhash changes each build and voids
+    # those grants. tauri.conf stays ad-hoc so other machines/CI still build.
+    if security find-identity -p codesigning 2>/dev/null | grep -q "Verba Dev Signing"; then
+        export APPLE_SIGNING_IDENTITY="Verba Dev Signing"
+        echo "==> Signing with stable identity: Verba Dev Signing"
+    else
+        echo "==> No 'Verba Dev Signing' cert (run 'just dev-cert') — signing ad-hoc; TCC grants won't persist across rebuilds"
+    fi
     SHERPA_ONNX_LIB_DIR="{{desktop_deps}}/sherpa-onnx/lib" npx tauri build --debug --bundles app
     APP="{{tauri_dir}}/target/debug/bundle/macos/Verba.app"
     LOG="/tmp/verba-desktop.log"
     : > "$LOG"
     # Replace any previous instance so the fresh build is what runs.
     pkill -f "Verba.app/Contents/MacOS/verba-rs" 2>/dev/null || true
+    sleep 1
+    # Re-register the freshly rebuilt bundle, else LaunchServices can refuse the
+    # open with error -600 (its registration still points at the replaced bundle).
+    /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$APP" 2>/dev/null || true
     open "$APP" --stdout "$LOG" --stderr "$LOG"
     echo ""
     echo "==> Launched $APP"
     echo "    logs:  tail -f $LOG"
     echo "    On the first meeting, macOS prompts to record system audio — click Allow."
+
+# macOS pins TCC grants (Accessibility, system audio) to the signing identity,
+# so a STABLE self-signed cert makes them survive rebuilds — unlike ad-hoc
+# signing, whose cdhash changes each build and voids the grants. 'just desktop'
+# auto-uses this cert when present. Safe to re-run (no-op if present).
+# One-time (macOS): create the self-signed "Verba Dev Signing" code-signing cert.
+dev-cert:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    CN="Verba Dev Signing"
+    KEYCHAIN="$HOME/Library/Keychains/login.keychain-db"
+    if security find-certificate -c "$CN" "$KEYCHAIN" >/dev/null 2>&1; then
+        echo "==> '$CN' already exists — nothing to do"; exit 0
+    fi
+    D=$(mktemp -d)
+    printf '[req]\ndistinguished_name=dn\nx509_extensions=v3\nprompt=no\n[dn]\nCN=%s\n[v3]\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=critical,codeSigning\n' "$CN" > "$D/req.cnf"
+    openssl req -x509 -newkey rsa:2048 -sha256 -days 3650 -nodes -keyout "$D/key.pem" -out "$D/cert.pem" -config "$D/req.cnf"
+    openssl pkcs12 -export -inkey "$D/key.pem" -in "$D/cert.pem" -out "$D/id.p12" -name "$CN" -passout pass:verba
+    security import "$D/id.p12" -k "$KEYCHAIN" -P verba -T /usr/bin/codesign -T /usr/bin/security
+    rm -rf "$D"
+    echo "==> Created '$CN'. Run 'just desktop', then grant Accessibility + system audio once; they persist afterward."
 
 # ── Desktop setup internals ──
 
