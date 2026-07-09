@@ -13,6 +13,11 @@ mod itn;
 mod spelling;
 pub mod vocab;
 
+/// Stage-1 filler removal, exposed for callers that want disfluency cleanup
+/// without the full pipeline (meeting transcription keeps verbatim wording but
+/// strips "um"/"uh"/false starts).
+pub use filler::remove_fillers;
+
 use std::sync::OnceLock;
 use std::time::Instant;
 

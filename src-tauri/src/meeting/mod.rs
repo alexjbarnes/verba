@@ -292,7 +292,10 @@ fn spawn_consumer(
                 }
                 match transcriber.transcribe(segment, 16_000) {
                     Ok(text) => {
-                        let text = text.trim().to_string();
+                        // Meetings keep verbatim wording but strip disfluencies
+                        // ("um"/"uh"/false starts) — the dictation pipeline never
+                        // runs here, so do the one stage that matters for reading.
+                        let text = crate::postprocess::remove_fillers(text.trim());
                         if text.is_empty() {
                             continue;
                         }
@@ -363,7 +366,7 @@ pub fn stop(
                 session.loopback_audio.lock().unwrap().push((t_ms, samples.clone()));
             }
             if let Ok(text) = t.transcribe(samples, 16_000) {
-                let text = text.trim().to_string();
+                let text = crate::postprocess::remove_fillers(text.trim());
                 if !text.is_empty() {
                     session.utterances.lock().unwrap().push(Utterance {
                         source: source.into(),
