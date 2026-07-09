@@ -733,6 +733,21 @@ fn meeting_gallery_forget(name: String) -> Result<(), String> {
     meeting::gallery::Gallery::global().remove(&name)
 }
 
+/// A known speaker's enrolled voiceprints, with provenance and an outlier flag,
+/// for the gallery-split UI.
+#[cfg(not(target_os = "android"))]
+#[tauri::command]
+fn meeting_gallery_prints(name: String) -> Vec<meeting::gallery::GalleryPrint> {
+    meeting::gallery::Gallery::global().prints(&name)
+}
+
+/// Split selected voiceprints out of a known speaker into another (new/existing).
+#[cfg(not(target_os = "android"))]
+#[tauri::command]
+fn meeting_gallery_split(name: String, indices: Vec<usize>, to: String) -> Result<(), String> {
+    meeting::gallery::Gallery::global().split(&name, indices, &to)
+}
+
 // Android stubs: same names/signatures, always an error.
 #[cfg(target_os = "android")]
 #[tauri::command]
@@ -831,6 +846,16 @@ fn meeting_gallery_rename(_from: String, _to: String) -> Result<(), String> {
 #[cfg(target_os = "android")]
 #[tauri::command]
 fn meeting_gallery_forget(_name: String) -> Result<(), String> {
+    Err("Meeting mode is desktop only".into())
+}
+#[cfg(target_os = "android")]
+#[tauri::command]
+fn meeting_gallery_prints(_name: String) -> Vec<serde_json::Value> {
+    Vec::new()
+}
+#[cfg(target_os = "android")]
+#[tauri::command]
+fn meeting_gallery_split(_name: String, _indices: Vec<usize>, _to: String) -> Result<(), String> {
     Err("Meeting mode is desktop only".into())
 }
 
@@ -1806,6 +1831,8 @@ pub fn run() {
             meeting_gallery_speakers,
             meeting_gallery_rename,
             meeting_gallery_forget,
+            meeting_gallery_prints,
+            meeting_gallery_split,
             storage_summary,
             storage_clear,
             list_history,

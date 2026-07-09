@@ -6013,8 +6013,69 @@ async function loadMeetingGallery() {
       merge.addEventListener('click', () => startMergeSpeaker(name, names, row));
       row.appendChild(merge);
     }
+    // Expand to the speaker's individual voiceprints (source + sample); a stray
+    // one, flagged as an outlier, can be split out into another speaker.
+    const panel = document.createElement('div');
+    panel.className = 'hidden ml-3 pl-3 border-l-2 border-outline-variant/30 space-y-1.5 pb-1';
+    const prints = document.createElement('button');
+    prints.className = 'shrink-0 w-9 h-9 flex items-center justify-center text-on-surface-variant hover:text-primary rounded-lg hover:bg-surface-container-highest transition-colors cursor-pointer';
+    prints.title = `Voiceprints for ${name}`;
+    prints.innerHTML = '<span class="material-symbols-outlined text-[20px]">fingerprint</span>';
+    let printsLoaded = false;
+    prints.addEventListener('click', async () => {
+      panel.classList.toggle('hidden');
+      if (!panel.classList.contains('hidden') && !printsLoaded) {
+        printsLoaded = true;
+        await renderGalleryPrints(panel, name);
+      }
+    });
+    row.appendChild(prints);
     row.appendChild(forget);
     list.appendChild(row);
+    list.appendChild(panel);
+  }
+}
+
+// A known speaker's individual voiceprints with provenance. A stray one (flagged
+// as an outlier) can be split out to a new or existing speaker.
+async function renderGalleryPrints(panel, name) {
+  panel.innerHTML = '<p class="text-xs text-on-surface-variant/60">Loading…</p>';
+  let prints = [];
+  try { prints = await invoke('meeting_gallery_prints', { name }); } catch (_) {}
+  panel.innerHTML = '';
+  if (!prints.length) {
+    panel.innerHTML = '<p class="text-xs text-on-surface-variant/60">No stored voiceprints.</p>';
+    return;
+  }
+  for (const p of prints) {
+    const r = document.createElement('div');
+    r.className = 'flex items-center gap-2';
+    const info = document.createElement('span');
+    info.className = 'flex-1 min-w-0 truncate text-xs ' + (p.outlier ? 'text-primary font-medium' : 'text-on-surface-variant');
+    const sample = p.sample ? ` · “${p.sample}”` : '';
+    info.textContent = `${p.outlier ? '⚠ ' : ''}${p.source}${sample}`;
+    if (p.outlier) info.title = 'Least like the others — likely a different person';
+    const split = document.createElement('button');
+    split.className = 'shrink-0 min-h-8 px-2.5 text-xs font-semibold text-primary rounded-lg hover:bg-primary/10 transition cursor-pointer';
+    split.textContent = 'Split out';
+    split.addEventListener('click', async () => {
+      const to = await showPrompt(`Split this voiceprint out of ${name} — who is it?`, { okLabel: 'Split', placeholder: 'New speaker name' });
+      if (!to) return;
+      try {
+        await invoke('meeting_gallery_split', { name, indices: [p.index], to });
+        showToast(`Split to ${to}`);
+        loadMeetingGallery();
+      } catch (err) { showToast('Split failed: ' + err); }
+    });
+    r.appendChild(info);
+    r.appendChild(split);
+    panel.appendChild(r);
+  }
+  if (prints.length < 2) {
+    const note = document.createElement('p');
+    note.className = 'text-xs text-on-surface-variant/60';
+    note.textContent = 'Only one voiceprint — nothing to split.';
+    panel.appendChild(note);
   }
 }
 

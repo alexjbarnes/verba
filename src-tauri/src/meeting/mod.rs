@@ -747,8 +747,11 @@ pub fn rename_speaker(id: String, from: String, to: String) -> Result<MeetingMet
     // the stop-time per-speaker sidecar never had); fall back to that sidecar for
     // meetings recorded before per-utterance voiceprints.
     let mut vps = gallery::load_meeting_voiceprints(&id);
-    if let Some(vp) = store::load_transcript(&id).and_then(|utts| speaker_voiceprint_from(&utts, &from)) {
-        gallery::Gallery::global().add(&to, vp)?;
+    if let Some(utts) = store::load_transcript(&id) {
+        if let Some(vp) = speaker_voiceprint_from(&utts, &from) {
+            let pm = enrol_meta(&id, &meta, &from, &utts);
+            gallery::Gallery::global().add_with_meta(&to, vp, pm)?;
+        }
     } else if let Some(v) = vps.iter().find(|v| v.label == from) {
         gallery::Gallery::global().add(&to, v.embedding.clone())?;
     }
@@ -1005,7 +1008,8 @@ pub fn reassign_lines(id: &str, indices: Vec<usize>, to: String) -> Result<Meeti
     // recognized in future meetings.
     if !to.starts_with("Speaker ") {
         if let Some(vp) = speaker_voiceprint_from(&utts, &to) {
-            let _ = gallery::Gallery::global().add(&to, vp);
+            let pm = enrol_meta(id, &meta, &to, &utts);
+            let _ = gallery::Gallery::global().add_with_meta(&to, vp, pm);
         }
     }
 
@@ -1035,6 +1039,30 @@ fn speaker_voiceprint_from(utts: &[Utterance], speaker: &str) -> Option<Vec<f32>
         }
     }
     (n > 0).then(|| gallery::normalize(&sum))
+}
+
+/// Provenance for a gallery enrolment: a readable source (meeting title + date)
+/// and the speaker's longest line as a recognizable sample, so a later gallery
+/// split can show where each stored voiceprint came from.
+fn enrol_meta(id: &str, meta: &MeetingMeta, speaker: &str, utts: &[Utterance]) -> gallery::PrintMeta {
+    let date = chrono::DateTime::parse_from_rfc3339(&meta.started)
+        .map(|d| d.with_timezone(&chrono::Local).format("%Y-%m-%d").to_string())
+        .unwrap_or_default();
+    let source = if date.is_empty() {
+        meta.title.clone()
+    } else {
+        format!("{} · {}", meta.title, date)
+    };
+    let sample: String = utts
+        .iter()
+        .filter(|u| u.speaker == speaker)
+        .map(|u| u.text.as_str())
+        .max_by_key(|t| t.len())
+        .unwrap_or("")
+        .chars()
+        .take(100)
+        .collect();
+    gallery::PrintMeta { meeting_id: id.to_string(), source, sample }
 }
 
 /// Distinct still-unnamed "Speaker N" system speakers, for the meetings badge.
