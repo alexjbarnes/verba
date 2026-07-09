@@ -784,6 +784,52 @@ pub fn speakers(id: &str) -> Result<Vec<SpeakerInfo>, String> {
         .collect())
 }
 
+/// One line of a finished meeting's transcript, for the structured, filterable
+/// per-speaker view. `idx` is the line's position among transcript lines.
+#[derive(serde::Serialize)]
+pub struct TranscriptEntry {
+    pub idx: usize,
+    pub clock: String,
+    pub speaker: String,
+    pub text: String,
+}
+
+/// Structured transcript lines for a finished meeting, parsed from the stored
+/// markdown (`**[MM:SS] Speaker:** text`). Powers the per-speaker view where
+/// clicking a speaker filters the transcript to just their lines.
+pub fn transcript(id: &str) -> Result<Vec<TranscriptEntry>, String> {
+    let meta = store::MeetingStore::global().get(id).ok_or("meeting not found")?;
+    if meta.transcript_path.is_empty() {
+        return Err("no transcript".into());
+    }
+    let md = std::fs::read_to_string(&meta.transcript_path)
+        .map_err(|e| format!("read transcript: {e}"))?;
+    let mut out = Vec::new();
+    let mut in_transcript = false;
+    for raw in md.lines() {
+        if let Some(h) = raw.strip_prefix("## ") {
+            in_transcript = h.trim() == "Transcript";
+            continue;
+        }
+        if !in_transcript {
+            continue;
+        }
+        if let Some(rest) = raw.strip_prefix("**[") {
+            if let Some((clock, after)) = rest.split_once("] ") {
+                if let Some((speaker, text)) = after.split_once(":** ") {
+                    out.push(TranscriptEntry {
+                        idx: out.len(),
+                        clock: clock.to_string(),
+                        speaker: speaker.to_string(),
+                        text: text.to_string(),
+                    });
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// Replace a meeting's summary markdown — used by the editable summary panel,
 /// where the user can dictate or type. Wraps the body under the title heading,
 /// matching what `summarize()` writes. Works even if no summary existed yet.

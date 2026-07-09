@@ -5464,7 +5464,8 @@ function renderMarkdownBasic(md) {
   return blocks.join('') || '<p class="text-on-surface-variant">Empty.</p>';
 }
 
-let meetingTranscriptLoaded = false; // lazy-load guard for the collapsible transcript
+let meetingTranscriptEntries = []; // structured lines shown in #meeting-view
+let meetingTranscriptFilter = null; // when set, transcript shows only this speaker's lines
 
 async function openMeetingView(id) {
   if (!isDesktop) return;
@@ -5505,11 +5506,8 @@ async function openMeetingView(id) {
     summaryBody.textContent = 'Not summarized yet.';
   }
 
-  meetingTranscriptLoaded = false;
-  document.getElementById('meeting-transcript-view-body').textContent = '';
-  document.getElementById('meeting-transcript-view').classList.add('hidden');
-  document.getElementById('meeting-transcript-toggle-label').textContent = 'Show transcript';
-  document.querySelector('#meeting-transcript-toggle .material-symbols-outlined').textContent = 'expand_more';
+  meetingTranscriptFilter = null;
+  loadMeetingTranscript(id);
 }
 
 document.getElementById('meeting-view-back').addEventListener('click', () => navigateTo('meetings'));
@@ -5606,21 +5604,77 @@ document.getElementById('meeting-summary-save').addEventListener('click', async 
     openMeetingView(id); // re-render + reset edit mode/buttons
   } catch (err) { showToast('Save failed: ' + err); }
 });
-document.getElementById('meeting-transcript-toggle').addEventListener('click', async () => {
-  const body = document.getElementById('meeting-transcript-view');
-  const opening = body.classList.contains('hidden');
-  body.classList.toggle('hidden', !opening);
-  document.getElementById('meeting-transcript-toggle-label').textContent = opening ? 'Hide transcript' : 'Show transcript';
-  document.querySelector('#meeting-transcript-toggle .material-symbols-outlined').textContent = opening ? 'expand_less' : 'expand_more';
-  if (opening && !meetingTranscriptLoaded && meetingViewId) {
-    meetingTranscriptLoaded = true;
-    try {
-      document.getElementById('meeting-transcript-view-body').innerHTML =
-        renderMarkdownBasic(await invoke('meeting_read_file', { id: meetingViewId, which: 'transcript' }));
-    } catch (err) {
-      document.getElementById('meeting-transcript-view-body').textContent = 'Could not load transcript: ' + err;
-    }
+// Speaker colours for the transcript: "You" uses the theme primary; everyone
+// else gets a stable colour by first appearance, so the eye can track who's who.
+const SPEAKER_COLORS = ['#7c9cff', '#f0883e', '#5bd1a0', '#e06c9f', '#c9a227', '#9b8cff', '#4fb6c4', '#d98880'];
+function meetingSpeakerColors() {
+  const map = {};
+  let n = 0;
+  for (const e of meetingTranscriptEntries) {
+    if (e.speaker === 'You' || map[e.speaker]) continue;
+    map[e.speaker] = SPEAKER_COLORS[n % SPEAKER_COLORS.length];
+    n++;
   }
+  return map;
+}
+
+// Load a finished meeting's structured transcript and render it (always visible;
+// the per-speaker filter narrows it in place — that's the "who is this?" read).
+async function loadMeetingTranscript(id) {
+  const body = document.getElementById('meeting-transcript-view-body');
+  try {
+    meetingTranscriptEntries = await invoke('meeting_transcript', { id });
+  } catch (err) {
+    meetingTranscriptEntries = [];
+    body.textContent = 'Could not load transcript: ' + err;
+    return;
+  }
+  renderStructuredTranscript();
+}
+
+function renderStructuredTranscript() {
+  const body = document.getElementById('meeting-transcript-view-body');
+  const colors = meetingSpeakerColors();
+  const filter = meetingTranscriptFilter;
+  const rows = meetingTranscriptEntries.filter((e) => !filter || e.speaker === filter);
+  if (!meetingTranscriptEntries.length) {
+    body.innerHTML = '<p class="text-on-surface-variant/70">No transcript.</p>';
+  } else if (!rows.length) {
+    body.innerHTML = '<p class="text-on-surface-variant/70">Nothing from this speaker.</p>';
+  } else {
+    body.innerHTML = rows.map((e) => {
+      const color = e.speaker === 'You' ? null : colors[e.speaker];
+      const style = color ? ` style="color:${color}"` : '';
+      const cls = e.speaker === 'You' ? 'text-primary' : '';
+      return `<div class="meeting-line">
+        <div class="flex items-baseline gap-2">
+          <span class="text-xs font-semibold ${cls}"${style}>${escapeHtml(e.speaker)}</span>
+          <span class="text-[11px] text-on-surface-variant/60 tabular-nums">${escapeHtml(e.clock)}</span>
+        </div>
+        <p class="mt-0.5">${escapeHtml(e.text)}</p>
+      </div>`;
+    }).join('');
+  }
+  const clear = document.getElementById('meeting-transcript-filter-clear');
+  if (filter) {
+    document.getElementById('meeting-transcript-filter-name').textContent = filter;
+    clear.classList.remove('hidden');
+  } else {
+    clear.classList.add('hidden');
+  }
+}
+
+// Toggle a speaker filter (click the same speaker again to clear it).
+function setTranscriptFilter(speaker) {
+  meetingTranscriptFilter = meetingTranscriptFilter === speaker ? null : speaker;
+  renderStructuredTranscript();
+  document.getElementById('meeting-transcript-view-body')
+    .scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+document.getElementById('meeting-transcript-filter-clear').addEventListener('click', () => {
+  meetingTranscriptFilter = null;
+  renderStructuredTranscript();
 });
 
 // Show the meeting's speakers as chips; clicking one renames it, which enrolls
@@ -5641,14 +5695,24 @@ async function renderMeetingSpeakers(id) {
   for (const sp of speakers) {
     const row = document.createElement('div');
     row.className = 'flex items-center gap-3';
-    const chip = document.createElement('button');
-    // Unnamed speakers are highlighted so the "who is this?" ask stands out.
-    chip.className = 'group shrink-0 inline-flex items-center gap-1.5 min-h-9 px-3 rounded-full text-sm cursor-pointer transition-colors ' +
-      (sp.unnamed
-        ? 'bg-primary/15 text-primary hover:bg-primary/25'
-        : 'bg-surface-container-highest text-on-surface hover:bg-primary/10');
-    chip.innerHTML = `<span>${escapeHtml(sp.name)}</span><span class="material-symbols-outlined text-sm opacity-70 group-hover:opacity-100">edit</span>`;
-    chip.addEventListener('click', () => startRenameSpeaker(id, sp.name, chip));
+    // Chip = [ name | pencil ]. Click the name to filter the transcript to this
+    // speaker (the "who is this?" read); click the pencil to rename + enrol them.
+    // Unnamed speakers are highlighted so the ask stands out.
+    const chip = document.createElement('div');
+    chip.className = 'shrink-0 inline-flex items-center rounded-full overflow-hidden ' +
+      (sp.unnamed ? 'bg-primary/15 text-primary' : 'bg-surface-container-highest text-on-surface');
+    const nameBtn = document.createElement('button');
+    nameBtn.className = 'min-h-9 pl-3 pr-2 text-sm cursor-pointer hover:bg-primary/10 transition-colors';
+    nameBtn.textContent = sp.name;
+    nameBtn.title = `Show only ${sp.name}`;
+    nameBtn.addEventListener('click', () => setTranscriptFilter(sp.name));
+    const editBtn = document.createElement('button');
+    editBtn.className = 'min-h-9 pr-2.5 pl-1 flex items-center cursor-pointer hover:bg-primary/10 transition-colors';
+    editBtn.title = `Rename ${sp.name}`;
+    editBtn.innerHTML = '<span class="material-symbols-outlined text-sm opacity-70">edit</span>';
+    editBtn.addEventListener('click', () => startRenameSpeaker(id, sp.name, chip));
+    chip.appendChild(nameBtn);
+    chip.appendChild(editBtn);
     row.appendChild(chip);
     if (sp.sample) {
       const snip = document.createElement('p');
@@ -5684,16 +5748,10 @@ function startRenameSpeaker(id, from, chip) {
     try {
       await invoke('meeting_rename_speaker', { id, from, to });
       showToast(`Named ${to}`);
-      // The transcript labels changed; reload it if it's open, and the chips.
-      const tView = document.getElementById('meeting-transcript-view');
-      meetingTranscriptLoaded = false;
-      if (!tView.classList.contains('hidden')) {
-        try {
-          document.getElementById('meeting-transcript-view-body').innerHTML =
-            renderMarkdownBasic(await invoke('meeting_read_file', { id, which: 'transcript' }));
-          meetingTranscriptLoaded = true;
-        } catch (_) {}
-      }
+      // Labels changed; follow the rename if the transcript was filtered to the
+      // old name, then reload the structured transcript and the chips.
+      if (meetingTranscriptFilter === from) meetingTranscriptFilter = to;
+      await loadMeetingTranscript(id);
       renderMeetingSpeakers(id);
     } catch (err) {
       showToast('Rename failed: ' + err);
