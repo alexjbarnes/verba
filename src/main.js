@@ -662,6 +662,32 @@ async function loadPackagesStatus() {
   }
 }
 
+// Packages whose manifest offers a new or missing model. Covers a version bump
+// AND a component the manifest gained since install (e.g. the meeting speaker-
+// diarization model added server-side).
+function packagesWithUpdates(status) {
+  const out = [];
+  if (status && status.dictation && status.dictation.state === 'update_available') out.push('Dictation');
+  if (status && status.meeting && status.meeting.state === 'update_available') out.push('Meeting');
+  return out;
+}
+
+// Boot-time update check: refetch the manifest (bypasses the 24h cache) and
+// highlight any installed package with an update waiting. Fire-and-forget:
+// never blocks startup, silent when offline.
+async function checkPackageUpdatesOnStartup() {
+  try {
+    const status = await invoke('packages_check_updates');
+    if (!status || status.check_error) return;
+    pkgStatus = status;
+    renderPkgDictation();
+    renderDictationBanner();
+    renderPkgMeeting();
+    const updates = packagesWithUpdates(status);
+    if (updates.length) showToast(`Update available: ${updates.join(' & ')} — open Settings to install`);
+  } catch (_) {}
+}
+
 document.getElementById('pkg-dictation-btn').addEventListener('click', async () => {
   const btn = document.getElementById('pkg-dictation-btn');
   btn.disabled = true;
@@ -681,9 +707,13 @@ document.getElementById('check-updates-btn').addEventListener('click', async () 
     pkgStatus = await invoke('packages_check_updates');
     renderPkgDictation();
     renderDictationBanner();
-    if (pkgStatus.check_error) showToast('Check failed: ' + pkgStatus.check_error);
-    else if (pkgStatus.dictation.state === 'update_available') showToast('Update available');
-    else showToast('Up to date');
+    renderPkgMeeting();
+    if (pkgStatus.check_error) {
+      showToast('Check failed: ' + pkgStatus.check_error);
+    } else {
+      const updates = packagesWithUpdates(pkgStatus);
+      showToast(updates.length ? `Update available: ${updates.join(' & ')}` : 'Up to date');
+    }
     // The manifest refetch also covers the voices list.
     if (!document.getElementById('voices').classList.contains('hidden')) loadVoices();
   } catch (err) {
@@ -5772,6 +5802,9 @@ let meetingSelectedSummarizer = ''; // radio selection; not necessarily installe
 
 function pkgMeetingStatusLine(d, model) {
   if (d.state === 'downloading') return `Downloading… ${Math.round((d.progress || 0) * 100)}%`;
+  // update_available covers a component the manifest gained since install (e.g.
+  // the speaker-diarization model), even when the summarizer itself is present.
+  if (d.state === 'update_available') return 'Update available — new speaker model';
   if (model && model.installed) return 'Installed';
   return model ? `Not downloaded - ${model.size}` : 'Select a summarizer';
 }
@@ -5789,6 +5822,11 @@ function renderPkgMeeting() {
     document.getElementById('pkg-meeting-fill').style.width = `${Math.round((d.progress || 0) * 100)}%`;
     btn.disabled = true;
     btn.textContent = `${Math.round((d.progress || 0) * 100)}%`;
+  } else if (d.state === 'update_available') {
+    // A shared component (e.g. the diarization model) is missing even though the
+    // summarizer is present — offer the update so the install can pull it.
+    btn.disabled = !model;
+    btn.textContent = 'Update';
   } else if (model && model.installed) {
     btn.disabled = true;
     btn.textContent = 'Installed';
@@ -6042,6 +6080,10 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Check RSS feeds for new articles. Fire-and-forget: never blocks startup,
   // silent when offline.
   pollFeeds({}).catch(() => {});
+
+  // Proactive model-update check: highlights a newly published or missing model
+  // (like the meeting diarization model) so users don't have to hunt in Settings.
+  checkPackageUpdatesOnStartup();
 });
 
 // A share arriving while the app is already open: Rust emits this once it has
