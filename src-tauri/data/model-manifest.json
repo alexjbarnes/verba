@@ -334,6 +334,384 @@
             "role": "config"
           }
         ]
+      },
+      {
+        "id": "tts-piper-amy",
+        "name": "Amy (US)",
+        "desc": "American English voice — female, ~63 MB",
+        "engine": "tts_piper_ort",
+        "size": "~63 MB",
+        "files": [
+          {
+            "url": "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/amy/medium/en_US-amy-medium.onnx",
+            "rel_path": "tts/piper-amy/model_dur.onnx",
+            "bytes": 63201294,
+            "role": "model"
+          },
+          {
+            "url": "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/amy/medium/en_US-amy-medium.onnx.json",
+            "rel_path": "tts/piper-amy/model.onnx.json",
+            "bytes": 4882,
+            "role": "config"
+          }
+        ]
+      },
+      {
+        "id": "tts-piper-hfc-female",
+        "name": "HFC Female (US)",
+        "desc": "American English voice — female, ~63 MB",
+        "engine": "tts_piper_ort",
+        "size": "~63 MB",
+        "files": [
+          {
+            "url": "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/hfc_female/medium/en_US-hfc_female-medium.onnx",
+            "rel_path": "tts/piper-hfc-female/model_dur.onnx",
+            "bytes": 63201294,
+            "role": "model"
+          },
+          {
+            "url": "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/hfc_female/medium/en_US-hfc_female-medium.onnx.json",
+            "rel_path": "tts/piper-hfc-female/model.onnx.json",
+            "bytes": 5033,
+            "role": "config"
+          }
+        ]
+      },
+      {
+        "id": "tts-piper-kathleen",
+        "name": "Kathleen (US)",
+        "desc": "American English voice — female, ~63 MB",
+        "engine": "tts_piper_ort",
+        "size": "~63 MB",
+        "files": [
+          {
+            "url": "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/kathleen/low/en_US-kathleen-low.onnx",
+            "rel_path": "tts/piper-kathleen/model_dur.onnx",
+            "bytes": 63104526,
+            "role": "model"
+          },
+          {
+            "url": "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/kathleen/low/en_US-kathleen-low.onnx.json",
+            "rel_path": "tts/piper-kathleen/model.onnx.json",
+            "bytes": 4169,
+            "role": "config"
+          }
+        ]
+      },
+      {
+        "id": "tts-piper-kristin",
+        "name": "Kristin (US)",
+        "desc": "American English voice — female, ~64 MB",
+        "engine": "tts_piper_ort",
+        "size": "~64 MB",
+        "files": [
+          {
+            "url": "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/kristin/medium/en_US-kristin-medium.onnx",
+            "rel_path": "tts/piper-kristin/model_dur.onnx",
+            "bytes": 63531379,
+            "role": "model"
+          },
+          {
+            "url": "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/kristin/medium/en_US-kristin-medium.onnx.json",
+            "rel_path": "tts/piper-kristin/model.onnx.json",
+            "bytes": 4968,
+            "role": "config"
+          }
+        ]
+      },
+      {
+        "id": "tts-piper-lessac",
+        "name": "Lessac (US)",
+        "desc": "American English voice — female, ~63 MB",
+        "engine": "tts_piper_ort",
+        "size": "~63 MB",
+        "files": [
+          {
+            "url": "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx",
+            "rel_path": "tts/piper-lessac/model_dur.onnx",
+            "bytes": 63201294,
+            "role": "model"
+          },
+          {
+            "url": "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx.json",
+            "rel_path": "tts/piper-lessac/model.onnx.json",
+            "bytes": 4885,
+            "role": "config"
+          }
+        ]
+      },
+      {
+        "id": "tts-piper-ljspeech",
+        "name": "LJSpeech (US)",
+        "desc": "American English voice — female, ~64 MB",
+        "engine": "tts_piper_ort",
+        "size": "~64 MB",
+        "files": [
+          {
+            "url": "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/ljspeech/medium/en_US-ljspeech-medium.onnx",
+            "rel_path": "tts/piper-ljspeech/model_dur.onnx",
+            "bytes": 63531379,
+            "role": "model"
+          },
+          {
+            "url": "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/ljspeech/medium/en_US-ljspeech-medium.onnx.json",
+            "rel_path": "tts/piper-ljspeech/model.onnx.json",
+            "bytes": 4972,
+            "role": "config"
+          }
+        ]
+      },
+      {
+        "id": "tts-piper-bryce",
+        "name": "Bryce (US)",
+        "desc": "American English voice — male, ~64 MB",
+        "engine": "tts_piper_ort",
+        "size": "~64 MB",
+        "files": [
+          {
+            "url": "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/bryce/medium/en_US-bryce-medium.onnx",
+            "rel_path": "tts/piper-bryce/model_dur.onnx",
+            "bytes": 63531379,
+            "role": "model"
+          },
+          {
+            "url": "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/bryce/medium/en_US-bryce-medium.onnx.json",
+            "rel_path": "tts/piper-bryce/model.onnx.json",
+            "bytes": 4966,
+            "role": "config"
+          }
+        ]
+      },
+      {
+        "id": "tts-piper-danny",
+        "name": "Danny (US)",
+        "desc": "American English voice — male, ~63 MB",
+        "engine": "tts_piper_ort",
+        "size": "~63 MB",
+        "files": [
+          {
+            "url": "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/danny/low/en_US-danny-low.onnx",
+            "rel_path": "tts/piper-danny/model_dur.onnx",
+            "bytes": 63104526,
+            "role": "model"
+          },
+          {
+            "url": "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/danny/low/en_US-danny-low.onnx.json",
+            "rel_path": "tts/piper-danny/model.onnx.json",
+            "bytes": 4166,
+            "role": "config"
+          }
+        ]
+      },
+      {
+        "id": "tts-piper-hfc-male",
+        "name": "HFC Male (US)",
+        "desc": "American English voice — male, ~63 MB",
+        "engine": "tts_piper_ort",
+        "size": "~63 MB",
+        "files": [
+          {
+            "url": "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/hfc_male/medium/en_US-hfc_male-medium.onnx",
+            "rel_path": "tts/piper-hfc-male/model_dur.onnx",
+            "bytes": 63201294,
+            "role": "model"
+          },
+          {
+            "url": "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/hfc_male/medium/en_US-hfc_male-medium.onnx.json",
+            "rel_path": "tts/piper-hfc-male/model.onnx.json",
+            "bytes": 5033,
+            "role": "config"
+          }
+        ]
+      },
+      {
+        "id": "tts-piper-joe",
+        "name": "Joe (US)",
+        "desc": "American English voice — male, ~63 MB",
+        "engine": "tts_piper_ort",
+        "size": "~63 MB",
+        "files": [
+          {
+            "url": "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/joe/medium/en_US-joe-medium.onnx",
+            "rel_path": "tts/piper-joe/model_dur.onnx",
+            "bytes": 63201294,
+            "role": "model"
+          },
+          {
+            "url": "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/joe/medium/en_US-joe-medium.onnx.json",
+            "rel_path": "tts/piper-joe/model.onnx.json",
+            "bytes": 4794,
+            "role": "config"
+          }
+        ]
+      },
+      {
+        "id": "tts-piper-john",
+        "name": "John (US)",
+        "desc": "American English voice — male, ~64 MB",
+        "engine": "tts_piper_ort",
+        "size": "~64 MB",
+        "files": [
+          {
+            "url": "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/john/medium/en_US-john-medium.onnx",
+            "rel_path": "tts/piper-john/model_dur.onnx",
+            "bytes": 63531379,
+            "role": "model"
+          },
+          {
+            "url": "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/john/medium/en_US-john-medium.onnx.json",
+            "rel_path": "tts/piper-john/model.onnx.json",
+            "bytes": 4965,
+            "role": "config"
+          }
+        ]
+      },
+      {
+        "id": "tts-piper-kusal",
+        "name": "Kusal (US)",
+        "desc": "American English voice — male, ~63 MB",
+        "engine": "tts_piper_ort",
+        "size": "~63 MB",
+        "files": [
+          {
+            "url": "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/kusal/medium/en_US-kusal-medium.onnx",
+            "rel_path": "tts/piper-kusal/model_dur.onnx",
+            "bytes": 63201294,
+            "role": "model"
+          },
+          {
+            "url": "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/kusal/medium/en_US-kusal-medium.onnx.json",
+            "rel_path": "tts/piper-kusal/model.onnx.json",
+            "bytes": 4884,
+            "role": "config"
+          }
+        ]
+      },
+      {
+        "id": "tts-piper-norman",
+        "name": "Norman (US)",
+        "desc": "American English voice — male, ~64 MB",
+        "engine": "tts_piper_ort",
+        "size": "~64 MB",
+        "files": [
+          {
+            "url": "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/norman/medium/en_US-norman-medium.onnx",
+            "rel_path": "tts/piper-norman/model_dur.onnx",
+            "bytes": 63531379,
+            "role": "model"
+          },
+          {
+            "url": "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/norman/medium/en_US-norman-medium.onnx.json",
+            "rel_path": "tts/piper-norman/model.onnx.json",
+            "bytes": 4968,
+            "role": "config"
+          }
+        ]
+      },
+      {
+        "id": "tts-piper-reza-ibrahim",
+        "name": "Reza Ibrahim (US)",
+        "desc": "American English voice — male, ~64 MB",
+        "engine": "tts_piper_ort",
+        "size": "~64 MB",
+        "files": [
+          {
+            "url": "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/reza_ibrahim/medium/en_US-reza_ibrahim-medium.onnx",
+            "rel_path": "tts/piper-reza-ibrahim/model_dur.onnx",
+            "bytes": 63511038,
+            "role": "model"
+          },
+          {
+            "url": "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/reza_ibrahim/medium/en_US-reza_ibrahim-medium.onnx.json",
+            "rel_path": "tts/piper-reza-ibrahim/model.onnx.json",
+            "bytes": 4976,
+            "role": "config"
+          }
+        ]
+      },
+      {
+        "id": "tts-piper-ryan",
+        "name": "Ryan (US)",
+        "desc": "American English voice — male, ~63 MB",
+        "engine": "tts_piper_ort",
+        "size": "~63 MB",
+        "files": [
+          {
+            "url": "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/ryan/medium/en_US-ryan-medium.onnx",
+            "rel_path": "tts/piper-ryan/model_dur.onnx",
+            "bytes": 63201294,
+            "role": "model"
+          },
+          {
+            "url": "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/ryan/medium/en_US-ryan-medium.onnx.json",
+            "rel_path": "tts/piper-ryan/model.onnx.json",
+            "bytes": 4883,
+            "role": "config"
+          }
+        ]
+      },
+      {
+        "id": "tts-piper-sam",
+        "name": "Sam (US)",
+        "desc": "American English voice — male, ~63 MB",
+        "engine": "tts_piper_ort",
+        "size": "~63 MB",
+        "files": [
+          {
+            "url": "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/sam/medium/en_US-sam-medium.onnx",
+            "rel_path": "tts/piper-sam/model_dur.onnx",
+            "bytes": 62950044,
+            "role": "model"
+          },
+          {
+            "url": "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/sam/medium/en_US-sam-medium.onnx.json",
+            "rel_path": "tts/piper-sam/model.onnx.json",
+            "bytes": 5040,
+            "role": "config"
+          }
+        ]
+      },
+      {
+        "id": "tts-piper-libritts-r",
+        "name": "LibriTTS-R (US)",
+        "desc": "American English — 904 speakers, ~79 MB",
+        "engine": "tts_piper_ort",
+        "size": "~79 MB",
+        "files": [
+          {
+            "url": "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/libritts_r/medium/en_US-libritts_r-medium.onnx",
+            "rel_path": "tts/piper-librir/model_dur.onnx",
+            "bytes": 78580914,
+            "role": "model"
+          },
+          {
+            "url": "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/libritts_r/medium/en_US-libritts_r-medium.onnx.json",
+            "rel_path": "tts/piper-librir/model.onnx.json",
+            "bytes": 20123,
+            "role": "config"
+          }
+        ]
+      },
+      {
+        "id": "tts-piper-vctk",
+        "name": "VCTK (UK)",
+        "desc": "British English — 109 speakers, ~77 MB",
+        "engine": "tts_piper_ort",
+        "size": "~77 MB",
+        "files": [
+          {
+            "url": "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_GB/vctk/medium/en_GB-vctk-medium.onnx",
+            "rel_path": "tts/piper-vctk/model_dur.onnx",
+            "bytes": 76952753,
+            "role": "model"
+          },
+          {
+            "url": "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_GB/vctk/medium/en_GB-vctk-medium.onnx.json",
+            "rel_path": "tts/piper-vctk/model.onnx.json",
+            "bytes": 6637,
+            "role": "config"
+          }
+        ]
       }
     ]
   },
