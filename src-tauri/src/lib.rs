@@ -625,6 +625,7 @@ fn meeting_get(id: String) -> Option<meeting::store::MeetingMeta> {
 fn meeting_delete(id: String, delete_files: Option<bool>) -> Result<(), String> {
     if delete_files.unwrap_or(false) {
         meeting::gallery::delete_meeting_voiceprints(&id);
+        meeting::store::delete_transcript(&id);
     }
     meeting::store::MeetingStore::global().delete(&id, delete_files.unwrap_or(false))
 }

@@ -304,6 +304,7 @@ fn spawn_consumer(
                             speaker,
                             text,
                             t_ms,
+                            embedding: None, // attached at stop from the buffered audio
                         };
                         utterances.lock().unwrap().push(utterance.clone());
                         let _ = app.emit("meeting-utterance", &utterance);
@@ -373,6 +374,7 @@ pub fn stop(
                         speaker: (if source == "mic" { "You" } else { "Speaker 1" }).into(),
                         text,
                         t_ms,
+                        embedding: None, // attached below from the buffered audio
                     });
                 }
             }
@@ -383,6 +385,10 @@ pub fn stop(
     // the system utterances accurately. Best-effort — leaves live labels on any
     // gap (models missing, no system audio, diarizer failure).
     refine_speakers(&app, &session.meta.id, &session.loopback_audio, duration_ms, &session.utterances);
+
+    // Per-utterance voiceprints: embed each system utterance from its buffered
+    // audio so speakers stay traceable through later edits without the audio.
+    attach_utterance_voiceprints(&session.utterances, &session.loopback_audio);
 
     // Final transcript + index entry.
     let cfg = crate::config::AppConfig::load();
@@ -414,6 +420,8 @@ pub fn stop(
     let md = store::transcript_markdown(&meta, &notes, &utts);
     let path = store::write_markdown(&cfg.meeting_transcript_dir, &filename, &md)?;
     meta.transcript_path = path.to_string_lossy().into_owned();
+    // Structured sidecar (source of truth for speaker ops; carries voiceprints).
+    let _ = store::save_transcript(&meta.id, &utts);
     store::MeetingStore::global().upsert(meta.clone())?;
 
     let _ = app.emit("meeting-state", serde_json::json!({ "state": "idle" }));
@@ -513,6 +521,38 @@ fn refine_speakers(
         if u.source == "system" {
             if let Some(name) = label_by_tms.get(&u.t_ms) {
                 u.speaker = name.clone();
+            }
+        }
+    }
+}
+
+/// Embed each system utterance from its buffered audio (matched by segment
+/// start time) and store the voiceprint on the utterance, so speakers stay
+/// traceable through later split/merge/re-cluster without keeping the audio.
+/// Best-effort: no-op if the speaker model is absent or the buffer is empty.
+/// Mic ("You") utterances are never embedded — that channel isn't diarized.
+fn attach_utterance_voiceprints(
+    utterances: &Arc<Mutex<Vec<Utterance>>>,
+    buffer: &Arc<Mutex<Vec<(u64, Vec<f32>)>>>,
+) {
+    let Some(model) = crate::models::ModelManager::global().speaker_model_path() else {
+        return;
+    };
+    let Some(embedder) = speakers::Embedder::new(&model) else {
+        return;
+    };
+    let by_tms: std::collections::HashMap<u64, Vec<f32>> = {
+        let buf = buffer.lock().unwrap();
+        if buf.is_empty() {
+            return;
+        }
+        buf.iter().map(|(t, s)| (*t, s.clone())).collect()
+    };
+    let mut utts = utterances.lock().unwrap();
+    for u in utts.iter_mut() {
+        if u.source == "system" && u.embedding.is_none() {
+            if let Some(samples) = by_tms.get(&u.t_ms) {
+                u.embedding = embedder.embed(samples);
             }
         }
     }
@@ -798,6 +838,20 @@ pub struct TranscriptEntry {
 /// markdown (`**[MM:SS] Speaker:** text`). Powers the per-speaker view where
 /// clicking a speaker filters the transcript to just their lines.
 pub fn transcript(id: &str) -> Result<Vec<TranscriptEntry>, String> {
+    // Prefer the structured sidecar (carries per-utterance data and stable idx);
+    // meetings recorded before it fall back to parsing the markdown.
+    if let Some(utts) = store::load_transcript(id) {
+        return Ok(utts
+            .iter()
+            .enumerate()
+            .map(|(i, u)| TranscriptEntry {
+                idx: i,
+                clock: store::fmt_clock(u.t_ms),
+                speaker: u.speaker.clone(),
+                text: u.text.clone(),
+            })
+            .collect());
+    }
     let meta = store::MeetingStore::global().get(id).ok_or("meeting not found")?;
     if meta.transcript_path.is_empty() {
         return Err("no transcript".into());

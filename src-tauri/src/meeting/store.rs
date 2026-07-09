@@ -23,6 +23,12 @@ pub struct Utterance {
     pub text: String,
     /// Milliseconds since meeting start (segment capture time).
     pub t_ms: u64,
+    /// Per-utterance speaker voiceprint, attached at stop (system channel only)
+    /// so identity stays traceable through split/merge/re-cluster without the
+    /// audio. None on the live event, the mic channel, and pre-embedding
+    /// meetings. Lives only in the structured sidecar — never the markdown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedding: Option<Vec<f32>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -135,9 +141,44 @@ pub fn meeting_filename(started_local: &str, suffix: &str) -> String {
     format!("{safe} {suffix}.md")
 }
 
-fn fmt_clock(t_ms: u64) -> String {
+pub fn fmt_clock(t_ms: u64) -> String {
     let s = t_ms / 1000;
     format!("{:02}:{:02}", s / 60, s % 60)
+}
+
+/// Structured transcript sidecar: the full `Utterance` list (incl. per-utterance
+/// voiceprints) as JSON at `data_dir/verba/transcripts/<id>.json`. This is the
+/// source of truth for speaker operations; the markdown is a derived export.
+/// Kept beside the voiceprint sidecars so the same delete path clears both.
+fn transcript_sidecar_path(id: &str) -> Option<PathBuf> {
+    let safe: String =
+        id.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_').collect();
+    dirs::data_dir().map(|d| d.join("verba").join("transcripts").join(format!("{safe}.json")))
+}
+
+pub fn save_transcript(id: &str, utterances: &[Utterance]) -> Result<(), String> {
+    let path = transcript_sidecar_path(id).ok_or("no data dir")?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("transcripts dir: {e}"))?;
+    }
+    let raw = serde_json::to_string(utterances).map_err(|e| e.to_string())?;
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, raw).map_err(|e| format!("transcript write: {e}"))?;
+    std::fs::rename(&tmp, &path).map_err(|e| format!("transcript rename: {e}"))
+}
+
+/// The structured transcript, when a sidecar exists (meetings recorded after the
+/// per-utterance-voiceprint change). `None` falls callers back to the markdown.
+pub fn load_transcript(id: &str) -> Option<Vec<Utterance>> {
+    transcript_sidecar_path(id)
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+}
+
+pub fn delete_transcript(id: &str) {
+    if let Some(p) = transcript_sidecar_path(id) {
+        let _ = std::fs::remove_file(p);
+    }
 }
 
 /// Transcript markdown: title, the user's own notes verbatim, then the
@@ -213,8 +254,8 @@ mod tests {
     #[test]
     fn transcript_markdown_golden() {
         let utterances = vec![
-            Utterance { source: "mic".into(), speaker: "You".into(), text: "Morning all.".into(), t_ms: 1_000 },
-            Utterance { source: "system".into(), speaker: "Speaker 1".into(), text: "Morning. Let's start.".into(), t_ms: 4_500 },
+            Utterance { source: "mic".into(), speaker: "You".into(), text: "Morning all.".into(), t_ms: 1_000, embedding: None },
+            Utterance { source: "system".into(), speaker: "Speaker 1".into(), text: "Morning. Let's start.".into(), t_ms: 4_500, embedding: None },
         ];
         let md = transcript_markdown(&meta("m1"), "ship friday\nrollback: priya", &utterances);
         let expected = "# Weekly sync\n\nStarted: 2026-07-07T14:30:00Z\n\n## Notes\n\nship friday\nrollback: priya\n\n## Transcript\n\n**[00:01] You:** Morning all.\n\n**[00:04] Speaker 1:** Morning. Let's start.\n\n";

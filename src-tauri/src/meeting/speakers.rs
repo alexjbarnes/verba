@@ -88,6 +88,39 @@ impl SpeakerLabeler {
     }
 }
 
+/// A standalone embedder for the stop-time per-utterance voiceprint pass. By
+/// then the live `SpeakerLabeler` has been consumed along with its thread, so
+/// this builds a fresh extractor to embed each buffered segment.
+pub struct Embedder {
+    extractor: SpeakerEmbeddingExtractor,
+}
+
+// Same single-owner soundness as SpeakerLabeler: built and used on one thread.
+unsafe impl Send for Embedder {}
+
+impl Embedder {
+    pub fn new(model_path: &Path) -> Option<Self> {
+        let extractor = SpeakerEmbeddingExtractor::create(&SpeakerEmbeddingExtractorConfig {
+            model: Some(model_path.to_string_lossy().into_owned()),
+            num_threads: 1,
+            debug: false,
+            provider: Some("cpu".into()),
+        })?;
+        Some(Self { extractor })
+    }
+
+    /// Unit-normalized embedding of a 16kHz mono segment, or None if too short.
+    pub fn embed(&self, samples: &[f32]) -> Option<Vec<f32>> {
+        let stream = self.extractor.create_stream()?;
+        stream.accept_waveform(16_000, samples);
+        stream.input_finished();
+        if !self.extractor.is_ready(&stream) {
+            return None;
+        }
+        self.extractor.compute(&stream).map(|e| normalize(&e))
+    }
+}
+
 /// Online agglomerative clustering over unit embeddings, with a running
 /// voiceprint (summed direction = mean) and an optional resolved name per
 /// cluster. Model-free, so it unit-tests without ONNX.
