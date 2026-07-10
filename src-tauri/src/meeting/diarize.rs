@@ -331,6 +331,76 @@ mod tests {
         assert!(d.speaker_count > 1, "expected more than one speaker, got {}", d.speaker_count);
     }
 
+    // Re-identification consistency (the "reuse the signatures on a re-run"
+    // check). Enroll each diarized speaker's voiceprint, then re-embed every span
+    // of the same meeting and confirm it matches its own speaker. Isolates the
+    // gallery/embedding re-ID mechanism from the live online clusterer and from
+    // the persisted global gallery. Same env + run line as diarize_real_meeting.
+    #[test]
+    #[ignore]
+    fn diarize_reid_consistency() {
+        use sherpa_onnx::SpeakerEmbeddingManager;
+        fn norm(v: &[f32]) -> Vec<f32> {
+            let n = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+            if n <= f32::EPSILON { v.to_vec() } else { v.iter().map(|x| x / n).collect() }
+        }
+        let _ = env_logger::builder().filter_level(log::LevelFilter::Info).is_test(false).try_init();
+        let wav = std::env::var("VERBA_DIARIZE_WAV").expect("set VERBA_DIARIZE_WAV");
+        let samples = read_wav_16k_mono(&wav);
+        let seg = model_path("VERBA_SEG_MODEL", |m| m.segmentation_model_path());
+        let emb = model_path("VERBA_EMB_MODEL", |m| m.speaker_model_path());
+        let d = diarize(&seg, &emb, &samples).expect("diarize returned None");
+        assert!(!d.voiceprints.is_empty(), "no voiceprints");
+        let dim = d.voiceprints[0].len() as i32;
+
+        // Enroll the diarized speakers in a fresh manager (no global gallery).
+        let mgr = SpeakerEmbeddingManager::create(dim).expect("manager");
+        for (i, vp) in d.voiceprints.iter().enumerate() {
+            mgr.add_list(&format!("S{i}"), &[vp.clone()]);
+        }
+
+        // Re-embed each span (>=0.5s) and search; agreement weighted by duration.
+        let extractor = SpeakerEmbeddingExtractor::create(&SpeakerEmbeddingExtractorConfig {
+            model: Some(emb.to_string_lossy().into_owned()),
+            num_threads: 2,
+            debug: false,
+            provider: Some("cpu".into()),
+        })
+        .expect("extractor");
+        let mut per: std::collections::BTreeMap<usize, (f32, f32)> = std::collections::BTreeMap::new();
+        let (mut total, mut correct) = (0.0f32, 0.0f32);
+        for span in &d.spans {
+            let a = (span.start as f64 * 16_000.0) as usize;
+            let b = ((span.end as f64 * 16_000.0) as usize).min(samples.len());
+            if b <= a || b - a < 8_000 {
+                continue;
+            }
+            let Some(e) = embed(&extractor, &samples[a..b]) else { continue };
+            let got = mgr.search(&norm(&e), 0.5);
+            let dur = span.end - span.start;
+            let hit = got.as_deref() == Some(format!("S{}", span.speaker).as_str());
+            total += dur;
+            if hit {
+                correct += dur;
+            }
+            let ent = per.entry(span.speaker).or_default();
+            ent.0 += dur;
+            if hit {
+                ent.1 += dur;
+            }
+        }
+        let agree = if total > 0.0 { correct / total } else { 0.0 };
+        eprintln!(
+            "[reid] overall agreement {:.1}% ({:.0}s of {:.0}s scored)",
+            agree * 100.0, correct, total
+        );
+        for (spk, (tot, cor)) in &per {
+            let pct = if *tot > 0.0 { cor / tot * 100.0 } else { 0.0 };
+            eprintln!("    speaker {spk}: {pct:.0}% re-identified ({tot:.0}s)");
+        }
+        assert!(agree > 0.5, "re-id agreement too low: {:.1}%", agree * 100.0);
+    }
+
     fn model_path(
         env: &str,
         f: impl Fn(&crate::models::ModelManager) -> Option<std::path::PathBuf>,
