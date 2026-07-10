@@ -37,6 +37,10 @@ const MERGE_CAP_SAMPLES: usize = 60 * 16_000;
 /// meeting's speech (with an absolute floor). Fragments below it are absorbed.
 const ANCHOR_FRACTION: f32 = 0.05;
 const ANCHOR_MIN_SECS: f32 = 3.0;
+/// A fragment is only absorbed into an anchor it actually resembles. Below this
+/// cosine it is kept as its own speaker: a distinct voice that just spoke little
+/// (a presenter who only introduced the talk), not segmentation noise.
+const CONSOLIDATE_MIN_SIM: f32 = 0.5;
 
 /// One diarized span: `[start, end)` seconds, tagged with a final speaker id.
 #[derive(Debug, Clone)]
@@ -90,6 +94,12 @@ pub fn diarize(seg_model: &Path, emb_model: &Path, samples: &[f32]) -> Option<Di
     if raw.is_empty() {
         return Some(Diarization { spans: Vec::new(), voiceprints: Vec::new(), speaker_count: 0 });
     }
+    let raw_clusters = raw.iter().map(|s| s.speaker).collect::<BTreeSet<_>>().len();
+    let total_speech: f32 = raw.iter().map(|s| s.end - s.start).sum();
+    log::info!(
+        "diarize: segmentation found {} raw speaker(s) over {:.1}s of speech ({} spans)",
+        raw_clusters, total_speech, raw.len()
+    );
 
     let extractor = SpeakerEmbeddingExtractor::create(&SpeakerEmbeddingExtractorConfig {
         model: Some(emb_model.to_string_lossy().into_owned()),
@@ -112,8 +122,15 @@ pub fn diarize(seg_model: &Path, emb_model: &Path, samples: &[f32]) -> Option<Di
         }
     }
 
+    log::info!("diarize: {} embeddable group(s) before merge", groups.len());
     merge_groups(&extractor, &mut groups);
+    log::info!("diarize: {} group(s) after merge", groups.len());
     consolidate_groups(&raw, &mut groups);
+    log::info!(
+        "diarize: {} final speaker(s), durations(s) {:?}",
+        groups.len(),
+        groups.iter().map(|g| g.dur.round() as i32).collect::<Vec<_>>()
+    );
     // Largest first so orphan (un-embeddable) labels fall into a real speaker.
     groups.sort_by(|a, b| b.dur.partial_cmp(&a.dur).unwrap_or(std::cmp::Ordering::Equal));
 
@@ -189,6 +206,12 @@ fn consolidate_groups(raw: &[Span], groups: &mut Vec<Group>) {
                 best = a;
             }
         }
+        // Only absorb a fragment that plausibly belongs to an anchor. One that
+        // resembles no anchor is a real, quiet speaker (a brief presenter), so
+        // keep it rather than folding a distinct voice into someone else.
+        if best_sim < CONSOLIDATE_MIN_SIM {
+            continue;
+        }
         let labels = std::mem::take(&mut groups[i].labels);
         groups[best].labels.extend(labels);
         groups[i].dur = 0.0; // marks empty
@@ -252,6 +275,24 @@ mod tests {
         assert_eq!(groups.len(), 2); // fragment absorbed
         // The fragment (near [1,0]) joined anchor 0.
         assert!(groups[0].labels.contains(&2));
+    }
+
+    // A brief fragment that resembles no anchor is a distinct quiet speaker (a
+    // presenter who only introduced the talk), and must be kept, not absorbed.
+    #[test]
+    fn consolidate_keeps_dissimilar_fragment() {
+        let raw = vec![
+            Span { start: 0.0, end: 60.0, speaker: 0 },
+            Span { start: 60.0, end: 120.0, speaker: 1 },
+            Span { start: 120.0, end: 121.0, speaker: 2 }, // 1s fragment, distinct voice
+        ];
+        let mut groups = vec![
+            Group { labels: vec![0], audio: vec![], centroid: vec![1.0, 0.0, 0.0], dur: 60.0 },
+            Group { labels: vec![1], audio: vec![], centroid: vec![0.0, 1.0, 0.0], dur: 60.0 },
+            Group { labels: vec![2], audio: vec![], centroid: vec![0.0, 0.0, 1.0], dur: 1.0 },
+        ];
+        consolidate_groups(&raw, &mut groups);
+        assert_eq!(groups.len(), 3); // orthogonal to both anchors -> kept
     }
 
     #[test]
