@@ -38,20 +38,46 @@ what is actually true.
 
 ## Pricing (decisions)
 
-- **Free forever:** base English dictation and basic reading. The funnel. Never
-  gate it.
-- **One paid unlock, not per-module:** meetings, premium voices, multilingual
-  dictation, and sync (once it exists) in a single tier.
-- **Headline: annual GBP 50 and a lifetime around GBP 99.** Lead with these. The
-  lifetime converts the subscription-averse buyer the audience is full of, and
-  recurring cost (R2 storage, no per-use compute) is tiny, so it is not reckless.
-- **Monthly around GBP 6:** low-commitment on-ramp only, not the hero SKU.
+- **Free forever:** dictation and text-to-speech reading, in full, always. These
+  are local and cost nothing to run, so they stay free for everyone. This is the
+  funnel and the daily habit.
+- **Pro (the paid tier): meetings + sync, one subscription.** GBP 5/mo or GBP
+  50/yr (the annual is two months free, a standard discount). This is the Obsidian
+  shape: sync is a genuine recurring server cost, so a recurring price is honest,
+  and the same subscription also unlocks the premium local feature (meetings).
+- **Subscription only, no lifetime for this tier.** You cannot sell a lifetime on
+  an ongoing-cost service like sync. This supersedes the earlier annual-plus-
+  lifetime idea; bundling sync changes the logic. If the subscription-averse buyer
+  turns out to matter in beta, revisit a meetings-only lifetime (no sync) as a
+  separate, later SKU.
 - **Confidential / Pro tier at GBP 12-15/mo: later,** for the compliance buyer,
   once testimonials exist. One SKU on day one, not two.
 - **Dropped: per-module GBP 2.** Fragments the one-product story and has poor unit
   economics (Stripe's fixed fee eats ~13% of GBP 2 vs ~3% of a GBP 50 annual).
 - **On lapse: never brick.** Stop sync and new downloads, keep everything already
   installed working.
+
+### Sync design and cost control
+
+Sync is the only feature with real server cost and real abuse potential, so
+design it defensively from the start:
+
+- **Sync text, settings, progress, and voiceprints, not the heavy blobs.**
+  Everything in Verba except the reading library is tiny: dictation history,
+  vocab, snippets, config, the speaker gallery (embeddings), meeting transcripts
+  and summaries are all text or KB-scale. The only heavy data is imported book and
+  PDF bodies. Do not sync those binaries by default. Sync the library index and
+  reading position and re-import the source locally, or make book-body sync an
+  explicit, capped opt-in.
+- **Cap account storage.** A free or beta account gets a tight cap, the paid tier a
+  larger one (the Obsidian Sync vault-size model). Caps stop one whale from running
+  up the bill.
+- **Do not give sync away free and unlimited in beta.** It is the one
+  genuine-cost, will-be-paid, abuse-prone feature. Free-syncing for months invites
+  whales and anchors users to free sync, so they churn at the paywall. Keep
+  meetings free in beta (local, no cost, safe to test), but hold sync out of the
+  free beta: defer it to launch, or introduce it late as a tightly capped "sync
+  beta".
 
 ---
 
@@ -67,6 +93,9 @@ what is actually true.
   earliest and riskiest adopters.
 - **No card during beta.** Low friction; the goal is testers and feedback, not
   pre-qualified buyers.
+- **Meetings free in beta, sync not.** Meetings are local and safe to give away for
+  testing. Sync is the costly, will-be-paid, abuse-prone one (see Sync design and
+  cost control), so keep it out of the free beta.
 - **Instrument it or it is wasted.** Watch where new users drop off (the activation
   blocker), talk to them, collect testimonials. The feedback is worth more than
   the headcount.
