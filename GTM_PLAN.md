@@ -22,14 +22,16 @@ what is actually true.
   A lapse gates new and premium features only.
 - **Sell the unique axis, not a discount clone.** "The only one that never sends
   your audio anywhere", not "a cheaper Granola".
-- **Price on value, not effort.** The work behind a feature does not set its price,
-  willingness to pay does. Here the two are inverted: the dictation and TTS
-  pipeline is the hardest work but a commodity purchase (free OS dictation exists,
-  the marginal value of slightly-cleaner dictation is low), while meetings is more
-  assembled from open parts but high-value (replaces a paid Granola/Otter seat,
-  privacy-critical). The pipeline work is not wasted by being free. It is what
-  makes the free tier better than competitors' free tiers, which is the
-  acquisition engine. Best-in-class free is that work's job.
+- **Price on value, not effort, and note that dictation and reading are NOT
+  low-value.** Willingness to pay sets the price. The market proves the point:
+  Wispr Flow (dictation) and ElevenReader (TTS) command Granola-level prices,
+  roughly £10-18/mo, and Wispr can top Granola. Only BASE dictation is
+  commoditised (free OS dictation exists); best-in-class premium dictation and
+  reading are each real paid products. So the free/paid line is base-versus-premium
+  within every mode, and the premium tier of each is genuinely monetisable, not
+  funnel garnish. The pipeline work does double duty: it makes the free tier
+  best-in-class (the acquisition engine) and it underpins premium features people
+  pay for.
 
 ---
 
@@ -75,6 +77,18 @@ what is actually true.
   lifetime idea; bundling sync changes the logic. If the subscription-averse buyer
   turns out to matter in beta, revisit a meetings-only lifetime (no sync) as a
   separate, later SKU.
+- **GBP 5 is a launch undercut, not the ceiling, and probably not the steady
+  state.** Pro bundles what three separate products each charge for: dictation
+  (Wispr Flow ~GBP 12-15), reading (ElevenReader ~GBP 10), and meetings (Granola
+  ~GBP 14-18), plus sync. Pricing that bundle at GBP 5 is not a clever undercut,
+  it is underselling by a wide margin. Even GBP 10 stays radically cheaper than any
+  ONE of them, so the "great value" story survives at double the revenue. The
+  brake: Verba is behind each specialist today (English-only, voice-quality
+  ceiling, small local summariser), so do not price at the sum. Launch low if you
+  want the adoption undercut, grandfather early buyers, but treat GBP 8-12 as the
+  target once quality and trust catch up, not GBP 5. The real flex is not "cheaper
+  than one of them", it is "all three, privately, for less than any single one",
+  which is true at GBP 10, not only at GBP 5.
 - **Confidential / Pro tier at GBP 12-15/mo: later,** for the compliance buyer,
   once testimonials exist. One SKU on day one, not two.
 - **Dropped: per-module GBP 2.** Fragments the one-product story and has poor unit
