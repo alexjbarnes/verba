@@ -22,6 +22,14 @@ what is actually true.
   A lapse gates new and premium features only.
 - **Sell the unique axis, not a discount clone.** "The only one that never sends
   your audio anywhere", not "a cheaper Granola".
+- **Price on value, not effort.** The work behind a feature does not set its price,
+  willingness to pay does. Here the two are inverted: the dictation and TTS
+  pipeline is the hardest work but a commodity purchase (free OS dictation exists,
+  the marginal value of slightly-cleaner dictation is low), while meetings is more
+  assembled from open parts but high-value (replaces a paid Granola/Otter seat,
+  privacy-critical). The pipeline work is not wasted by being free. It is what
+  makes the free tier better than competitors' free tiers, which is the
+  acquisition engine. Best-in-class free is that work's job.
 
 ---
 
@@ -49,13 +57,19 @@ what is actually true.
 
 ## Pricing (decisions)
 
-- **Free forever:** dictation and text-to-speech reading, in full, always. These
-  are local and cost nothing to run, so they stay free for everyone. This is the
-  funnel and the daily habit.
-- **Pro (the paid tier): meetings + sync, one subscription.** GBP 5/mo or GBP
-  50/yr (the annual is two months free, a standard discount). This is the Obsidian
-  shape: sync is a genuine recurring server cost, so a recurring price is honest,
-  and the same subscription also unlocks the premium local feature (meetings).
+- **Free forever: the base of every mode.** Base English dictation with the
+  standard model and the full clean-up pipeline, and reading with the standard
+  voices. This is the funnel and the daily habit, and the pipeline quality is what
+  makes it best-in-class free.
+- **Pro (the paid tier): the premium of every mode, plus sync, one subscription.**
+  GBP 5/mo or GBP 50/yr (the annual is two months free). Today that is meetings +
+  sync, because they are the only premium pieces built. As they ship, multilingual
+  dictation, the AI edit/command mode, and premium voices join Pro too. So the
+  paywall is not "meetings", it is "everything premium across the app, plus sync",
+  and meetings is simply what is ready first. This is the Obsidian shape: sync is a
+  genuine recurring server cost, so a recurring price is honest, and it lifts the
+  premium local features along with it. Lead the pitch with the meeting assistant
+  and the output quality, not with sync.
 - **Subscription only, no lifetime for this tier.** You cannot sell a lifetime on
   an ongoing-cost service like sync. This supersedes the earlier annual-plus-
   lifetime idea; bundling sync changes the logic. If the subscription-averse buyer
