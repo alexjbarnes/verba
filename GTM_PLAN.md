@@ -11,6 +11,20 @@ what is actually true.
 
 ---
 
+## Goals and scope
+
+Deliberately modest and solo. English-only market. A rough success bar: around
+1,000 people paying about GBP 5/mo (roughly GBP 60k/yr) would be a delight, not a
+floor to a bigger raise. This is a product the developer uses daily and can
+dogfood, which is the strongest position a solo dev can be in: you build what you
+actually need, and you know the quality is real because on-device dictation and
+TTS elsewhere are genuinely poor (the reason Verba exists). Sustainable enjoyment
+beats maximisation here, the timeline is long and there is no team to burn out.
+The job is to steal a modest number of customers from the incumbents, not to
+out-scale them.
+
+---
+
 ## Guiding principles
 
 - **Solo developer.** Own time is the scarce resource, not server cost. Keep the
@@ -89,6 +103,12 @@ what is actually true.
   target once quality and trust catch up, not GBP 5. The real flex is not "cheaper
   than one of them", it is "all three, privately, for less than any single one",
   which is true at GBP 10, not only at GBP 5.
+- **Price is a lever on how many customers you need, not just on revenue.** The
+  ~GBP 5k/mo goal needs ~1,000 payers at GBP 5, or ~500 at GBP 10. Since stealing
+  customers is the hard part for a solo dev, a higher price means fewer to find for
+  the same income. GBP 5 is completely fine if it is the comfortable number, it
+  just asks for roughly twice the customers. Decide it against your distribution
+  reality, not against the competitors.
 - **Confidential / Pro tier at GBP 12-15/mo: later,** for the compliance buyer,
   once testimonials exist. One SKU on day one, not two.
 - **Dropped: per-module GBP 2.** Fragments the one-product story and has poor unit
