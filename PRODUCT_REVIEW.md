@@ -283,33 +283,45 @@ funnel, not the price tag. Spend the energy there.
 
 ### Trials and launch
 
-The developer is considering a very generous free trial: 6 months to start,
-tailing to 3. Generous is the right instinct for an unknown one-person app, but
-6 months is the wrong dial setting:
+The plan is generous free access while the app is brand new and in beta (roughly
+6 months), reduced after. Scoped to beta, that is reasonable, not the mistake it
+first reads as. During beta you are not trying to learn whether people pay, that
+signal is premature on a half-built product. You are trying to make it good and
+seed early adopters, and free-and-open is a fair trade for testing and feedback.
+The refinements that matter:
 
-- **It defers the only question that matters.** You do not learn whether anyone
-  pays until six months after launch. A solo dev needs that signal fast, to know
-  whether to keep going or rethink, and to stay motivated.
-- **It trains users that the app is free.** The longer the free run, the more the
-  paywall reads as something taken away, and the harder the conversion.
-- **It removes urgency.** Six months out, the user forgets they are on a trial and
-  the ask arrives as a surprise, not a decision.
-- **A 6-month no-card trial is just a free tier with a delayed paywall.** If that
-  is the intent, make it an honest permanent free tier instead.
+- **Frame it as a beta perk against a known launch price, not silent free.** Say
+  it plainly: "Free during beta. At launch, £50/yr. Beta users get [reward]." If
+  future pricing is never mentioned, the cohort anchors to free and churns at the
+  paywall.
+- **Let product-readiness set the length, not a fixed 6 months.** Beta ends when
+  the app is good enough to charge (activation fixed, worst gaps closed). Sooner
+  if it gets there sooner. If it genuinely needs longer, the free period costs
+  little, because that state could not have been charged for anyway.
+- **Reward beta users at conversion. This is the real payoff.** The people who ran
+  your beta for months are your likeliest payers, evangelists, and
+  testimonial-givers, and those testimonials are what unlock the professional
+  segment. Grandfather them or give a beta-only lifetime. It also makes "get in
+  during beta" a genuine reason to sign up now.
+- **Instrument the beta or it is wasted.** A silent free beta that just gives the
+  app away teaches you nothing. Watch where new users drop (the activation
+  blocker), talk to them, collect quotes. The feedback is worth more than the
+  users.
+- **No card during beta; plan the conversion carefully.** Beta-to-paid is where
+  you win or lose the cohort. Do not brick, gate only new and premium, lead with
+  the beta reward.
 
-Better shape:
+The 6-to-3-month taper is fine here: shrinking generosity as the product matures
+rewards the earliest, riskiest adopters, exactly who you want to favour. (The
+earlier critique applies to a PERMANENT long trial, not a beta-era one.)
 
-- **A permanent, generous free tier** (base dictation and reading). This is the
-  "generous" instinct done right: honest, habit-forming, and it is the funnel.
-- **A short trial of the paid features** (meetings, premium voices, sync), 14 to
-  30 days, so people taste the paid value and decide quickly. That is where the
-  fast conversion signal comes from.
-- **Skip the tailing-down.** It creates a two-class feeling and tunes trial length
-  before the price is proven. To reward early adopters, reward early PAYERS
-  instead: a limited founder's lifetime deal (first 100 at £49 versus £99) creates
-  real urgency and rewards the people you actually want.
-- **Trial length is downstream of distribution.** With 50 visitors, 14 days versus
-  6 months barely matters. Fix the funnel before tuning the trial.
+Post-beta, settle into the steady-state shape: a permanent generous free tier
+(base dictation and reading) plus a short 14-to-30-day trial of the paid
+features, which keeps the value-then-ask loop tight once the product stands on
+its own.
+
+Still true: beta and trial length are downstream of distribution. With 50
+visitors a month, none of this moves the needle yet. Fix the funnel first.
 
 ---
 
