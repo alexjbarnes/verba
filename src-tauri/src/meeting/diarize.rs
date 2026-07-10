@@ -42,6 +42,16 @@ const MERGE_CAP_SAMPLES: usize = 60 * 16_000;
 /// only introduced a talk), while too small a floor keeps sub-second noise as
 /// phantom speakers. 6s clears real chatter and drops fragments.
 const MIN_SPEAKER_SECS: f32 = 6.0;
+/// Second-chance fold. A cluster shorter than SECOND_CHANCE_MAX is "small". If it
+/// resembles a big speaker at or above SECOND_CHANCE_SIM it is a mis-split of that
+/// speaker (the merge pass just missed it) and folds in; if it resembles no big
+/// speaker it is a genuinely brief, distinct speaker and is kept. Clusters at or
+/// above SECOND_CHANCE_MAX are definite speakers and never fold. On two real
+/// meetings the leftover mis-splits measured 0.41 and 0.50 cosine to their parent
+/// (merge's own bar is 0.50), while distinct voices run well below 0.35, so 0.40
+/// folds both without touching real speakers.
+const SECOND_CHANCE_MAX: f32 = 20.0;
+const SECOND_CHANCE_SIM: f32 = 0.40;
 
 /// One diarized span: `[start, end)` seconds, tagged with a final speaker id.
 #[derive(Debug, Clone)]
@@ -188,18 +198,17 @@ fn consolidate_groups(groups: &mut Vec<Group>) {
     if groups.is_empty() {
         return;
     }
+    // Definite speakers, long enough to anchor on. Anything shorter is a
+    // candidate to fold: a fragment (noise), or a mis-split of one of these.
     let anchors: Vec<usize> =
-        (0..groups.len()).filter(|&i| groups[i].dur >= MIN_SPEAKER_SECS).collect();
+        (0..groups.len()).filter(|&i| groups[i].dur >= SECOND_CHANCE_MAX).collect();
     if anchors.is_empty() {
-        return; // nothing substantial enough to anchor on — keep as is
+        return; // nothing dominant enough to fold into — keep as is
     }
     for i in 0..groups.len() {
-        if groups[i].dur >= MIN_SPEAKER_SECS {
+        if groups[i].dur >= SECOND_CHANCE_MAX {
             continue;
         }
-        // Below the floor is a segmentation fragment, not a real speaker. Fold it
-        // into the nearest anchor by voiceprint so its handful of spans still get
-        // a sensible label instead of inventing a phantom speaker.
         let mut best = anchors[0];
         let mut best_sim = f32::MIN;
         for &a in &anchors {
@@ -208,6 +217,21 @@ fn consolidate_groups(groups: &mut Vec<Group>) {
                 best_sim = sim;
                 best = a;
             }
+        }
+        // Fold a sub-floor fragment (noise) always; fold a small cluster that
+        // resembles a real speaker (a mis-split); keep a small cluster that
+        // resembles no one (a genuinely brief, distinct speaker).
+        let fold = groups[i].dur < MIN_SPEAKER_SECS || best_sim >= SECOND_CHANCE_SIM;
+        if groups[i].dur >= MIN_SPEAKER_SECS {
+            log::info!(
+                "diarize: small speaker {:.0}s, nearest-anchor cosine {:.2} -> {}",
+                groups[i].dur,
+                best_sim,
+                if fold { "fold (mis-split)" } else { "keep (distinct)" }
+            );
+        }
+        if !fold {
+            continue;
         }
         let labels = std::mem::take(&mut groups[i].labels);
         groups[best].labels.extend(labels);
@@ -290,7 +314,18 @@ mod tests {
             Group { labels: vec![1], audio: vec![], centroid: vec![0.0, 0.0, 1.0], dur: 12.0 },
         ];
         consolidate_groups(&mut groups);
-        assert_eq!(groups.len(), 2); // 12s >= floor -> kept
+        assert_eq!(groups.len(), 2); // small but resembles no anchor -> kept
+    }
+
+    // A small cluster that resembles a big speaker is a mis-split and folds in.
+    #[test]
+    fn consolidate_folds_similar_mis_split() {
+        let mut groups = vec![
+            Group { labels: vec![0], audio: vec![], centroid: vec![1.0, 0.0, 0.0], dur: 600.0 },
+            Group { labels: vec![1], audio: vec![], centroid: vec![0.95, 0.31, 0.0], dur: 12.0 },
+        ];
+        consolidate_groups(&mut groups);
+        assert_eq!(groups.len(), 1); // 12s at cosine 0.95 -> folded into the anchor
     }
 
     #[test]
