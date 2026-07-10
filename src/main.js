@@ -657,6 +657,7 @@ async function loadPackagesStatus() {
     pkgStatus = await invoke('packages_status');
     renderPkgDictation();
     renderDictationBanner();
+    updateModelsBadge();
   } catch (err) {
     console.error('Failed to load package status:', err);
   }
@@ -678,15 +679,142 @@ function packagesWithUpdates(status) {
 async function checkPackageUpdatesOnStartup() {
   try {
     const status = await invoke('packages_check_updates');
-    if (!status || status.check_error) return;
-    pkgStatus = status;
-    renderPkgDictation();
-    renderDictationBanner();
-    renderPkgMeeting();
-    const updates = packagesWithUpdates(status);
-    if (updates.length) showToast(`Update available: ${updates.join(' & ')} — open Settings to install`);
+    if (status && !status.check_error) {
+      pkgStatus = status;
+      renderPkgDictation();
+      renderDictationBanner();
+      renderPkgMeeting();
+    }
   } catch (_) {}
+  // Ensure a status even if the network check failed (offline boot), then decide
+  // whether to surface the first-launch models modal.
+  if (!pkgStatus) { try { pkgStatus = await invoke('packages_status'); } catch (_) {} }
+  updateModelsBadge();
+  maybeAutoOpenModels();
 }
+
+// ── Models modal: one clear place to see what's downloaded and what's missing,
+// with per-package download. Auto-shown on first launch when something needs
+// attention, and openable from Settings > Updates > Model downloads.
+let modelsModalOpen = false;
+let modelsModalDismissed = false; // session-only, so a dismissed modal stops nagging
+
+const MODEL_PACKAGES = {
+  dictation: { name: 'Dictation', purpose: 'Voice typing and transcription. Needed for Speak and for meeting transcripts.' },
+  meeting: { name: 'Meeting', purpose: 'On-device meeting transcription, speaker labels, and summaries.' },
+};
+
+function pkgStateLabel(state) {
+  return { installed: 'Installed', downloading: 'Downloading', update_available: 'Update available', not_installed: 'Not downloaded' }[state] || 'Unknown';
+}
+
+// Packages that genuinely need attention: dictation missing or updatable (it is
+// essential), and meeting updatable (you have it, a piece is missing). Meeting
+// not being downloaded is optional, so it does not count as "needs attention".
+function modelsNeedingAttention(status) {
+  const out = [];
+  if (!status) return out;
+  const d = status.dictation;
+  if (d && (d.state === 'not_installed' || d.state === 'update_available')) out.push('dictation');
+  if (isDesktop && status.meeting && status.meeting.state === 'update_available') out.push('meeting');
+  return out;
+}
+
+function updateModelsBadge() {
+  const badge = document.getElementById('models-summary-badge');
+  if (!badge) return;
+  const n = modelsNeedingAttention(pkgStatus).length;
+  badge.textContent = n ? `${n} to download` : 'All installed';
+  badge.className = 'text-xs font-semibold ' + (n ? 'text-primary' : 'text-on-surface-variant');
+}
+
+function maybeAutoOpenModels() {
+  if (modelsModalDismissed || modelsModalOpen) return;
+  if (modelsNeedingAttention(pkgStatus).length) openModelsModal();
+}
+
+function modelCardHtml(key, d, model) {
+  const meta = MODEL_PACKAGES[key];
+  const state = d ? d.state : 'not_installed';
+  const downloading = state === 'downloading';
+  const pct = downloading ? Math.round((d.progress || 0) * 100) : 0;
+  let size = '';
+  if (key === 'dictation') size = d && d.pending_bytes ? fmtBytes(d.pending_bytes) : '';
+  else if (key === 'meeting' && model) size = model.size || '';
+  const statusText = downloading
+    ? `Downloading… ${pct}%`
+    : pkgStateLabel(state) + (size && state !== 'installed' ? ` · ${size}` : '');
+  const statusColor = state === 'installed' || state === 'update_available' ? 'text-primary' : 'text-on-surface-variant';
+  let action;
+  if (state === 'installed') action = '<span class="material-symbols-outlined text-primary">check_circle</span>';
+  else if (downloading) action = `<span class="text-xs font-semibold text-on-surface-variant tabular-nums">${pct}%</span>`;
+  else action = `<button class="model-dl-btn text-xs font-semibold px-4 py-2 bg-primary text-on-primary rounded-lg hover:brightness-110 transition cursor-pointer" data-pkg="${key}">${state === 'update_available' ? 'Update' : 'Download'}</button>`;
+  return `<div class="model-card bg-surface-container rounded-xl p-4" data-pkg="${key}">
+    <div class="flex items-start justify-between gap-3">
+      <div class="min-w-0">
+        <p class="text-sm font-semibold text-on-surface">${meta.name}</p>
+        <p class="text-xs text-on-surface-variant mt-0.5">${meta.purpose}</p>
+        <p class="model-card-status text-xs font-medium mt-1.5 ${statusColor}">${statusText}</p>
+      </div>
+      <div class="shrink-0 flex items-center">${action}</div>
+    </div>
+    <div class="model-card-progress ${downloading ? '' : 'hidden'} mt-3"><div class="progress-bar"><div class="model-card-fill progress-bar-fill" style="width:${pct}%"></div></div></div>
+  </div>`;
+}
+
+function renderModelsModal() {
+  const list = document.getElementById('models-list');
+  if (!list || !pkgStatus) return;
+  const rec = meetingModels.find(m => m.recommended) || meetingModels.find(m => m.id === meetingSelectedSummarizer) || meetingModels[0];
+  const cards = [modelCardHtml('dictation', pkgStatus.dictation)];
+  if (isDesktop) cards.push(modelCardHtml('meeting', pkgStatus.meeting, rec));
+  list.innerHTML = cards.join('');
+  list.querySelectorAll('.model-dl-btn').forEach(b => b.addEventListener('click', () => downloadPackage(b.dataset.pkg)));
+  const n = modelsNeedingAttention(pkgStatus).length;
+  document.getElementById('models-modal-sub').textContent = n ? `${n} model${n > 1 ? 's' : ''} to download` : 'Everything is downloaded.';
+}
+
+async function downloadPackage(pkg) {
+  try {
+    if (pkg === 'dictation') {
+      await invoke('package_install_dictation');
+    } else if (pkg === 'meeting') {
+      const rec = meetingModels.find(m => m.id === meetingSelectedSummarizer)
+        || meetingModels.find(m => m.recommended) || meetingModels[0];
+      if (!rec) { showToast('No summarizer available yet'); return; }
+      meetingSelectedSummarizer = rec.id;
+      await invoke('package_install_meeting', { summarizerId: rec.id });
+    }
+  } catch (err) {
+    showToast('Download failed: ' + err);
+  }
+  await loadPackagesStatus();
+  if (isDesktop) await loadMeetingModels();
+  updateModelsBadge();
+  if (modelsModalOpen) renderModelsModal();
+}
+
+function openModelsModal() {
+  if (isDesktop && !meetingModels.length) loadMeetingModels().then(() => { if (modelsModalOpen) renderModelsModal(); });
+  renderModelsModal();
+  const m = document.getElementById('models-modal');
+  m.classList.remove('hidden');
+  m.classList.add('flex');
+  modelsModalOpen = true;
+}
+
+function closeModelsModal() {
+  const m = document.getElementById('models-modal');
+  m.classList.add('hidden');
+  m.classList.remove('flex');
+  modelsModalOpen = false;
+  modelsModalDismissed = true;
+}
+
+document.getElementById('models-modal-close').addEventListener('click', closeModelsModal);
+document.getElementById('models-modal-done').addEventListener('click', closeModelsModal);
+document.getElementById('models-modal-overlay').addEventListener('click', closeModelsModal);
+document.getElementById('open-models-modal').addEventListener('click', () => { modelsModalDismissed = false; openModelsModal(); });
 
 document.getElementById('pkg-dictation-btn').addEventListener('click', async () => {
   const btn = document.getElementById('pkg-dictation-btn');
@@ -840,17 +968,31 @@ listen('download-progress', (event) => {
     btn.disabled = true;
     btn.textContent = `${pct}%`;
   }
+
+  // Models modal: live progress on the matching package card.
+  if (modelsModalOpen && (id === 'pkg-dictation' || id === 'pkg-meeting')) {
+    const card = document.querySelector(`.model-card[data-pkg="${id === 'pkg-dictation' ? 'dictation' : 'meeting'}"]`);
+    if (card) {
+      const s = card.querySelector('.model-card-status'); if (s) s.textContent = `Downloading… ${pct}%`;
+      const p = card.querySelector('.model-card-progress'); if (p) p.classList.remove('hidden');
+      const f = card.querySelector('.model-card-fill'); if (f) f.style.width = `${pct}%`;
+    }
+  }
 });
 
 listen('download-complete', async (event) => {
   if (event.payload?.id === 'pkg-dictation') {
     await loadPackagesStatus();
+    updateModelsBadge();
+    if (modelsModalOpen) renderModelsModal();
     showToast('Dictation models installed');
     return;
   }
   if (event.payload?.id === 'pkg-meeting') {
     await loadPackagesStatus();
     if (isDesktop) await loadMeetingModels();
+    updateModelsBadge();
+    if (modelsModalOpen) renderModelsModal();
     showToast('Summarizer installed');
     return;
   }

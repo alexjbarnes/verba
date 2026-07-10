@@ -262,6 +262,13 @@
             <h2 class="text-sm font-semibold text-on-surface">Updates</h2>
           </div>
           <div class="bg-surface-container-low rounded-xl p-5 space-y-4">
+            <button id="open-models-modal" class="w-full flex items-center justify-between gap-2 min-h-11 px-3 rounded-lg border border-outline-variant/30 hover:bg-surface-container-highest transition-colors cursor-pointer">
+              <span class="text-sm font-medium text-on-surface">Model downloads</span>
+              <span class="flex items-center gap-2">
+                <span id="models-summary-badge" class="text-xs font-semibold text-on-surface-variant"></span>
+                <span class="material-symbols-outlined text-on-surface-variant text-[20px]">chevron_right</span>
+              </span>
+            </button>
             <div class="flex items-center justify-between gap-3">
               <div class="min-w-0">
                 <label class="text-sm font-medium text-on-surface">Dictation models</label>
@@ -995,6 +1002,28 @@
   </div>
 
   <!-- Confirm dialog (replaces window.confirm which doesn't work in WKWebView) -->
+  <!-- Models modal: consolidated "what's downloaded / what's missing" with per-
+       package download. Shown on first launch when anything is missing, and
+       openable from Settings > Updates > Model downloads. -->
+  <div id="models-modal" class="fixed inset-0 z-50 hidden items-center justify-center bg-black/50 backdrop-blur-sm">
+    <div id="models-modal-overlay" class="absolute inset-0"></div>
+    <div class="relative bg-surface-container-high rounded-2xl mx-4 max-w-md w-full shadow-xl border border-outline-variant/20 max-h-[85vh] flex flex-col">
+      <div class="flex items-start justify-between gap-3 px-5 pt-5 pb-3">
+        <div class="min-w-0">
+          <h2 class="text-base font-bold text-on-surface">Models</h2>
+          <p id="models-modal-sub" class="text-xs text-on-surface-variant mt-0.5"></p>
+        </div>
+        <button id="models-modal-close" class="shrink-0 w-9 h-9 flex items-center justify-center text-on-surface-variant hover:text-on-surface rounded-lg hover:bg-surface-container-highest transition-colors cursor-pointer">
+          <span class="material-symbols-outlined">close</span>
+        </button>
+      </div>
+      <div id="models-list" class="px-5 pb-2 space-y-3 overflow-y-auto"></div>
+      <div class="px-5 py-4 border-t border-outline-variant/20 flex justify-end">
+        <button id="models-modal-done" class="px-4 py-2 text-sm font-semibold text-on-surface-variant rounded-lg hover:bg-surface-container-highest transition-colors cursor-pointer">Done</button>
+      </div>
+    </div>
+  </div>
+
   <div id="confirm-dialog" class="fixed inset-0 z-50 hidden items-center justify-center bg-black/50 backdrop-blur-sm">
     <div class="bg-surface-container-high rounded-2xl p-6 mx-4 max-w-sm w-full shadow-xl border border-outline-variant/20">
       <p id="confirm-msg" class="text-sm text-on-surface mb-5"></p>
