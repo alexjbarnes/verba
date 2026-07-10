@@ -5,6 +5,13 @@ adopt, pay, and stay. Claims are grounded in the code and docs, cited inline.
 
 Reviewer stance: the value here is in naming real weaknesses, not cheerleading.
 
+**Context: this is a solo developer.** Verba is built and run by one person, and
+the goal is to capture some value from a strong side project, not to build a
+venture-scale business. That reframes several recommendations below. Prefer the
+lowest-operations monetization (annual and lifetime licences over per-seat sales
+and sync you have to run), keep the SKU count tiny, and treat your own time as
+the scarcest resource. Section 4's pricing subsections are written for this.
+
 ---
 
 ## 1. Executive summary
@@ -223,25 +230,56 @@ machine" objection:
    mode. Power-user upsell on the daily-habit surface.
 5. **The local API and TTS engine.** A developer/power tier once shipped.
 
-### Recommended structure
+### The proposed pricing, assessed (solo developer)
 
-- **Free forever:** base English dictation with the standard model, basic TTS
-  reading. Enough to build the daily habit. This is your funnel, do not starve it.
-- **Paid (subscription):** meetings, E2E sync, premium voices, multilingual and
-  Pro dictation, the API. Roughly $6-8/mo consumer, or ~$60/yr. Teams tier for
-  meetings at a higher per-seat price.
-- **Offer a lifetime/one-time option.** Your core audience picked local to escape
-  subscriptions. A perpetual license with a "updates for 1 year" fallback
-  (JetBrains/Sublime model) converts the sub-averse buyer you would otherwise
-  lose. The recurring cost you are covering (R2 storage, sync servers) is small,
-  so a lifetime SKU is not reckless.
-- **On lapse, never brick.** Stop new downloads, sync, and premium voices. Keep
-  everything already installed working. This preserves the trust that is the
-  entire reason someone chose Verba.
+The developer's plan: competitors (Granola, Wispr, ElevenReader) run about
+£33/mo, so undercut hard with £2/mo per module, £5/mo for all three, or £50/yr,
+and let local privacy plus a fraction of the price carry it.
 
-Recurring revenue for a local app is justified by ongoing delivered value: new
-and improved models, new voices, and sync. Not by holding the user's own CPU
-hostage.
+Half right, and the off half is load-bearing:
+
+- **Price is not the bottleneck, distribution and trust are.** £5 versus £33
+  changes nothing if nobody finds a one-person app or trusts it with their
+  meetings. Getting 200 people to the download page is far harder than choosing a
+  number. Do not optimize price down before there is any funnel.
+- **Do not underprice the buyer who needs you most.** The privacy-constrained
+  professional (therapist, lawyer) is not comparing on features, for them Verba is
+  the only usable option, worth £15-20/mo. £5 leaves that on the table, and a
+  suspiciously cheap price can read as "hobby, not safe for client data" to
+  exactly that buyer. Cheap can cost the sale.
+- **"Cheaper because slightly worse" is a weak frame. "The only one that never
+  sends your audio anywhere" is a strong one.** Sell what the incumbents
+  structurally cannot be, not a discount clone. Same feature gap, different story,
+  and the second supports a real price.
+- **Drop per-module £2.** It fragments the one-product story, and £2 is poor unit
+  economics: Stripe's 20p + 2.9% eats ~13% of it versus ~3% of a £50 annual.
+  Bundle, do not itemize.
+- **Right instincts:** annual, and affordable. £50/yr is a good headline. The only
+  mistake is leading with monthly.
+
+### Recommended structure (solo developer)
+
+Your scarcest resource is your own time, not server cost. Keep the SKU count tiny
+and the operations near zero.
+
+- **Free forever:** base English dictation and basic reading. The funnel, never
+  gate it.
+- **One paid unlock, not three:** meetings, premium voices, multilingual, and sync
+  (once it exists) in a single tier.
+- **Lead with annual £50 and a lifetime around £99.** The lifetime matters, the
+  core audience chose local to escape subscriptions and a perpetual licence
+  converts the buyer a sub would lose. Recurring cost (R2 storage, no per-use
+  compute) is tiny, so lifetime is not reckless.
+- **Monthly around £6 as a low-commitment on-ramp only,** not the hero SKU.
+- **A Confidential/Pro tier at £12-15/mo later,** for the compliance buyer, once
+  there are testimonials. One SKU on day one, not two.
+- **Never brick on lapse.** Stop sync and new downloads, keep installed features
+  working.
+
+The maths that reframes it: £50/yr times 200 customers is about £10k/yr, real
+solo-dev side income and very reachable. Reaching 200 paying customers means
+roughly 5,000 to 20,000 people finding the app. The bottleneck is the top of the
+funnel, not the price tag. Spend the energy there.
 
 ---
 
