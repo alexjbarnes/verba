@@ -401,6 +401,54 @@ mod tests {
         assert!(agree > 0.5, "re-id agreement too low: {:.1}%", agree * 100.0);
     }
 
+    // Cross-meeting re-identification: diarize two meetings, then match each
+    // speaker in meeting 2 against meeting 1's speakers by voiceprint. Shared
+    // people should line up (cosine >= 0.5); new people should not. This is the
+    // true test of the gallery's cross-meeting recognition. Reports a table for
+    // manual validation (no ground-truth labels available). Set both WAVs:
+    //   VERBA_DIARIZE_WAV=m1.wav VERBA_DIARIZE_WAV2=m2.wav ... cargo test ...
+    #[test]
+    #[ignore]
+    fn diarize_cross_meeting_reid() {
+        let _ = env_logger::builder().filter_level(log::LevelFilter::Info).is_test(false).try_init();
+        let seg = model_path("VERBA_SEG_MODEL", |m| m.segmentation_model_path());
+        let emb = model_path("VERBA_EMB_MODEL", |m| m.speaker_model_path());
+        let s1 = read_wav_16k_mono(&std::env::var("VERBA_DIARIZE_WAV").expect("VERBA_DIARIZE_WAV"));
+        let s2 = read_wav_16k_mono(&std::env::var("VERBA_DIARIZE_WAV2").expect("VERBA_DIARIZE_WAV2"));
+        let d1 = diarize(&seg, &emb, &s1).expect("diarize m1");
+        let d2 = diarize(&seg, &emb, &s2).expect("diarize m2");
+        let mut dur2: std::collections::BTreeMap<usize, f32> = std::collections::BTreeMap::new();
+        for span in &d2.spans {
+            *dur2.entry(span.speaker).or_default() += span.end - span.start;
+        }
+        eprintln!(
+            "[cross] meeting 1: {} speakers, meeting 2: {} speakers",
+            d1.speaker_count, d2.speaker_count
+        );
+        eprintln!("[cross] each meeting-2 speaker -> nearest meeting-1 speaker:");
+        let mut matched = 0;
+        for (j, vp2) in d2.voiceprints.iter().enumerate() {
+            let (mut best_i, mut best) = (0usize, f32::MIN);
+            for (i, vp1) in d1.voiceprints.iter().enumerate() {
+                let c = cosine(vp2, vp1);
+                if c > best {
+                    best = c;
+                    best_i = i;
+                }
+            }
+            let dur = dur2.get(&j).copied().unwrap_or(0.0);
+            let verdict = if best >= 0.5 {
+                matched += 1;
+                format!("MATCHES meeting-1 speaker {best_i}")
+            } else {
+                "new person".to_string()
+            };
+            eprintln!("    M2 speaker {j} ({dur:.0}s): nearest M1 speaker {best_i}, cosine {best:.2} -> {verdict}");
+        }
+        eprintln!("[cross] {matched} of {} meeting-2 speakers matched someone from meeting 1", d2.voiceprints.len());
+        assert!(d2.speaker_count > 1, "meeting 2 diarization collapsed");
+    }
+
     fn model_path(
         env: &str,
         f: impl Fn(&crate::models::ModelManager) -> Option<std::path::PathBuf>,
