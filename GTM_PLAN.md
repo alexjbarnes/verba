@@ -33,6 +33,17 @@ what is actually true.
   are what a privacy buyer opens their wallet for.
 - **One line:** your voice, on your device, forever. No cloud, no account, no audio
   leaves the machine.
+- **Do not sell it as "pay for sync".** Obsidian Sync draws constant "overpriced
+  for just sync" complaints, and free alternatives (iCloud, Git) invite the
+  comparison. Verba Pro is more than sync: a private meeting assistant plus a
+  dictation and reading pipeline an ordinary person cannot reproduce from the raw
+  open models. Sync is the honest reason the price recurs, not the headline. Lead
+  with the meeting assistant and the output quality, and bundle sync as a perk.
+- **That value argues for pricing at or above Obsidian's sync, not below.** GBP 5
+  is a deliberate launch undercut for an unknown solo app, which is defensible,
+  but the fine-tuned grammar model and the tuned pipelines are exactly what would
+  justify GBP 6-8. There is room. Do not underprice the part that is genuinely
+  differentiated.
 
 ---
 

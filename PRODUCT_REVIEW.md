@@ -442,10 +442,18 @@ This is the weakest part of the product and the highest-ROI fix.
   cloud incumbents will not adopt because it breaks their model.
 - **Accumulated personal data.** Voiceprint gallery, vocab, snippets, history.
   Switching cost, not network effect, but real.
-- **The integration IP.** The espeak-free phonemization (bundled CMUdict/gb_dict),
-  the fine-tuned grammar router and corrector, the diarization tuning
-  (`diarize.rs`, the merge/consolidate pass). This is the closest thing to
-  proprietary, though it is derived from open data and reproducible with effort.
+- **The integration IP, which is stronger than "the models are all open" implies.**
+  The shipped grammar models are Verba's OWN fine-tunes (ELECTRA router + T5
+  corrector, trained on synthetic spoken-register corruption), not a download, and
+  the stock checkpoints measure far worse on ASR output. Add the espeak-free
+  phonemization (bundled CMUdict/gb_dict + overrides + OOV fallback), the
+  diarization merge/consolidate tuning, and the `-dur` word-timing patch. An
+  ordinary person handed the same open base models would not get the same results;
+  reproducing this is months of tuning, not an afternoon. Two honest caveats: it
+  is an execution moat, not a structural one (a funded competitor could redo it),
+  and it only converts to willingness-to-pay when users can actually perceive the
+  quality gap, so make that gap visible. But it is a real differentiator, not the
+  thin one the models-are-open framing suggests.
 
 ### What is copyable
 
