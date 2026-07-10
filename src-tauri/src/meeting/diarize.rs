@@ -35,12 +35,13 @@ const POOL_CAP_SECS: f64 = 30.0;
 const MERGE_CAP_SAMPLES: usize = 60 * 16_000;
 /// A cluster is a real "anchor" speaker if it holds at least this share of the
 /// meeting's speech (with an absolute floor). Fragments below it are absorbed.
-const ANCHOR_FRACTION: f32 = 0.05;
-const ANCHOR_MIN_SECS: f32 = 3.0;
-/// A fragment is only absorbed into an anchor it actually resembles. Below this
-/// cosine it is kept as its own speaker: a distinct voice that just spoke little
-/// (a presenter who only introduced the talk), not segmentation noise.
-const CONSOLIDATE_MIN_SIM: f32 = 0.5;
+/// A real speaker talks at least this many seconds in total. Groups below it are
+/// segmentation fragments and fold into the nearest real speaker. This is an
+/// ABSOLUTE floor, not a fraction of the meeting: 5% of a 42-minute meeting is
+/// over two minutes, which scaled away genuinely brief speakers (a presenter who
+/// only introduced a talk), while too small a floor keeps sub-second noise as
+/// phantom speakers. 6s clears real chatter and drops fragments.
+const MIN_SPEAKER_SECS: f32 = 6.0;
 
 /// One diarized span: `[start, end)` seconds, tagged with a final speaker id.
 #[derive(Debug, Clone)]
@@ -125,7 +126,7 @@ pub fn diarize(seg_model: &Path, emb_model: &Path, samples: &[f32]) -> Option<Di
     log::info!("diarize: {} embeddable group(s) before merge", groups.len());
     merge_groups(&extractor, &mut groups);
     log::info!("diarize: {} group(s) after merge", groups.len());
-    consolidate_groups(&raw, &mut groups);
+    consolidate_groups(&mut groups);
     log::info!(
         "diarize: {} final speaker(s), durations(s) {:?}",
         groups.len(),
@@ -183,20 +184,22 @@ fn merge_groups(extractor: &SpeakerEmbeddingExtractor, groups: &mut Vec<Group>) 
 
 /// Absorb fragment clusters into the nearest "anchor" (a cluster holding a real
 /// share of the meeting's speech), by centroid.
-fn consolidate_groups(raw: &[Span], groups: &mut Vec<Group>) {
+fn consolidate_groups(groups: &mut Vec<Group>) {
     if groups.is_empty() {
         return;
     }
-    let total: f32 = raw.iter().map(|s| s.end - s.start).sum();
-    let floor = (ANCHOR_FRACTION * total).max(ANCHOR_MIN_SECS);
-    let anchors: Vec<usize> = (0..groups.len()).filter(|&i| groups[i].dur >= floor).collect();
+    let anchors: Vec<usize> =
+        (0..groups.len()).filter(|&i| groups[i].dur >= MIN_SPEAKER_SECS).collect();
     if anchors.is_empty() {
-        return; // nothing dominant — keep as is
+        return; // nothing substantial enough to anchor on — keep as is
     }
     for i in 0..groups.len() {
-        if groups[i].dur >= floor {
+        if groups[i].dur >= MIN_SPEAKER_SECS {
             continue;
         }
+        // Below the floor is a segmentation fragment, not a real speaker. Fold it
+        // into the nearest anchor by voiceprint so its handful of spans still get
+        // a sensible label instead of inventing a phantom speaker.
         let mut best = anchors[0];
         let mut best_sim = f32::MIN;
         for &a in &anchors {
@@ -205,12 +208,6 @@ fn consolidate_groups(raw: &[Span], groups: &mut Vec<Group>) {
                 best_sim = sim;
                 best = a;
             }
-        }
-        // Only absorb a fragment that plausibly belongs to an anchor. One that
-        // resembles no anchor is a real, quiet speaker (a brief presenter), so
-        // keep it rather than folding a distinct voice into someone else.
-        if best_sim < CONSOLIDATE_MIN_SIM {
-            continue;
         }
         let labels = std::mem::take(&mut groups[i].labels);
         groups[best].labels.extend(labels);
@@ -258,45 +255,149 @@ fn cosine(a: &[f32], b: &[f32]) -> f32 {
 mod tests {
     use super::*;
 
-    // Consolidation folds a tiny fragment into the dominant anchor it resembles.
+    // A sub-floor fragment folds into the nearest anchor by voiceprint.
     #[test]
     fn consolidate_absorbs_fragments() {
-        let raw = vec![
-            Span { start: 0.0, end: 60.0, speaker: 0 },  // dominant
-            Span { start: 60.0, end: 120.0, speaker: 1 }, // dominant
-            Span { start: 120.0, end: 121.0, speaker: 2 }, // fragment (1s)
-        ];
         let mut groups = vec![
             Group { labels: vec![0], audio: vec![], centroid: vec![1.0, 0.0], dur: 60.0 },
             Group { labels: vec![1], audio: vec![], centroid: vec![0.0, 1.0], dur: 60.0 },
-            Group { labels: vec![2], audio: vec![], centroid: vec![0.98, 0.2], dur: 1.0 },
+            Group { labels: vec![2], audio: vec![], centroid: vec![0.98, 0.2], dur: 1.0 }, // 1s fragment
         ];
-        consolidate_groups(&raw, &mut groups);
+        consolidate_groups(&mut groups);
         assert_eq!(groups.len(), 2); // fragment absorbed
-        // The fragment (near [1,0]) joined anchor 0.
-        assert!(groups[0].labels.contains(&2));
+        assert!(groups[0].labels.contains(&2)); // joined the [1,0] anchor
     }
 
-    // A brief fragment that resembles no anchor is a distinct quiet speaker (a
-    // presenter who only introduced the talk), and must be kept, not absorbed.
+    // A short fragment is absorbed even when its voiceprint resembles no anchor:
+    // sub-second clusters are segmentation noise, not real speakers.
     #[test]
-    fn consolidate_keeps_dissimilar_fragment() {
-        let raw = vec![
-            Span { start: 0.0, end: 60.0, speaker: 0 },
-            Span { start: 60.0, end: 120.0, speaker: 1 },
-            Span { start: 120.0, end: 121.0, speaker: 2 }, // 1s fragment, distinct voice
-        ];
+    fn consolidate_absorbs_short_distinct_fragment() {
         let mut groups = vec![
-            Group { labels: vec![0], audio: vec![], centroid: vec![1.0, 0.0, 0.0], dur: 60.0 },
-            Group { labels: vec![1], audio: vec![], centroid: vec![0.0, 1.0, 0.0], dur: 60.0 },
-            Group { labels: vec![2], audio: vec![], centroid: vec![0.0, 0.0, 1.0], dur: 1.0 },
+            Group { labels: vec![0], audio: vec![], centroid: vec![1.0, 0.0, 0.0], dur: 600.0 },
+            Group { labels: vec![1], audio: vec![], centroid: vec![0.0, 1.0, 0.0], dur: 600.0 },
+            Group { labels: vec![2], audio: vec![], centroid: vec![0.0, 0.0, 1.0], dur: 2.0 },
         ];
-        consolidate_groups(&raw, &mut groups);
-        assert_eq!(groups.len(), 3); // orthogonal to both anchors -> kept
+        consolidate_groups(&mut groups);
+        assert_eq!(groups.len(), 2); // 2s < floor -> absorbed despite being distinct
+    }
+
+    // A speaker above the floor is kept even if brief and distinct: a presenter
+    // who only introduced the talk, not folded into the main speaker.
+    #[test]
+    fn consolidate_keeps_real_brief_speaker() {
+        let mut groups = vec![
+            Group { labels: vec![0], audio: vec![], centroid: vec![1.0, 0.0, 0.0], dur: 600.0 },
+            Group { labels: vec![1], audio: vec![], centroid: vec![0.0, 0.0, 1.0], dur: 12.0 },
+        ];
+        consolidate_groups(&mut groups);
+        assert_eq!(groups.len(), 2); // 12s >= floor -> kept
     }
 
     #[test]
     fn cosine_of_orthogonal_is_zero() {
         assert!(cosine(&[1.0, 0.0], &[0.0, 1.0]).abs() < 1e-6);
+    }
+
+    // Real-audio integration check (manual). Runs the actual diarizer on a WAV of
+    // a real multi-speaker meeting and reports the speaker breakdown. Ignored by
+    // default (needs the models + an audio file). Run with:
+    //
+    //   SHERPA_ONNX_LIB_DIR=.desktop-deps/sherpa-onnx/lib \
+    //   LD_LIBRARY_PATH=.desktop-deps/sherpa-onnx/lib \
+    //   VERBA_DIARIZE_WAV=/path/meeting.wav \
+    //   VERBA_SEG_MODEL=/path/seg.onnx VERBA_EMB_MODEL=/path/emb.onnx \
+    //   cargo test --lib -- --ignored --nocapture diarize_real
+    //
+    // The models default to the installed meeting package when the env vars are
+    // unset, so it also runs on a machine where Verba is set up.
+    #[test]
+    #[ignore]
+    fn diarize_real_meeting() {
+        let _ = env_logger::builder().filter_level(log::LevelFilter::Info).is_test(false).try_init();
+        let wav = std::env::var("VERBA_DIARIZE_WAV").expect("set VERBA_DIARIZE_WAV");
+        let samples = read_wav_16k_mono(&wav);
+        eprintln!("[diarize_real] {:.1}s of audio", samples.len() as f32 / 16_000.0);
+        let seg = model_path("VERBA_SEG_MODEL", |m| m.segmentation_model_path());
+        let emb = model_path("VERBA_EMB_MODEL", |m| m.speaker_model_path());
+        let d = diarize(&seg, &emb, &samples).expect("diarize returned None");
+        let mut dur = std::collections::BTreeMap::<usize, f32>::new();
+        for s in &d.spans {
+            *dur.entry(s.speaker).or_default() += s.end - s.start;
+        }
+        eprintln!("[diarize_real] {} final speaker(s):", d.speaker_count);
+        for (spk, secs) in &dur {
+            eprintln!("    speaker {spk}: {secs:.1}s");
+        }
+        assert!(d.speaker_count > 1, "expected more than one speaker, got {}", d.speaker_count);
+    }
+
+    fn model_path(
+        env: &str,
+        f: impl Fn(&crate::models::ModelManager) -> Option<std::path::PathBuf>,
+    ) -> std::path::PathBuf {
+        if let Ok(p) = std::env::var(env) {
+            return std::path::PathBuf::from(p);
+        }
+        f(crate::models::ModelManager::global())
+            .unwrap_or_else(|| panic!("set {env} or install the meeting package"))
+    }
+
+    // Minimal WAV reader: 16-bit PCM or 32-bit float, mono or stereo (downmixed),
+    // any sample rate (linearly resampled to 16kHz).
+    fn read_wav_16k_mono(path: &str) -> Vec<f32> {
+        let bytes = std::fs::read(path).expect("read wav");
+        assert!(bytes.len() > 44 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WAVE", "not a WAV");
+        let (mut channels, mut rate, mut bits, mut fmt) = (1u16, 16_000u32, 16u16, 1u16);
+        let mut data: &[u8] = &[];
+        let mut i = 12;
+        while i + 8 <= bytes.len() {
+            let id = &bytes[i..i + 4];
+            let sz = u32::from_le_bytes([bytes[i + 4], bytes[i + 5], bytes[i + 6], bytes[i + 7]]) as usize;
+            let body = &bytes[i + 8..(i + 8 + sz).min(bytes.len())];
+            if id == b"fmt " && body.len() >= 16 {
+                fmt = u16::from_le_bytes([body[0], body[1]]);
+                channels = u16::from_le_bytes([body[2], body[3]]);
+                rate = u32::from_le_bytes([body[4], body[5], body[6], body[7]]);
+                bits = u16::from_le_bytes([body[14], body[15]]);
+            } else if id == b"data" {
+                data = body;
+            }
+            i += 8 + sz + (sz & 1);
+        }
+        let mut inter: Vec<f32> = Vec::new();
+        match (fmt, bits) {
+            (1, 16) => {
+                for c in data.chunks_exact(2) {
+                    inter.push(i16::from_le_bytes([c[0], c[1]]) as f32 / 32768.0);
+                }
+            }
+            (3, 32) => {
+                for c in data.chunks_exact(4) {
+                    inter.push(f32::from_le_bytes([c[0], c[1], c[2], c[3]]));
+                }
+            }
+            _ => panic!("unsupported WAV: format {fmt} bits {bits}"),
+        }
+        let ch = channels.max(1) as usize;
+        let mono: Vec<f32> = if ch == 1 {
+            inter
+        } else {
+            inter.chunks(ch).map(|f| f.iter().sum::<f32>() / ch as f32).collect()
+        };
+        if rate == 16_000 {
+            return mono;
+        }
+        let ratio = rate as f64 / 16_000.0;
+        let n = (mono.len() as f64 / ratio) as usize;
+        (0..n)
+            .map(|i| {
+                let pos = i as f64 * ratio;
+                let a = pos as usize;
+                let frac = (pos - a as f64) as f32;
+                let s0 = mono[a];
+                let s1 = if a + 1 < mono.len() { mono[a + 1] } else { s0 };
+                s0 + (s1 - s0) * frac
+            })
+            .collect()
     }
 }

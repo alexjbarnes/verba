@@ -79,3 +79,9 @@ r2-staging/
 
 # TTS A/B sample WAVs (local, throwaway)
 tts-samples/
+
+# Local test media (never commit)
+*.mp4
+*.mkv
+*.mov
+*.webm
