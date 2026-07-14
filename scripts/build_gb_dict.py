@@ -41,6 +41,8 @@ from collections import defaultdict
 TOKEN_MAP = {
     "ɚ": "ə",       # americanized variant entries
     "ɝ": "ɜː",
+    "ʌɪ": "aɪ",     # Oxford-style PRICE notation; the model only knows aɪ
+                    # (reported 2026-07-11: "quantized" read kwɒnt-ʌ-ɪzd)
     "ɐː": "ɑː",
     "əː": "ɜː",     # NURSE variant notation
     "ɛː": "eə",     # SQUARE monophthong notation -> trained diphthong
@@ -366,6 +368,15 @@ def main():
                     del out[w]
                     swept += 1
             print(f"espeak sweep over {len(frequent)} words: re-picked {repicked}, dropped {swept}")
+
+    # Single-letter entries: wikipron's letter "words" are junk for these
+    # (l -> "l", s -> "s", d -> "d", x -> "ks"), which made a standalone
+    # capital ("Plan L") read as a bare consonant (reported 2026-07-11).
+    # Force the letter NAMES. "a" and "i" are deliberately absent (article /
+    # pronoun); "z" is the British zed.
+    out.update({
+        "l": "ˈɛl", "d": "dˈiː", "s": "ˈɛs", "x": "ˈɛks", "z": "zˈɛd",
+    })
 
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(out, f, ensure_ascii=False, separators=(",", ":"))

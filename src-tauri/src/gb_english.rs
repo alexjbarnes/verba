@@ -37,6 +37,19 @@ fn is_stress(c: char) -> bool {
 ///   word-final ə -> ɐ (unless a centring-diphthong tail)
 ///   word-final unstressed iː -> ɪ (happY)
 pub fn us_to_rp(tokens: Vec<String>) -> Vec<String> {
+    rp_transform(tokens, true)
+}
+
+/// `us_to_rp` for letter-by-letter spellings ("CVE", "LLM"): the per-char
+/// rules still apply (R's rhotic vowel, O's GOAT diphthong), but the
+/// word-final adjustments must not — they would clip the last letter's name
+/// ("CVE" -> "see-vee-ih", "ABCs" -> "ay-bee-sih-z"), because letter names
+/// carry no stress marks for the happY rule's stressed-FLEECE escape to see.
+pub fn us_to_rp_spelled(tokens: Vec<String>) -> Vec<String> {
+    rp_transform(tokens, false)
+}
+
+fn rp_transform(tokens: Vec<String>, word_final_adjust: bool) -> Vec<String> {
     let joined: String = tokens.concat();
     let chars: Vec<char> = joined.chars().collect();
     let n = chars.len();
@@ -81,9 +94,19 @@ pub fn us_to_rp(tokens: Vec<String>) -> Vec<String> {
                     out.push('ə');
                 }
                 Some('ʊ') => {
-                    out.pop();
-                    out.push('ɔ');
-                    out.push('ː');
+                    // pˈʊɹ (CURE) -> pˈɔː, but only when the ʊ starts the
+                    // vowel. In aʊɹ ("Naur", "sour") the ʊ is the MOUTH
+                    // diphthong's tail: centring ə instead (naʊə), or the
+                    // merger would invent aɔː.
+                    let tail_of_diphthong =
+                        out.len() >= 2 && is_vowel_char(out[out.len() - 2]);
+                    if tail_of_diphthong {
+                        out.push('ə');
+                    } else {
+                        out.pop();
+                        out.push('ɔ');
+                        out.push('ː');
+                    }
                 }
                 _ => {} // əɹ and any other Vɹ: just drop the ɹ
             }
@@ -100,6 +123,13 @@ pub fn us_to_rp(tokens: Vec<String>) -> Vec<String> {
                 out.push('ə');
                 out.push('ɹ');
             }
+            // A STRESSED r-coloured schwa is the NURSE vowel (the g2p maps
+            // ER1 to ɜː itself but leaves ER2 as ˌɚ): "gigahertz" ended
+            // ˌɚts and folded to a weak "huhts" instead of "hurts".
+            'ɚ' if out.last().is_some_and(|&b| is_stress(b)) => {
+                out.push('ɜ');
+                out.push('ː');
+            }
             'ɚ' => out.push('ə'),
             'o' if i + 1 < n && chars[i + 1] == 'ʊ' => {
                 out.push('ə');
@@ -114,14 +144,16 @@ pub fn us_to_rp(tokens: Vec<String>) -> Vec<String> {
     }
 
     // Word-final adjustments.
-    let m = out.len();
-    if m >= 1 && out[m - 1] == 'ə' && !(m >= 2 && is_vowel_char(out[m - 2])) {
-        out[m - 1] = 'ɐ';
-    } else if m >= 2 && out[m - 1] == 'ː' && out[m - 2] == 'i' {
-        let stressed = m >= 3 && is_stress(out[m - 3]);
-        if !stressed {
-            out.truncate(m - 2);
-            out.push('ɪ');
+    if word_final_adjust {
+        let m = out.len();
+        if m >= 1 && out[m - 1] == 'ə' && !(m >= 2 && is_vowel_char(out[m - 2])) {
+            out[m - 1] = 'ɐ';
+        } else if m >= 2 && out[m - 1] == 'ː' && out[m - 2] == 'i' {
+            let stressed = m >= 3 && is_stress(out[m - 3]);
+            if !stressed {
+                out.truncate(m - 2);
+                out.push('ɪ');
+            }
         }
     }
 
@@ -167,6 +199,20 @@ mod tests {
     #[test]
     fn final_schwa_not_after_vowel() {
         assert_eq!(rp("faɪɚ"), "faɪə"); // fire: diphthong tail stays ə
+    }
+
+    #[test]
+    fn spelled_letters_keep_final_fleece() {
+        // Letter-by-letter spellings must not happY-clip the last letter's
+        // name: "CVE" is see-vee-EE, not see-vee-ih (reported 2026-07-11).
+        let spell = |s: &str| {
+            us_to_rp_spelled(s.chars().map(|c| c.to_string()).collect()).concat()
+        };
+        assert_eq!(spell("siːviːiː"), "siːviːiː"); // CVE
+        assert_eq!(spell("ɛlɛlɛm"), "ɛlɛlɛm"); // LLM (no final iː: unchanged)
+        assert_eq!(spell("ɑːɹdʒiː"), "ɑːdʒiː"); // RG: rhotic fold still applies
+        // The word path still clips (happY) — the two must stay different.
+        assert_eq!(rp("hˈæpiː"), "hˈæpɪ");
     }
 
     #[test]
