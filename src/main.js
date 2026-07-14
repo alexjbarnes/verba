@@ -2840,9 +2840,6 @@ async function startSpeak(text, baseWord, baseMs) {
   const myGen = ++genId;
   ttsStarted = true;
   voiceDirty = false; // this synth reflects the current voice
-  // Playback actually started on this item: it becomes the library's
-  // "Continue listening" hero until finished or something else plays.
-  if (readingItem) markLastPlayed(readingItem.id, bookState ? bookState.current : null);
   setTtsLoading(true); // generating/pre-buffering until the first audio plays
   autoFollow = true;
   dynMilestoneIdx = 0;
@@ -3394,85 +3391,11 @@ function coverMonogram(title) {
   return words.length === 1 ? letter(words[0]) : letter(words[0]) + letter(words[1]);
 }
 
-// ── Continue listening ──
-//
-// The most recent thing playback actually STARTED on (not merely opened),
-// tracked device-locally so the library can lead with a resume card.
-function markLastPlayed(id, chapter) {
-  try {
-    localStorage.setItem('verba-last-played', JSON.stringify({ id, chapter: chapter ?? null }));
-  } catch (_) { /* storage unavailable */ }
-}
-
-function lastPlayed() {
-  try {
-    const v = JSON.parse(localStorage.getItem('verba-last-played') || 'null');
-    return (v && typeof v.id === 'string') ? v : null;
-  } catch (_) {
-    return null;
-  }
-}
-
-// Render the hero resume card when the last-played item is still in
-// progress. Finished or deleted items drop the hero entirely — an empty
-// slot, not a stale invitation.
-function renderLibraryHero() {
-  const heroEl = document.getElementById('lib-hero');
-  const lp = lastPlayed();
-  const it = lp && libItems.find(x => x.id === lp.id);
-  if (!it) { heroEl.innerHTML = ''; return; }
-  const isBook = !!(it.chapters && it.chapters.length);
-  let pct, leftLabel, sub;
-  if (isBook) {
-    const p = bookProgress(it);
-    pct = p.pct;
-    leftLabel = `${fmtMins(estMsForWords(p.totalWords - p.wordsRead, ttsSpeed))} left`;
-    const ch = it.chapters[Math.min(it.current_chapter, it.chapters.length - 1)];
-    sub = ch ? (ch.title || `Chapter ${it.current_chapter + 1}`) : '';
-  } else {
-    const len = (it.body || '').length || 1;
-    pct = Math.round(Math.max(0, Math.min(len, it.progress || 0)) / len * 100);
-    leftLabel = `${fmtMins(itemDurationMs(it, ttsSpeed) * (1 - (it.progress || 0) / len))} left`;
-    sub = it.body ? it.body.slice(0, 90) : '';
-  }
-  if (pct <= 0 || pct >= 100) { heroEl.innerHTML = ''; return; }
-  heroEl.innerHTML = `
-    <div id="lib-hero-card" class="relative overflow-hidden rounded-2xl bg-surface-container-high cursor-pointer mb-4 stagger-in" style="--i:0">
-      <div class="flex items-center gap-4 p-4">
-        ${coverTileHtml(it, 'w-16 h-16 rounded-xl overflow-hidden', 'text-xl')}
-        <div class="min-w-0 flex-1">
-          <p class="text-[11px] font-semibold uppercase tracking-[0.08em] text-primary mb-1">Continue listening</p>
-          <p class="text-[15px] font-semibold leading-snug text-on-surface line-clamp-2">${escapeHtml(it.title)}</p>
-          <p class="text-xs text-on-surface-variant truncate mt-0.5">${escapeHtml(sub)} · ${leftLabel}</p>
-        </div>
-        <button id="lib-hero-play" class="shrink-0 w-12 h-12 flex items-center justify-center rounded-full bg-primary text-on-primary shadow-lg active:scale-95 transition-transform cursor-pointer">
-          <span class="material-symbols-outlined text-[26px]" style="font-variation-settings:'FILL' 1">play_arrow</span>
-        </button>
-      </div>
-      <div class="absolute left-0 right-0 bottom-0 h-[4px] bg-primary/15"><div class="progress-edge-fill h-full bg-primary rounded-r-full" style="width:${pct}%"></div></div>
-    </div>`;
-  document.getElementById('lib-hero-play').addEventListener('click', (e) => {
-    e.stopPropagation();
-    // chapter:null resolves to the book's CURRENT chapter — the same state
-    // the card's subtitle describes. Passing lastPlayed's chapter here could
-    // diverge from the subtitle when the user merely browsed another chapter
-    // (which persists the book position without starting playback).
-    playQueueEntry({ id: it.id, chapter: null }).then(ok => {
-      if (!ok) showToast('Could not resume');
-    });
-  });
-  document.getElementById('lib-hero-card').addEventListener('click', () => {
-    if (isBook) openBook(it.id); else openReading(it.id);
-  });
-  hydrateLocalCovers(heroEl);
-}
-
 function renderLibraryList() {
   const items = libItems;
   const feedsById = libFeedsById;
   const list = document.getElementById('lib-list');
   const empty = document.getElementById('lib-empty');
-  renderLibraryHero();
   // The signature list treatment: listening progress lives on the card
   // itself — a hairline along its bottom edge — instead of "42%" text in the
   // meta line. The track only renders while something IS in progress;
@@ -4106,11 +4029,10 @@ async function openBookChapter(item, idx, { autoplay = false } = {}) {
     }
   }
 
-  // Resume-aware, exactly like openReading's autoplay: the hero card and
-  // queue re-enter the chapter the book was left on, which must continue
-  // from the saved offset. Chapter auto-advance is unaffected — a chapter
-  // change zeroes `prog` above, so resumeWord is 0 and this starts from
-  // the top as before.
+  // Resume-aware, exactly like openReading's autoplay: the queue re-enters
+  // the chapter the book was left on, which must continue from the saved
+  // offset. Chapter auto-advance is unaffected — a chapter change zeroes
+  // `prog` above, so resumeWord is 0 and this starts from the top as before.
   if (autoplay) startPlaybackFromResume();
 }
 
