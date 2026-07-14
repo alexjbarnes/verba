@@ -694,19 +694,19 @@
       },
       {
         "id": "tts-piper-vctk",
-        "name": "VCTK (UK)",
-        "desc": "British English — 109 speakers, ~77 MB",
+        "name": "VCTK Studio (UK)",
+        "desc": "109 studio voices, 70 UK accents — pick speakers inside, ~77 MB",
         "engine": "tts_piper_ort",
         "size": "~77 MB",
         "files": [
           {
-            "url": "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_GB/vctk/medium/en_GB-vctk-medium.onnx",
+            "url": "https://pub-c88baaac61224fbba973b547f1d947ca.r2.dev/models/TTS/en_GB-vctk-medium-dur.onnx",
             "rel_path": "tts/piper-vctk/model_dur.onnx",
-            "bytes": 76952753,
+            "bytes": 76952777,
             "role": "model"
           },
           {
-            "url": "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_GB/vctk/medium/en_GB-vctk-medium.onnx.json",
+            "url": "https://pub-c88baaac61224fbba973b547f1d947ca.r2.dev/models/TTS/en_GB-vctk-medium.onnx.json",
             "rel_path": "tts/piper-vctk/model.onnx.json",
             "bytes": 6637,
             "role": "config"
