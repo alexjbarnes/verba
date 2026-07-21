@@ -28,12 +28,12 @@ only exist where a sweep was run; blank means unmeasured, judge by ear.
 | Poppy (semaine) | F | English | | keep for now (2026-07-14) | User: quite high pitched, not a favourite but seems OK; accent drifts a little Chinese/Australian in places. |
 | Aru 1 | ? | UK (per-speaker accent unknown) | 1.0 | | |
 | Aru 2 | ? | UK (per-speaker accent unknown) |  | | |
-| Aru 3 | ? | UK (per-speaker accent unknown) |  | | |
-| Aru 4 | ? | UK (per-speaker accent unknown) |  | | |
-| Aru 5 | ? | UK (per-speaker accent unknown) |  | | |
-| Aru 6 | ? | UK (per-speaker accent unknown) |  | | |
-| Aru 7 | ? | UK (per-speaker accent unknown) |  | | |
-| Aru 8 | ? | UK (per-speaker accent unknown) |  | | |
+| Aru 3 | ? | UK (per-speaker accent unknown) |  | keep (2026-07-20) | User: fine. |
+| Aru 4 | ? | UK (per-speaker accent unknown) |  | **remove** (2026-07-20) | User: sounds very robotic. Per-speaker removal (catalogue entry) - executes with the end-of-review batch. |
+| Aru 5 | ? | UK (per-speaker accent unknown) |  | **remove** (2026-07-20) | User: doesn't flow well and doesn't sound right. Per-speaker removal (catalogue entry) - executes with the end-of-review batch. |
+| Aru 6 | F | UK (per-speaker accent unknown) |  | keep (2026-07-20) | User: really good - probably favourite female English voice. |
+| Aru 7 | F | UK (per-speaker accent unknown) |  | keep for now (2026-07-20) | User: fine, not a favourite, but the catalogue is short on female voices and this one is OK. |
+| Aru 8 | ? | UK (per-speaker accent unknown) |  | keep (2026-07-20) | User: quite nasal, but quite listenable - doesn't mind it. |
 | Aru 9 | M | UK (per-speaker accent unknown) |  | keep (2026-07-14) | User: similar to Aru 10 but better. Likes Aru overall; flagged flow-improvement as a wider question (see Flow note below table). |
 | Aru 10 | M | UK (per-speaker accent unknown) |  | keep (2026-07-14) | User: flow not the best but probably the best male voice so far. First outright keep among the Aru speakers. |
 | Aru 11 | ? | UK (per-speaker accent unknown) |  | keep for now (2026-07-14) | User: like the voice, but doesn't always flow perfectly (similar to Aru 12). |
