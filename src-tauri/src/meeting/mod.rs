@@ -442,6 +442,7 @@ fn refine_speakers(
     let mm = crate::models::ModelManager::global();
     let (Some(seg_model), Some(emb_model)) = (mm.segmentation_model_path(), mm.speaker_model_path())
     else {
+        log::warn!("diarize: skipped — segmentation/speaker model not installed (update the meeting package in Settings)");
         return;
     };
 
@@ -452,6 +453,7 @@ fn refine_speakers(
     {
         let buf = buffer.lock().unwrap();
         if buf.is_empty() {
+            log::info!("diarize: skipped — no system audio was buffered");
             return;
         }
         for (t_ms, samples) in buf.iter() {
@@ -464,11 +466,23 @@ fn refine_speakers(
         }
     }
 
+    if crate::debug_wav::enabled() {
+        let dir = crate::debug_wav::dir();
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join(format!("{id}-diarize-input.wav"));
+        match crate::debug_wav::write_wav(&path, 16_000, &wave) {
+            Ok(()) => log::info!("debug-audio: wrote diarizer input to {}", path.display()),
+            Err(e) => log::warn!("debug-audio: failed to write {}: {e}", path.display()),
+        }
+    }
+
     let _ = app.emit("meeting-state", serde_json::json!({ "state": "diarizing", "id": id }));
     let Some(diar) = diarize::diarize(&seg_model, &emb_model, &wave) else {
+        log::warn!("diarize: diarizer failed — live labels kept");
         return;
     };
     if diar.spans.is_empty() {
+        log::info!("diarize: no speech spans found — live labels kept");
         return;
     }
 

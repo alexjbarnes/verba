@@ -52,6 +52,15 @@ const MIN_SPEAKER_SECS: f32 = 6.0;
 /// folds both without touching real speakers.
 const SECOND_CHANCE_MAX: f32 = 20.0;
 const SECOND_CHANCE_SIM: f32 = 0.40;
+/// Coalesce anchor-unlike fragments with each other before the noise floor
+/// applies. A sparse speaker's short conversational turns often shatter into
+/// several sub-floor clusters whose individual embeddings are too noisy to
+/// pass the main merge (on AMI ES2004a the same speaker's fragments measure
+/// 0.34-0.47 pairwise while sitting at 0.02-0.11 to the real anchor), so a
+/// relaxed bar reunites them and the pooled re-embed firms up the combined
+/// voiceprint. Set below the observed same-speaker fragment range and above
+/// the observed cross-speaker range.
+const FRAGMENT_COALESCE_SIM: f32 = 0.35;
 
 /// One diarized span: `[start, end)` seconds, tagged with a final speaker id.
 #[derive(Debug, Clone)]
@@ -136,7 +145,7 @@ pub fn diarize(seg_model: &Path, emb_model: &Path, samples: &[f32]) -> Option<Di
     log::info!("diarize: {} embeddable group(s) before merge", groups.len());
     merge_groups(&extractor, &mut groups);
     log::info!("diarize: {} group(s) after merge", groups.len());
-    consolidate_groups(&mut groups);
+    consolidate_groups(Some(&extractor), &mut groups);
     log::info!(
         "diarize: {} final speaker(s), durations(s) {:?}",
         groups.len(),
@@ -180,6 +189,10 @@ fn merge_groups(extractor: &SpeakerEmbeddingExtractor, groups: &mut Vec<Group>) 
             }
         }
         let Some((i, j)) = best else { break };
+        log::info!(
+            "diarize: merge {:.0}s + {:.0}s at cosine {:.2}",
+            groups[i].dur, groups[j].dur, best_sim
+        );
         let mut removed = groups.remove(j);
         groups[i].labels.append(&mut removed.labels);
         groups[i].dur += removed.dur;
@@ -193,22 +206,40 @@ fn merge_groups(extractor: &SpeakerEmbeddingExtractor, groups: &mut Vec<Group>) 
 }
 
 /// Absorb fragment clusters into the nearest "anchor" (a cluster holding a real
-/// share of the meeting's speech), by centroid.
-fn consolidate_groups(groups: &mut Vec<Group>) {
+/// share of the meeting's speech), by centroid. Between the mis-split fold and
+/// the noise floor, anchor-unlike fragments get one chance to coalesce with
+/// each other: a sparse speaker's scattered turns often arrive as several
+/// sub-floor clusters that only add up to a real speaker once pooled. Folding
+/// them into the anchor instead would attribute their words to the wrong
+/// person (observed on AMI: a 16.7s participant vanished into the main
+/// speaker at cosine 0.02-0.11).
+fn consolidate_groups(extractor: Option<&SpeakerEmbeddingExtractor>, groups: &mut Vec<Group>) {
     if groups.is_empty() {
         return;
     }
     // Definite speakers, long enough to anchor on. Anything shorter is a
-    // candidate to fold: a fragment (noise), or a mis-split of one of these.
+    // candidate to fold: a fragment (noise), a mis-split of an anchor, or a
+    // shard of a sparse-but-real speaker.
     let anchors: Vec<usize> =
         (0..groups.len()).filter(|&i| groups[i].dur >= SECOND_CHANCE_MAX).collect();
     if anchors.is_empty() {
         return; // nothing dominant enough to fold into — keep as is
     }
-    for i in 0..groups.len() {
-        if groups[i].dur >= SECOND_CHANCE_MAX {
-            continue;
+    // Diagnostic: the full similarity structure, small meetings only (the
+    // dump is quadratic and a 40-minute meeting would flood the log).
+    if groups.len() <= 10 {
+        for i in 0..groups.len() {
+            for j in (i + 1)..groups.len() {
+                log::info!(
+                    "diarize: pairwise [{:.1}s vs {:.1}s] cosine {:.2}",
+                    groups[i].dur, groups[j].dur,
+                    cosine(&groups[i].centroid, &groups[j].centroid)
+                );
+            }
         }
+    }
+
+    let nearest_anchor = |groups: &[Group], i: usize| -> (usize, f32) {
         let mut best = anchors[0];
         let mut best_sim = f32::MIN;
         for &a in &anchors {
@@ -218,24 +249,109 @@ fn consolidate_groups(groups: &mut Vec<Group>) {
                 best = a;
             }
         }
-        // Fold a sub-floor fragment (noise) always; fold a small cluster that
-        // resembles a real speaker (a mis-split); keep a small cluster that
-        // resembles no one (a genuinely brief, distinct speaker).
-        let fold = groups[i].dur < MIN_SPEAKER_SECS || best_sim >= SECOND_CHANCE_SIM;
-        if groups[i].dur >= MIN_SPEAKER_SECS {
-            log::info!(
-                "diarize: small speaker {:.0}s, nearest-anchor cosine {:.2} -> {}",
-                groups[i].dur,
-                best_sim,
-                if fold { "fold (mis-split)" } else { "keep (distinct)" }
-            );
+        (best, best_sim)
+    };
+
+    // Pass A: a small cluster that resembles an anchor is a mis-split of that
+    // anchor (the merge pass just missed it) — fold it in, whatever its size.
+    for i in 0..groups.len() {
+        if groups[i].labels.is_empty() || groups[i].dur >= SECOND_CHANCE_MAX {
+            continue;
         }
+        let (best, best_sim) = nearest_anchor(groups, i);
+        if best_sim >= SECOND_CHANCE_SIM {
+            log::info!(
+                "diarize: {} {:.1}s, nearest-anchor cosine {:.2} -> fold (mis-split)",
+                if groups[i].dur < MIN_SPEAKER_SECS { "fragment" } else { "small speaker" },
+                groups[i].dur, best_sim
+            );
+            let labels = std::mem::take(&mut groups[i].labels);
+            groups[best].labels.extend(labels);
+            groups[i].dur = 0.0;
+        }
+    }
+
+    // Pass B: coalesce the anchor-unlike leftovers with each other (tombstone
+    // in place — `anchors` holds indices, so no removals until the end).
+    loop {
+        let mut best: Option<(usize, usize)> = None;
+        let mut best_sim = FRAGMENT_COALESCE_SIM;
+        for i in 0..groups.len() {
+            if groups[i].labels.is_empty() || groups[i].dur >= SECOND_CHANCE_MAX {
+                continue;
+            }
+            for j in (i + 1)..groups.len() {
+                if groups[j].labels.is_empty() || groups[j].dur >= SECOND_CHANCE_MAX {
+                    continue;
+                }
+                let sim = cosine(&groups[i].centroid, &groups[j].centroid);
+                if sim > best_sim {
+                    best_sim = sim;
+                    best = Some((i, j));
+                }
+            }
+        }
+        let Some((i, j)) = best else { break };
+        log::info!(
+            "diarize: coalesce fragments {:.1}s + {:.1}s at cosine {:.2}",
+            groups[i].dur, groups[j].dur, best_sim
+        );
+        let mut labels = std::mem::take(&mut groups[j].labels);
+        let audio_j = std::mem::take(&mut groups[j].audio);
+        let centroid_j = std::mem::take(&mut groups[j].centroid);
+        let dur_j = groups[j].dur;
+        groups[j].dur = 0.0;
+        let dur_i = groups[i].dur;
+        groups[i].labels.append(&mut labels);
+        groups[i].dur += dur_j;
+        groups[i].audio.extend(audio_j);
+        groups[i].audio.truncate(MERGE_CAP_SAMPLES);
+        let audio = groups[i].audio.clone();
+        let pooled = extractor.and_then(|x| embed(x, &audio)).map(|e| normalize(&e));
+        let new_centroid = match pooled {
+            Some(c) => c,
+            None => {
+                // No extractor (tests) or embed failure: duration-weighted average.
+                let avg: Vec<f32> = groups[i]
+                    .centroid
+                    .iter()
+                    .zip(centroid_j.iter())
+                    .map(|(a, b)| a * dur_i + b * dur_j)
+                    .collect();
+                normalize(&avg)
+            }
+        };
+        groups[i].centroid = new_centroid;
+    }
+
+    // Pass C: final disposition. Coalescing changed centroids, so a pooled
+    // group may now reveal itself as an anchor's mis-split after all; below
+    // the floor it is noise and folds regardless.
+    for i in 0..groups.len() {
+        if groups[i].labels.is_empty() || groups[i].dur >= SECOND_CHANCE_MAX {
+            continue;
+        }
+        let (best, best_sim) = nearest_anchor(groups, i);
+        let fold = best_sim >= SECOND_CHANCE_SIM || groups[i].dur < MIN_SPEAKER_SECS;
+        log::info!(
+            "diarize: {} {:.1}s, nearest-anchor cosine {:.2} -> {}",
+            if groups[i].dur < MIN_SPEAKER_SECS { "fragment" } else { "small speaker" },
+            groups[i].dur,
+            best_sim,
+            if !fold {
+                "keep (distinct)"
+            } else if best_sim >= SECOND_CHANCE_SIM {
+                "fold (mis-split)"
+            } else {
+                "fold (noise floor)"
+            }
+        );
         if !fold {
             continue;
         }
         let labels = std::mem::take(&mut groups[i].labels);
         groups[best].labels.extend(labels);
-        groups[i].dur = 0.0; // marks empty
+        groups[i].dur = 0.0;
     }
     groups.retain(|g| !g.labels.is_empty());
 }
@@ -287,7 +403,7 @@ mod tests {
             Group { labels: vec![1], audio: vec![], centroid: vec![0.0, 1.0], dur: 60.0 },
             Group { labels: vec![2], audio: vec![], centroid: vec![0.98, 0.2], dur: 1.0 }, // 1s fragment
         ];
-        consolidate_groups(&mut groups);
+        consolidate_groups(None, &mut groups);
         assert_eq!(groups.len(), 2); // fragment absorbed
         assert!(groups[0].labels.contains(&2)); // joined the [1,0] anchor
     }
@@ -301,7 +417,7 @@ mod tests {
             Group { labels: vec![1], audio: vec![], centroid: vec![0.0, 1.0, 0.0], dur: 600.0 },
             Group { labels: vec![2], audio: vec![], centroid: vec![0.0, 0.0, 1.0], dur: 2.0 },
         ];
-        consolidate_groups(&mut groups);
+        consolidate_groups(None, &mut groups);
         assert_eq!(groups.len(), 2); // 2s < floor -> absorbed despite being distinct
     }
 
@@ -313,7 +429,7 @@ mod tests {
             Group { labels: vec![0], audio: vec![], centroid: vec![1.0, 0.0, 0.0], dur: 600.0 },
             Group { labels: vec![1], audio: vec![], centroid: vec![0.0, 0.0, 1.0], dur: 12.0 },
         ];
-        consolidate_groups(&mut groups);
+        consolidate_groups(None, &mut groups);
         assert_eq!(groups.len(), 2); // small but resembles no anchor -> kept
     }
 
@@ -324,7 +440,7 @@ mod tests {
             Group { labels: vec![0], audio: vec![], centroid: vec![1.0, 0.0, 0.0], dur: 600.0 },
             Group { labels: vec![1], audio: vec![], centroid: vec![0.95, 0.31, 0.0], dur: 12.0 },
         ];
-        consolidate_groups(&mut groups);
+        consolidate_groups(None, &mut groups);
         assert_eq!(groups.len(), 1); // 12s at cosine 0.95 -> folded into the anchor
     }
 
@@ -362,6 +478,101 @@ mod tests {
         eprintln!("[diarize_real] {} final speaker(s):", d.speaker_count);
         for (spk, secs) in &dur {
             eprintln!("    speaker {spk}: {secs:.1}s");
+        }
+        assert!(d.speaker_count > 1, "expected more than one speaker, got {}", d.speaker_count);
+    }
+
+    // Production-faithful variant of diarize_real_meeting: instead of handing
+    // the diarizer the continuous WAV, push it through the recorder's VAD in
+    // 256-sample chunks, timestamp each emitted segment the way the meeting
+    // consumer does (receipt time minus segment length), and rebuild the
+    // waveform the way refine_speakers does (silence + segments at their
+    // offsets). Measures what the VAD/reconstruction path costs versus the
+    // original audio. Extra env var: VERBA_VAD_MODEL (a Silero VAD ONNX).
+    #[test]
+    #[ignore]
+    fn diarize_real_meeting_vad_path() {
+        let _ = env_logger::builder().filter_level(log::LevelFilter::Info).is_test(false).try_init();
+        let wav = std::env::var("VERBA_DIARIZE_WAV").expect("set VERBA_DIARIZE_WAV");
+        let samples = read_wav_16k_mono(&wav);
+        let vad_model = std::env::var("VERBA_VAD_MODEL")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| crate::models::ModelManager::global().vad_model_path());
+        let mut vad = crate::vad::Vad::new(&vad_model).expect("load VAD");
+
+        let mut buffered: Vec<(u64, Vec<f32>)> = Vec::new();
+        for (ci, chunk) in samples.chunks(256).enumerate() {
+            if let Some(seg) = vad.accept(chunk) {
+                let elapsed_ms = ((ci + 1) * 256 / 16) as u64;
+                let seg_ms = (seg.len() as u64) * 1000 / 16_000;
+                buffered.push((elapsed_ms.saturating_sub(seg_ms), seg));
+            }
+        }
+        let duration_ms = (samples.len() as u64) * 1000 / 16_000;
+        if let Some(seg) = vad.flush() {
+            let seg_ms = (seg.len() as u64) * 1000 / 16_000;
+            buffered.push((duration_ms.saturating_sub(seg_ms), seg));
+        }
+        let speech: usize = buffered.iter().map(|(_, s)| s.len()).sum();
+        eprintln!(
+            "[vad_path] {} VAD segment(s), {:.1}s speech of {:.1}s audio",
+            buffered.len(),
+            speech as f32 / 16_000.0,
+            samples.len() as f32 / 16_000.0
+        );
+
+        // refine_speakers' reconstruction, verbatim.
+        let total = (duration_ms as usize) * 16 + 16_000;
+        let mut wave = vec![0.0f32; total];
+        for (t_ms, seg) in &buffered {
+            let start = (*t_ms as usize) * 16;
+            if start >= wave.len() {
+                continue;
+            }
+            let end = (start + seg.len()).min(wave.len());
+            wave[start..end].copy_from_slice(&seg[..end - start]);
+        }
+
+        let seg = model_path("VERBA_SEG_MODEL", |m| m.segmentation_model_path());
+        let emb = model_path("VERBA_EMB_MODEL", |m| m.speaker_model_path());
+
+        // Optional forensics dump: per-VAD-segment embeddings as JSON, for
+        // cross-machine capture comparisons (VERBA_DUMP_EMB=/path/out.json).
+        if let Ok(dump) = std::env::var("VERBA_DUMP_EMB") {
+            let extractor = SpeakerEmbeddingExtractor::create(&SpeakerEmbeddingExtractorConfig {
+                model: Some(emb.to_string_lossy().into_owned()),
+                num_threads: 2,
+                debug: false,
+                provider: Some("cpu".into()),
+            })
+            .expect("extractor");
+            let mut rows = Vec::new();
+            for (t_ms, seg_samples) in &buffered {
+                let Some(e) = embed(&extractor, seg_samples) else { continue };
+                let v = normalize(&e);
+                let vs: Vec<String> = v.iter().map(|x| format!("{x:.6}")).collect();
+                rows.push(format!(
+                    "{{\"t_ms\":{},\"secs\":{:.2},\"emb\":[{}]}}",
+                    t_ms,
+                    seg_samples.len() as f32 / 16_000.0,
+                    vs.join(",")
+                ));
+            }
+            std::fs::write(&dump, format!("[{}]", rows.join(","))).expect("write dump");
+            eprintln!("[vad_path] dumped {} segment embeddings to {dump}", rows.len());
+        }
+
+        let d = diarize(&seg, &emb, &wave).expect("diarize returned None");
+        let mut dur = std::collections::BTreeMap::<usize, f32>::new();
+        for s in &d.spans {
+            *dur.entry(s.speaker).or_default() += s.end - s.start;
+        }
+        eprintln!("[vad_path] {} final speaker(s):", d.speaker_count);
+        for (spk, secs) in &dur {
+            eprintln!("    speaker {spk}: {secs:.1}s");
+        }
+        for s in &d.spans {
+            eprintln!("    span {:7.1}-{:7.1}s -> speaker {}", s.start, s.end, s.speaker);
         }
         assert!(d.speaker_count > 1, "expected more than one speaker, got {}", d.speaker_count);
     }
