@@ -117,6 +117,8 @@ struct StreamHandle {
     audio_rx: mpsc::Receiver<Vec<f32>>,
     resampler: Option<LinearResampler>,
     disconnected: Arc<AtomicBool>,
+    /// VERBA_DEBUG_AUDIO=1 only: raw + resampled WAV dumps of this stream.
+    debug: Option<crate::debug_wav::StreamDump>,
 }
 
 /// Which audio device a recorder should open. Resolved inside the worker
@@ -329,6 +331,7 @@ fn worker(cmd_rx: mpsc::Receiver<Cmd>, event_tx: mpsc::Sender<Event>, mut vad: O
                                 &mut vad,
                                 &handle.disconnected,
                                 &segment_tx,
+                                &mut handle.debug,
                             );
                             drop(handle.stream);
 
@@ -471,6 +474,7 @@ fn open_stream(spec: &DeviceSpec) -> Result<StreamHandle, String> {
             audio_rx,
             resampler,
             disconnected: Arc::new(AtomicBool::new(false)),
+            debug: crate::debug_wav::stream_dump("system", rate),
         });
     }
 
@@ -588,11 +592,17 @@ fn open_stream(spec: &DeviceSpec) -> Result<StreamHandle, String> {
 
     log::info!("Recording at {device_rate}Hz, {channels}ch -> {TARGET_SAMPLE_RATE}Hz (stream opened in {}ms)", t.elapsed().as_millis());
 
+    let debug_label = match spec {
+        DeviceSpec::ConfigInput | DeviceSpec::InputByName(_) => "mic",
+        _ => "system",
+    };
+
     Ok(StreamHandle {
         stream: StreamKind::Cpal(stream),
         audio_rx,
         resampler,
         disconnected,
+        debug: crate::debug_wav::stream_dump(debug_label, device_rate as u32),
     })
 }
 
@@ -604,6 +614,7 @@ fn record_loop(
     vad: &mut Option<Vad>,
     disconnected: &AtomicBool,
     segment_tx: &Option<mpsc::Sender<Vec<f32>>>,
+    debug: &mut Option<crate::debug_wav::StreamDump>,
 ) -> (Vec<f32>, LoopExit) {
     let mut all_samples: Vec<f32> = Vec::new();
     let mut speech_samples: Vec<f32> = Vec::new();
@@ -620,10 +631,16 @@ fn record_loop(
                 // Drain any audio buffers still in the channel so we don't
                 // lose trailing consonants or word endings.
                 while let Ok(mono) = audio_rx.try_recv() {
+                    if let Some(d) = debug.as_mut() {
+                        d.write_raw(&mono);
+                    }
                     let resampled = match resampler {
                         Some(ref mut r) => r.resample(&mono, false),
                         None => mono,
                     };
+                    if let Some(d) = debug.as_mut() {
+                        d.write_16k(&resampled);
+                    }
                     match vad {
                         Some(ref mut v) => {
                             if segments_sent == 0 {
@@ -664,10 +681,16 @@ fn record_loop(
         if disconnected.load(Ordering::SeqCst) {
             // Drain any remaining buffered audio
             while let Ok(mono) = audio_rx.try_recv() {
+                if let Some(d) = debug.as_mut() {
+                    d.write_raw(&mono);
+                }
                 let resampled = match resampler {
                     Some(ref mut r) => r.resample(&mono, false),
                     None => mono,
                 };
+                if let Some(d) = debug.as_mut() {
+                    d.write_16k(&resampled);
+                }
                 total_samples += resampled.len();
                 if segments_sent == 0 {
                     all_samples.extend_from_slice(&resampled);
@@ -680,10 +703,16 @@ fn record_loop(
 
         match audio_rx.recv_timeout(std::time::Duration::from_millis(50)) {
             Ok(mono) => {
+                if let Some(d) = debug.as_mut() {
+                    d.write_raw(&mono);
+                }
                 let resampled = match resampler {
                     Some(ref mut r) => r.resample(&mono, false),
                     None => mono,
                 };
+                if let Some(d) = debug.as_mut() {
+                    d.write_16k(&resampled);
+                }
 
                 match vad {
                     Some(ref mut v) => {
@@ -737,6 +766,9 @@ fn record_loop(
     if let Some(ref mut r) = resampler {
         let tail = r.resample(&[], true);
         if !tail.is_empty() {
+            if let Some(d) = debug.as_mut() {
+                d.write_16k(&tail);
+            }
             match vad {
                 Some(ref mut v) => {
                     if let Some(segment) = v.accept(&tail) {

@@ -1,6 +1,7 @@
 mod audio;
 mod config;
 mod debug_log;
+mod debug_wav;
 mod delivery;
 mod engine;
 mod feeds;
