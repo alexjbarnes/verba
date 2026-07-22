@@ -206,7 +206,7 @@ fn config_is_gb(config_path: &str) -> bool {
 /// this so they can never disagree.
 /// Bump when pronunciation logic changes for ALL locales (heteronym rules,
 /// tokenizer fixes) so cached audio regenerates with the new readings.
-const PRON_VERSION: u32 = 9;
+const PRON_VERSION: u32 = 10;
 
 pub fn cache_fingerprint(model_path: &str, config_path: &str) -> String {
     let fp = model_fingerprint(model_path);
@@ -807,6 +807,37 @@ const PRONUNCIATION_OVERRIDES: &[(&str, &str)] = &[
     ("quantization", "K W AA2 N T AH0 Z EY1 SH AH0 N"),
     ("timescaledb", "T AY1 M S K EY2 L D IY1 B IY1"),
     ("duckdb", "D AH1 K D IY1 B IY1"),
+    // Reported 2026-07-22 (aru/alan/vctk voices, 12-word batch). All probed:
+    // eleven genuinely OOV and spelling out letter-by-letter; "1990s" was a
+    // normalize_numbers decade bug (fixed there), not a dict miss. Built from
+    // real CMUdict morphemes: ex+infiltration, parallel+realizable's tail,
+    // token/visualize/factor + agent suffixes, ticket's first syllable +
+    // token, re+implementation, sparse+ity, inflation's -flation pattern,
+    // customize + organization's -ization, key+me for the Kimi model brand.
+    // "tokenizers" is covered by the plural fallback via "tokenizer".
+    ("exfiltration", "EH2 K S F IH0 L T R EY1 SH AH0 N"),
+    ("parallelizable", "P EH2 R AH0 L AH0 L AY1 Z AH0 B AH0 L"),
+    ("tokenizer", "T OW1 K AH0 N AY2 Z ER0"),
+    ("tokenize", "T OW1 K AH0 N AY2 Z"),
+    ("tokenized", "T OW1 K AH0 N AY2 Z D"),
+    ("tokenizing", "T OW1 K AH0 N AY2 Z IH0 NG"),
+    ("tokenization", "T OW2 K AH0 N AH0 Z EY1 SH AH0 N"),
+    ("tiktoken", "T IH1 K T OW2 K AH0 N"),
+    // ("reimplement"/"reimplemented" resolve via the re- prefix fallback and
+    // are pinned by the 2026-07-11 batch — only the -ation form was OOV.)
+    ("reimplementation", "R IY2 IH2 M P L AH0 M EH0 N T EY1 SH AH0 N"),
+    ("visualizer", "V IH1 ZH W AH0 L AY2 Z ER0"),
+    ("visualizers", "V IH1 ZH W AH0 L AY2 Z ER0 Z"),
+    ("refactor", "R IY0 F AE1 K T ER0"),
+    ("refactored", "R IY0 F AE1 K T ER0 D"),
+    ("refactoring", "R IY0 F AE1 K T ER0 IH0 NG"),
+    ("refactors", "R IY0 F AE1 K T ER0 Z"),
+    ("sparsity", "S P AA1 R S AH0 T IY0"),
+    ("ablation", "AH0 B L EY1 SH AH0 N"),
+    ("ablations", "AH0 B L EY1 SH AH0 N Z"),
+    ("kimi", "K IY1 M IY0"),
+    ("customization", "K AH2 S T AH0 M AH0 Z EY1 SH AH0 N"),
+    ("customizations", "K AH2 S T AH0 M AH0 Z EY1 SH AH0 N Z"),
 ];
 
 /// Expand each (possibly multi-codepoint, like "ɑː" or "iː") token into
@@ -889,6 +920,20 @@ pub fn spoken_text(text: &str) -> String {
 /// Read a 4-digit year the spoken way: "1980" -> "nineteen eighty",
 /// "1905" -> "nineteen oh five", "1900" -> "nineteen hundred",
 /// "2007" -> "two thousand seven", "2026" -> "twenty twenty six".
+/// Pluralize the final word of a spoken number for decade forms:
+/// "nineteen ninety" -> "nineteen nineties", "two thousand" ->
+/// "two thousands", "ninety" -> "nineties".
+fn pluralize_last_word(words: &str) -> String {
+    let plural = |w: &str| match w.strip_suffix('y') {
+        Some(stem) => format!("{stem}ies"),
+        None => format!("{w}s"),
+    };
+    match words.rsplit_once(' ') {
+        Some((head, last)) => format!("{head} {}", plural(last)),
+        None => plural(words),
+    }
+}
+
 fn say_year(y: u64) -> String {
     let hi = y / 100;
     let lo = y % 100;
@@ -1000,6 +1045,20 @@ fn normalize_numbers(text: &str) -> String {
                 ordinal = true;
                 i += 2;
             }
+        }
+        // Decade plural ("the 1990s", "the 90s"): a trailing 's' on a
+        // 0-ending integer reads as the pluralized decade ("nineteen
+        // nineties"), not a spelled letter ("nineteen ninety S").
+        // "60s" as a duration loses out to the decade reading here —
+        // decades dominate in read-aloud prose. Reported 2026-07-22.
+        let mut decade = false;
+        if !percent && !ordinal && frac.is_empty() && !had_sep && !currency
+            && int_str.ends_with('0')
+            && matches!(chars.get(i), Some('s') | Some('S'))
+            && chars.get(i + 1).map_or(true, |c| !c.is_alphanumeric())
+        {
+            decade = true;
+            i += 1;
         }
         // Magnitude suffix: "$10B" / "1.5M" / "200k" / "£3bn"-style. Lowercase
         // m/b/t are only magnitudes with a currency sign ("10m" is metres in
@@ -1136,7 +1195,8 @@ fn normalize_numbers(text: &str) -> String {
             out.push(' ');
         }
         if is_year {
-            out.push_str(&say_year(int_val));
+            let year_words = say_year(int_val);
+            out.push_str(&if decade { pluralize_last_word(&year_words) } else { year_words });
         } else if currency {
             out.push_str(&say_cardinal(int_val));
             if !magnitude.is_empty() {
@@ -1176,7 +1236,8 @@ fn normalize_numbers(text: &str) -> String {
                 out.push_str(prerelease);
             }
         } else {
-            out.push_str(&say_cardinal(int_val));
+            let words = say_cardinal(int_val);
+            out.push_str(&if decade { pluralize_last_word(&words) } else { words });
             if !magnitude.is_empty() {
                 out.push(' ');
                 out.push_str(magnitude);
@@ -2717,6 +2778,22 @@ mod tests {
         // spelling or dict path.
         assert_eq!(say("amount"), "əmˈaʊnt");
         assert_eq!(say("Einsum"), "ˈaɪnsˌʌm");
+
+        // 2026-07-22 batch (aru/alan/vctk reports). Exact strings pinned from
+        // the probe. Eleven OOV additions plus the decade fix ("1990s" was
+        // reading "nineteen ninety S").
+        assert_eq!(say("exfiltration"), "ˌɛksfɪltɹˈeɪʃən");
+        assert_eq!(say("parallelizable"), "pˌɛɹələlˈaɪzəbəl");
+        assert_eq!(say("tokenizers"), "tˈəʊkənˌaɪzəz");
+        assert_eq!(say("tiktoken"), "tˈɪktˌəʊkən");
+        assert_eq!(say("reimplementation"), "ɹˌiːˌɪmpləmɛntˈeɪʃən");
+        assert_eq!(say("visualizer"), "vˈɪʒwəlˌaɪzɐ");
+        assert_eq!(say("refactoring"), "ɹiːfˈæktəɹɪŋ");
+        assert_eq!(say("sparsity"), "spˈɑːsətɪ");
+        assert_eq!(say("ablation"), "əblˈeɪʃən");
+        assert_eq!(say("Kimi"), "kˈiːmɪ");
+        assert_eq!(say("self-customization"), "sˈɛlf kˌʌstəməzˈeɪʃən");
+        assert_eq!(say("in the 1990s"), "ɪn ðɐ nˈaɪntˈiːn nˈaɪntiːz");
     }
 
     // Reported 2026-07-05: dashes produced no audible pause. Confirms the
@@ -2784,6 +2861,14 @@ mod tests {
         assert_eq!(normalize_numbers("since 1980"), "since nineteen eighty");
         assert_eq!(normalize_numbers("in 1905"), "in nineteen oh five");
         assert_eq!(normalize_numbers("in 2007"), "in two thousand seven");
+        // Decade plurals (reported 2026-07-22: "1990s" read "nineteen ninety S").
+        assert_eq!(normalize_numbers("in the 1990s"), "in the nineteen nineties");
+        assert_eq!(normalize_numbers("the 90s"), "the nineties");
+        assert_eq!(normalize_numbers("the 2000s"), "the two thousands");
+        assert_eq!(normalize_numbers("the 2010s"), "the twenty tens");
+        // Non-decade neighbours stay untouched.
+        assert_eq!(normalize_numbers("1990 said"), "nineteen ninety said");
+        assert_eq!(normalize_numbers("70st"), "seventieth");
         // Magnitude suffixes.
         assert_eq!(normalize_numbers("$10B fund"), "ten billion dollars fund");
         assert_eq!(normalize_numbers("a $1.5M house"), "a one point five million dollars house");
