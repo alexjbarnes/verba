@@ -323,13 +323,74 @@ fn final_cleanup(text: &str) -> String {
         }
     }
 
+    // Sentence starts inside the text (the first character was handled above):
+    // the ASR often emits a lowercase word after a full stop, and filler
+    // removal can delete the "Um" that carried the capital.
+    s = capitalize_sentence_starts(&s);
+
     // Add trailing period if no sentence-ending punctuation
     let last = s.chars().last().unwrap_or(' ');
     if !matches!(last, '.' | '!' | '?' | ',' | ';' | ':' | '"' | '\'' | ')') {
         s.push('.');
     }
 
+    // Trailing space so consecutive dictations concatenate cleanly — the user
+    // dictates in parts and otherwise has to type a space between every part.
+    if matches!(s.chars().last(), Some('.' | '!' | '?')) {
+        s.push(' ');
+    }
+
     s
+}
+
+/// Capitalize the first letter of each sentence within the text.
+fn capitalize_sentence_starts(text: &str) -> String {
+    let words: Vec<&str> = text.split(' ').collect();
+    let mut result = Vec::with_capacity(words.len());
+    for (i, word) in words.iter().enumerate() {
+        if i == 0 || !ends_sentence(words[i - 1]) {
+            result.push((*word).to_string());
+            continue;
+        }
+        // Mixed-case tokens (iPhone) keep their deliberate casing.
+        if word.chars().skip(1).any(|c| c.is_uppercase()) {
+            result.push((*word).to_string());
+            continue;
+        }
+        let mut chars = word.chars();
+        match chars.next() {
+            Some(first) if first.is_ascii_lowercase() => {
+                result.push(first.to_ascii_uppercase().to_string() + chars.as_str());
+            }
+            _ => result.push((*word).to_string()),
+        }
+    }
+    result.join(" ")
+}
+
+/// Whether a token ends a sentence for capitalization purposes. Abbreviations,
+/// initials and dotted tokens (versions, "U.S.") end in '.' without ending
+/// a sentence.
+fn ends_sentence(token: &str) -> bool {
+    if token.ends_with('!') || token.ends_with('?') {
+        return true;
+    }
+    if !token.ends_with('.') {
+        return false;
+    }
+    const ABBREVIATIONS: [&str; 8] =
+        ["etc.", "e.g.", "i.e.", "vs.", "mr.", "mrs.", "dr.", "st."];
+    if ABBREVIATIONS.iter().any(|a| token.eq_ignore_ascii_case(a)) {
+        return false;
+    }
+    let stem = &token[..token.len() - 1];
+    if stem.contains('.') {
+        return false;
+    }
+    if stem.len() == 1 && stem.chars().all(|c| c.is_ascii_alphabetic()) {
+        return false;
+    }
+    true
 }
 
 /// Lowercase words that the model falsely capitalized mid-sentence.
@@ -388,6 +449,14 @@ fn fix_mid_sentence_caps(text: &str) -> String {
             continue;
         }
 
+        // Mixed-case tokens are deliberate casing, not model noise: brands
+        // (MacBook, YouTube, ClickHouse) and acronym plurals (PRs, URLs, IDs)
+        // all carry an uppercase after the first character.
+        if rest.chars().skip(1).any(|c| c.is_uppercase()) {
+            result.push(word.to_string());
+            continue;
+        }
+
         // Preserve acronyms (all uppercase, 2+ chars): API, DNS, USA
         if core.len() >= 2 && core.chars().all(|c| c.is_uppercase()) {
             result.push(word.to_string());
@@ -438,7 +507,7 @@ mod tests {
     fn postprocess_basic_text() {
         let result = postprocess("hello world");
         assert!(result.text.starts_with('H'));
-        assert!(result.text.ends_with('.'));
+        assert!(result.text.ends_with(". "));
         assert!(!result.stages.is_empty());
         assert_eq!(result.stages[0].name, "Raw transcription");
     }
@@ -452,17 +521,49 @@ mod tests {
 
     #[test]
     fn final_cleanup_capitalizes() {
-        assert_eq!(final_cleanup("hello world"), "Hello world.");
+        assert_eq!(final_cleanup("hello world"), "Hello world. ");
     }
 
     #[test]
     fn final_cleanup_preserves_punctuation() {
-        assert_eq!(final_cleanup("Hello world!"), "Hello world!");
+        assert_eq!(final_cleanup("Hello world!"), "Hello world! ");
     }
 
     #[test]
     fn final_cleanup_collapses_spaces() {
-        assert_eq!(final_cleanup("hello  world"), "Hello world.");
+        assert_eq!(final_cleanup("hello  world"), "Hello world. ");
+    }
+
+    #[test]
+    fn final_cleanup_capitalizes_sentence_starts() {
+        assert_eq!(
+            final_cleanup("Okay, great. the meeting stuff. it seems fine"),
+            "Okay, great. The meeting stuff. It seems fine. "
+        );
+        assert_eq!(final_cleanup("It's in this repo. at the root."), "It's in this repo. At the root. ");
+        assert_eq!(final_cleanup("what happened? nothing did"), "What happened? Nothing did. ");
+    }
+
+    #[test]
+    fn final_cleanup_abbreviations_do_not_start_sentences() {
+        assert_eq!(
+            final_cleanup("Click on them, etc. and then commit"),
+            "Click on them, etc. and then commit. "
+        );
+        assert_eq!(final_cleanup("Use 3.1.0. or newer"), "Use 3.1.0. or newer. ");
+    }
+
+    #[test]
+    fn final_cleanup_no_trailing_space_after_comma() {
+        assert_eq!(final_cleanup("well,"), "Well,");
+    }
+
+    #[test]
+    fn fix_caps_preserves_mixed_case() {
+        assert_eq!(fix_mid_sentence_caps("raise PRs for both"), "raise PRs for both");
+        assert_eq!(fix_mid_sentence_caps("the MacBook speakers"), "the MacBook speakers");
+        assert_eq!(fix_mid_sentence_caps("a YouTube video of it"), "a YouTube video of it");
+        assert_eq!(fix_mid_sentence_caps("check the URLs and IDs"), "check the URLs and IDs");
     }
 
     #[test]
@@ -478,7 +579,7 @@ mod tests {
     #[test]
     fn postprocess_preserves_trailing_punct() {
         let result = postprocess("I have three.");
-        assert_eq!(result.text, "I have 3.");
+        assert_eq!(result.text, "I have 3. ");
     }
 
     #[test]
@@ -583,7 +684,7 @@ mod tests {
     fn final_cleanup_fixes_mid_sentence_caps() {
         assert_eq!(
             final_cleanup("assert what We want out the other side"),
-            "Assert what we want out the other side."
+            "Assert what we want out the other side. "
         );
     }
 
@@ -607,7 +708,7 @@ mod tests {
 
     #[test]
     fn stage_cleanup_isolated() {
-        assert_eq!(final_cleanup("hello world"), "Hello world.");
+        assert_eq!(final_cleanup("hello world"), "Hello world. ");
     }
 
     // -- Pipeline integration: verify stage metadata --
