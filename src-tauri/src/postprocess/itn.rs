@@ -126,6 +126,19 @@ pub fn normalize(text: &str) -> String {
 
         // Try to parse a number sequence starting here
         if let Some((num_str, consumed)) = try_parse_number_sequence(&words, i) {
+            // Standalone "one" is almost always a pronoun or an idiom in
+            // speech ("this one", "one by one", "at one point"), not a
+            // numeral — converting it is the pipeline's most common ITN
+            // error. Convert it only when a neighbouring word is numeric
+            // too (a counting sequence like "one two three"); compounds
+            // ("twenty one", "one hundred") consume more than one word and
+            // never reach this guard.
+            if consumed == 1 && bare == "one" && !numeric_neighbour(&words, i) {
+                output.push(words[i].to_string());
+                i += 1;
+                continue;
+            }
+
             let last_punct = trailing_punct(words[i + consumed - 1]);
 
             // Check for currency/percent suffix (only when number has no trailing punct)
@@ -263,6 +276,19 @@ fn try_parse_number_sequence(words: &[&str], start: usize) -> Option<(String, us
     }
 }
 
+/// Whether the word before or after position `i` is itself numeric — a
+/// cardinal/multiplier word or a token containing a digit.
+fn numeric_neighbour(words: &[&str], i: usize) -> bool {
+    let is_numeric = |w: &str| {
+        let lower = w.to_ascii_lowercase();
+        let bare = lower.trim_matches(|c: char| c.is_ascii_punctuation());
+        CARDINALS.contains_key(bare)
+            || MULTIPLIERS.contains_key(bare)
+            || bare.chars().any(|c| c.is_ascii_digit())
+    };
+    (i > 0 && is_numeric(words[i - 1])) || (i + 1 < words.len() && is_numeric(words[i + 1]))
+}
+
 /// Return the trailing ASCII punctuation of a word, if any.
 fn trailing_punct(word: &str) -> &str {
     let trimmed = word.trim_end_matches(|c: char| c.is_ascii_punctuation());
@@ -362,7 +388,42 @@ mod tests {
 
     #[test]
     fn trailing_period_preserved() {
-        assert_eq!(normalize("I have one."), "I have 1.");
+        assert_eq!(normalize("I have two."), "I have 2.");
+    }
+
+    #[test]
+    fn standalone_one_not_converted() {
+        assert_eq!(
+            normalize("can you talk me through this one please?"),
+            "can you talk me through this one please?"
+        );
+        assert_eq!(
+            normalize("I can kill that one, that doesn't matter."),
+            "I can kill that one, that doesn't matter."
+        );
+        assert_eq!(normalize("we did it one by one"), "we did it one by one");
+        assert_eq!(
+            normalize("at one point we were creating one"),
+            "at one point we were creating one"
+        );
+        assert_eq!(normalize("one thing I don't understand"), "one thing I don't understand");
+        assert_eq!(normalize("every single one"), "every single one");
+    }
+
+    #[test]
+    fn one_converts_in_counting_and_compounds() {
+        assert_eq!(normalize("testing one two three"), "testing 1 2 3");
+        assert_eq!(normalize("twenty one"), "21");
+        assert_eq!(normalize("one hundred twenty three"), "123");
+        assert_eq!(normalize("one thousand"), "1000");
+    }
+
+    #[test]
+    fn standalone_one_currency_stays_spoken() {
+        // Consequence of the standalone-"one" guard, and matches written
+        // style anyway: spell out one, digits from two upwards.
+        assert_eq!(normalize("it costs one dollar"), "it costs one dollar");
+        assert_eq!(normalize("it costs two dollars"), "it costs $2");
     }
 
     #[test]
