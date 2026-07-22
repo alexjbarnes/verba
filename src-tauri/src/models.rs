@@ -174,6 +174,22 @@ pub struct ModelInfo {
     pub progress: f64,
 }
 
+/// Voice dirs dropped from the catalogue for good; their disk is reclaimed at
+/// every startup. A dir may ONLY be listed here while no live voice downloads
+/// into it: "tts/piper-vctk" sat in this list after the stock VCTK entry was
+/// dropped, and when the duration-patched VCTK went live in the same dir,
+/// every boot silently deleted the user's downloaded model (reported
+/// 2026-07-22 as "VCTK needs re-downloading after every restart"). The
+/// stale_reclaim_never_deletes_live_voices test pins the invariant.
+const STALE_VOICE_DIRS: &[&str] = &["tts/piper-libritts"];
+
+/// Delete leftover voice dirs from catalogue entries that no longer exist.
+fn reclaim_stale_voice_dirs(base_dir: &std::path::Path) {
+    for stale in STALE_VOICE_DIRS {
+        let _ = std::fs::remove_dir_all(base_dir.join(stale));
+    }
+}
+
 // ── Manager ──
 
 pub struct ModelManager {
@@ -221,11 +237,7 @@ impl ModelManager {
             String::new()
         };
 
-        // Voices dropped from the catalogue; reclaim their disk on installs
-        // that had downloaded them.
-        for stale in ["tts/piper-libritts", "tts/piper-vctk"] {
-            let _ = std::fs::remove_dir_all(base_dir.join(stale));
-        }
+        reclaim_stale_voice_dirs(&base_dir);
 
         // Freshest usable manifest: the disk cache from a previous fetch,
         // else the embedded snapshot. A malformed cache (interrupted write,
@@ -1255,6 +1267,38 @@ mod tests {
             fs::create_dir_all(p.parent().unwrap()).unwrap();
             fs::write(p, b"fake").unwrap();
         }
+    }
+
+    #[test]
+    fn stale_reclaim_never_deletes_live_voices() {
+        let m = parse_manifest(EMBEDDED_MANIFEST).unwrap();
+        for v in &m.voices.list {
+            for f in &v.files {
+                for stale in STALE_VOICE_DIRS {
+                    assert!(
+                        !f.rel_path.starts_with(stale),
+                        "{} downloads into stale-reclaim dir {stale} — every boot would delete it",
+                        v.id
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn stale_reclaim_removes_only_listed_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let stale = dir.path().join("tts/piper-libritts");
+        let live = dir.path().join("tts/piper-vctk");
+        fs::create_dir_all(&stale).unwrap();
+        fs::create_dir_all(&live).unwrap();
+        fs::write(stale.join("model.onnx"), b"old").unwrap();
+        fs::write(live.join("model_dur.onnx"), b"live").unwrap();
+
+        reclaim_stale_voice_dirs(dir.path());
+
+        assert!(!stale.exists(), "dropped voice dir should be reclaimed");
+        assert!(live.join("model_dur.onnx").exists(), "live voice dir must survive boot");
     }
 
     #[test]
