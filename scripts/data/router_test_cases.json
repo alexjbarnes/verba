@@ -1259,5 +1259,70 @@
     "label": 0,
     "category": "routed to corrector",
     "score": 0.243
+  },
+  {
+    "text": "Pull main first, everything's been pushed and merged.",
+    "label": 1,
+    "category": "FP / git branch name main - corrector inserts 'the main' (recurred 6+ times in Apr-Jul history)"
+  },
+  {
+    "text": "Are all the speaker diarisation changes on main?",
+    "label": 1,
+    "category": "FP / git branch name main - corrector produced 'on the main'"
+  },
+  {
+    "text": "So do me a new list with just the ones that we need to tackle.",
+    "label": 1,
+    "category": "FP / imperative 'do me a new list' rewritten into question 'do I make a new list' - meaning change"
+  },
+  {
+    "text": "Yes, the main issue is the base 64 stuff.",
+    "label": 1,
+    "category": "FP / corrector inserted 'of' into 'base 64'"
+  },
+  {
+    "text": "Okay, I have run it against audio from a video.",
+    "label": 1,
+    "category": "FP / 'have run' rewritten to 'have to run' - meaning change"
+  },
+  {
+    "text": "We can leave region for now.",
+    "label": 1,
+    "category": "FP / domain field name 'region' - corrector inserts article"
+  },
+  {
+    "text": "If they update the time and then it doesn't actually change until the schedule runs, it's a bit confusing.",
+    "label": 1,
+    "category": "FP / contraction 'it's' expanded to 'it is' - spoken register lost"
+  },
+  {
+    "text": "The meeting that I sent you only has seven speakers in it.",
+    "label": 1,
+    "category": "FP / singular subject with intervening clause - corrector flipped has to have"
+  },
+  {
+    "text": "That is just a issue with the node environment.",
+    "label": 0,
+    "category": "TP / article a->an, correctly fixed (regression anchor)"
+  },
+  {
+    "text": "There was two speakers in the video.",
+    "label": 0,
+    "category": "TP / was->were agreement, correctly fixed (regression anchor)"
+  },
+  {
+    "text": "I've select infringing and then select the infringement type as trademark.",
+    "label": 0,
+    "category": "TP / select->selected, correctly fixed (regression anchor)"
+  },
+  {
+    "text": "The remote just has a markdown with smoke test in it for the README.",
+    "label": 0,
+    "category": "TP / missing article before 'smoke test', correctly fixed (regression anchor)"
+  },
+  {
+    "text": "I think it just timed out waiting for the both the emails.",
+    "label": 0,
+    "category": "FN / router flagged 'the both the' (0.016) but corrector returned no fix"
   }
 ]
