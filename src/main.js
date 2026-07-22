@@ -5199,6 +5199,7 @@ let meetingNotesSaveTimer = null; // debounce handle for meeting_note_set
 let meetingClockTimer = null;
 let meetingClockBaseMs = 0; // elapsed ms as of meetingClockBaseAt
 let meetingClockBaseAt = 0; // performance.now() when the base was captured
+let meetingStartEpoch = 0; // Date.now() at meeting start; wall-clock labels = this + t_ms
 
 let meetingItems = []; // last meetings_list() result
 let meetingViewId = null; // id shown by #meeting-view
@@ -5232,31 +5233,54 @@ function setMeetingLoopbackNotice(notice) {
   el.classList.toggle('hidden', !notice);
 }
 
+// Mirrors the backend's display merge (store::merge_for_display): consecutive
+// same-speaker utterances within the gap join into one block. The raw
+// meetingUtterances array stays per-segment so rehydrate matches the backend.
+const MEETING_MERGE_GAP_MS = 30000;
+function mergeMeetingUtterances(utts) {
+  const out = [];
+  let lastStart = 0;
+  for (const u of utts) {
+    const last = out[out.length - 1];
+    if (last && last.speaker === u.speaker && u.t_ms - lastStart <= MEETING_MERGE_GAP_MS) {
+      last.text += ' ' + u.text;
+    } else {
+      out.push({ t_ms: u.t_ms, speaker: u.speaker, text: u.text });
+    }
+    lastStart = u.t_ms;
+  }
+  return out;
+}
+
+function meetingWallClock(tMs) {
+  const d = new Date(meetingStartEpoch + tMs);
+  const p = (n) => String(n).padStart(2, '0');
+  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+
 function meetingUtteranceHtml(u) {
   const speakerClass = u.speaker === 'You' ? 'text-primary' : 'text-on-surface-variant';
   return `
   <div class="meeting-utterance">
     <div class="flex items-baseline gap-2">
       <span class="text-xs font-semibold ${speakerClass}">${escapeHtml(u.speaker)}</span>
-      <span class="text-[11px] text-on-surface-variant/60 tabular-nums">${formatMmSs(u.t_ms)}</span>
+      <span class="text-[11px] text-on-surface-variant/60 tabular-nums">${meetingWallClock(u.t_ms)}</span>
     </div>
     <p class="text-[15px] leading-relaxed text-on-surface mt-0.5">${escapeHtml(u.text)}</p>
   </div>`;
 }
 
-function renderMeetingTranscript() {
+function renderMeetingTranscript(scrollToEnd = true) {
   const el = document.getElementById('meeting-transcript');
-  el.innerHTML = meetingUtterances.map(meetingUtteranceHtml).join('');
-  el.scrollTop = el.scrollHeight;
+  const prev = el.scrollTop;
+  el.innerHTML = mergeMeetingUtterances(meetingUtterances).map(meetingUtteranceHtml).join('');
+  el.scrollTop = scrollToEnd ? el.scrollHeight : prev;
 }
 
 function appendMeetingUtterance(u) {
   meetingUtterances.push(u);
-  const el = document.getElementById('meeting-transcript');
-  el.insertAdjacentHTML('beforeend', meetingUtteranceHtml(u));
-  if (meetingAutoFollow) {
-    el.scrollTop = el.scrollHeight;
-  } else {
+  renderMeetingTranscript(meetingAutoFollow);
+  if (!meetingAutoFollow) {
     document.getElementById('meeting-jump-latest').classList.remove('hidden');
   }
 }
@@ -5356,6 +5380,7 @@ async function startMeeting() {
   stopBtn.disabled = false;
   stopBtn.textContent = 'Stop';
   setMeetingLoopbackNotice(res.notice);
+  meetingStartEpoch = Date.now();
   startMeetingClock(0);
   showPanel('meeting-live');
   setBottomNavVisible(false);
@@ -5376,6 +5401,7 @@ async function checkMeetingRehydrate() {
   meetingRecording = true;
   meetingUtterances = Array.isArray(status.utterances) ? status.utterances.slice() : [];
   meetingAutoFollow = true;
+  meetingStartEpoch = Date.now() - (status.elapsed_ms || 0);
   renderMeetingTranscript();
   document.getElementById('meeting-jump-latest').classList.add('hidden');
   document.getElementById('meeting-notes').value = status.notes || '';

@@ -95,7 +95,9 @@ pub fn start(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
     let meta = MeetingMeta {
         id: format!("{:x}", chrono::Utc::now().timestamp_micros()),
         title: format!("Meeting {}", now.format("%-d %b %H:%M")),
-        started: chrono::Utc::now().to_rfc3339(),
+        // Local offset, not Utc: transcript wall-clock labels derive from this
+        // and must show the meeting's local time (fmt_wall keeps the offset).
+        started: now.to_rfc3339(),
         duration_ms: 0,
         utterance_count: 0,
         transcript_path: String::new(),
@@ -886,16 +888,19 @@ pub struct TranscriptEntry {
 /// clicking a speaker filters the transcript to just their lines.
 pub fn transcript(id: &str) -> Result<Vec<TranscriptEntry>, String> {
     // Prefer the structured sidecar (carries per-utterance data and stable idx);
-    // meetings recorded before it fall back to parsing the markdown.
+    // meetings recorded before it fall back to parsing the markdown. Same
+    // display shape as the markdown: merged same-speaker blocks, wall clock.
     if let Some(utts) = store::load_transcript(id) {
-        return Ok(utts
-            .iter()
+        let started =
+            store::MeetingStore::global().get(id).map(|m| m.started).unwrap_or_default();
+        return Ok(store::merge_for_display(&utts)
+            .into_iter()
             .enumerate()
-            .map(|(i, u)| TranscriptEntry {
+            .map(|(i, b)| TranscriptEntry {
                 idx: i,
-                clock: store::fmt_clock(u.t_ms),
-                speaker: u.speaker.clone(),
-                text: u.text.clone(),
+                clock: store::fmt_wall(&started, b.t_ms),
+                speaker: b.speaker,
+                text: b.text,
             })
             .collect());
     }

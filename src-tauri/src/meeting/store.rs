@@ -146,6 +146,53 @@ pub fn fmt_clock(t_ms: u64) -> String {
     format!("{:02}:{:02}", s / 60, s % 60)
 }
 
+/// Wall-clock label for an utterance: meeting start plus the offset, rendered
+/// in the timestamp's own timezone (`started` records the local offset).
+/// Meeting-relative MM:SS fallback when `started` doesn't parse.
+pub fn fmt_wall(started: &str, t_ms: u64) -> String {
+    match chrono::DateTime::parse_from_rfc3339(started) {
+        Ok(dt) => (dt + chrono::Duration::milliseconds(t_ms as i64)).format("%H:%M:%S").to_string(),
+        Err(_) => fmt_clock(t_ms),
+    }
+}
+
+/// Consecutive same-speaker utterances closer than this merge into one display
+/// block; a longer gap reads as a new turn even from the same voice.
+pub const MERGE_GAP_MS: u64 = 30_000;
+
+/// One display block: consecutive same-speaker utterances joined, stamped with
+/// the first utterance's offset.
+pub struct DisplayBlock {
+    pub t_ms: u64,
+    pub speaker: String,
+    pub text: String,
+}
+
+/// Collapse consecutive utterances from the same speaker into display blocks.
+/// Display-level only — the stored per-segment utterance list is untouched
+/// (diarization relabelling and per-utterance voiceprints key on segment t_ms).
+pub fn merge_for_display(utterances: &[Utterance]) -> Vec<DisplayBlock> {
+    let mut out: Vec<DisplayBlock> = Vec::new();
+    let mut last_start: u64 = 0;
+    for u in utterances {
+        let text = u.text.trim();
+        if text.is_empty() {
+            continue;
+        }
+        if let Some(b) = out.last_mut() {
+            if b.speaker == u.speaker && u.t_ms.saturating_sub(last_start) <= MERGE_GAP_MS {
+                b.text.push(' ');
+                b.text.push_str(text);
+                last_start = u.t_ms;
+                continue;
+            }
+        }
+        out.push(DisplayBlock { t_ms: u.t_ms, speaker: u.speaker.clone(), text: text.to_string() });
+        last_start = u.t_ms;
+    }
+    out
+}
+
 /// Structured transcript sidecar: the full `Utterance` list (incl. per-utterance
 /// voiceprints) as JSON at `data_dir/verba/transcripts/<id>.json`. This is the
 /// source of truth for speaker operations; the markdown is a derived export.
@@ -182,7 +229,7 @@ pub fn delete_transcript(id: &str) {
 }
 
 /// Transcript markdown: title, the user's own notes verbatim, then the
-/// utterances as `**[MM:SS] Speaker:** text` lines.
+/// merged display blocks as `**[HH:MM:SS] Speaker:** text` lines (wall clock).
 pub fn transcript_markdown(meta: &MeetingMeta, notes: &str, utterances: &[Utterance]) -> String {
     let mut out = format!("# {}\n\nStarted: {}\n", meta.title, meta.started);
     if !notes.trim().is_empty() {
@@ -191,8 +238,8 @@ pub fn transcript_markdown(meta: &MeetingMeta, notes: &str, utterances: &[Uttera
         out.push('\n');
     }
     out.push_str("\n## Transcript\n\n");
-    for u in utterances {
-        out.push_str(&format!("**[{}] {}:** {}\n\n", fmt_clock(u.t_ms), u.speaker, u.text));
+    for b in merge_for_display(utterances) {
+        out.push_str(&format!("**[{}] {}:** {}\n\n", fmt_wall(&meta.started, b.t_ms), b.speaker, b.text));
     }
     out
 }
@@ -258,8 +305,58 @@ mod tests {
             Utterance { source: "system".into(), speaker: "Speaker 1".into(), text: "Morning. Let's start.".into(), t_ms: 4_500, embedding: None },
         ];
         let md = transcript_markdown(&meta("m1"), "ship friday\nrollback: priya", &utterances);
-        let expected = "# Weekly sync\n\nStarted: 2026-07-07T14:30:00Z\n\n## Notes\n\nship friday\nrollback: priya\n\n## Transcript\n\n**[00:01] You:** Morning all.\n\n**[00:04] Speaker 1:** Morning. Let's start.\n\n";
+        let expected = "# Weekly sync\n\nStarted: 2026-07-07T14:30:00Z\n\n## Notes\n\nship friday\nrollback: priya\n\n## Transcript\n\n**[14:30:01] You:** Morning all.\n\n**[14:30:04] Speaker 1:** Morning. Let's start.\n\n";
         assert_eq!(md, expected);
+    }
+
+    #[test]
+    fn transcript_markdown_merges_consecutive_same_speaker() {
+        let utterances = vec![
+            Utterance { source: "mic".into(), speaker: "You".into(), text: "So I scroll down,".into(), t_ms: 22_000, embedding: None },
+            Utterance { source: "mic".into(), speaker: "You".into(), text: "then I add the URLs.".into(), t_ms: 29_000, embedding: None },
+            Utterance { source: "system".into(), speaker: "Ed".into(), text: "Interesting.".into(), t_ms: 37_000, embedding: None },
+        ];
+        let md = transcript_markdown(&meta("m1"), "", &utterances);
+        assert!(md.contains("**[14:30:22] You:** So I scroll down, then I add the URLs.\n"));
+        assert!(md.contains("**[14:30:37] Ed:** Interesting.\n"));
+        assert!(!md.contains("14:30:29"));
+    }
+
+    #[test]
+    fn merge_keeps_blocks_apart_across_long_gaps() {
+        let utterances = vec![
+            Utterance { source: "mic".into(), speaker: "You".into(), text: "First remark.".into(), t_ms: 0, embedding: None },
+            Utterance { source: "mic".into(), speaker: "You".into(), text: "Much later remark.".into(), t_ms: MERGE_GAP_MS + 1_000, embedding: None },
+        ];
+        let blocks = merge_for_display(&utterances);
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].text, "First remark.");
+        assert_eq!(blocks[1].text, "Much later remark.");
+    }
+
+    #[test]
+    fn merge_gap_is_measured_between_neighbours_not_block_start() {
+        // A long monologue: every utterance within the gap of its neighbour
+        // stays one block even when the block's total span exceeds the gap.
+        let utterances: Vec<Utterance> = (0..4)
+            .map(|i| Utterance {
+                source: "mic".into(),
+                speaker: "You".into(),
+                text: format!("part {i}."),
+                t_ms: i * 20_000,
+                embedding: None,
+            })
+            .collect();
+        let blocks = merge_for_display(&utterances);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].text, "part 0. part 1. part 2. part 3.");
+        assert_eq!(blocks[0].t_ms, 0);
+    }
+
+    #[test]
+    fn fmt_wall_falls_back_to_relative_on_bad_start() {
+        assert_eq!(fmt_wall("not-a-date", 61_000), "01:01");
+        assert_eq!(fmt_wall("2026-07-07T14:30:00+01:00", 61_000), "14:31:01");
     }
 
     #[test]
