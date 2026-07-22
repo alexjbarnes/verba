@@ -117,7 +117,8 @@ struct StreamHandle {
     audio_rx: mpsc::Receiver<Vec<f32>>,
     resampler: Option<LinearResampler>,
     disconnected: Arc<AtomicBool>,
-    /// VERBA_DEBUG_AUDIO=1 only: raw + resampled WAV dumps of this stream.
+    /// Raw + resampled WAV dumps of this stream: always on when the recorder
+    /// was built with a DumpTarget (meetings), else VERBA_DEBUG_AUDIO=1 only.
     debug: Option<crate::debug_wav::StreamDump>,
 }
 
@@ -150,6 +151,7 @@ pub struct AudioRecorder {
     event_rx: mpsc::Receiver<Event>,
     vad_path: Option<PathBuf>,
     device_spec: DeviceSpec,
+    dump: Option<crate::debug_wav::DumpTarget>,
 }
 
 impl AudioRecorder {
@@ -163,14 +165,26 @@ impl AudioRecorder {
     /// Spawn the recorder worker on an explicit device (Meeting mode uses this
     /// for the loopback stream).
     pub fn new_with_device(vad_model: Option<&Path>, device_spec: DeviceSpec) -> Result<Self, String> {
+        Self::new_with_device_dumping(vad_model, device_spec, None)
+    }
+
+    /// Like `new_with_device`, but every capture session also writes debug WAV
+    /// dumps (raw + 16k) into the given target, unconditionally.
+    pub fn new_with_device_dumping(
+        vad_model: Option<&Path>,
+        device_spec: DeviceSpec,
+        dump: Option<crate::debug_wav::DumpTarget>,
+    ) -> Result<Self, String> {
         let vad_path: Option<PathBuf> = vad_model.map(|p| p.to_path_buf());
-        let (cmd_tx, event_rx) = Self::spawn_worker(vad_path.as_deref(), device_spec.clone())?;
-        Ok(Self { cmd_tx, event_rx, vad_path, device_spec })
+        let (cmd_tx, event_rx) =
+            Self::spawn_worker(vad_path.as_deref(), device_spec.clone(), dump.clone())?;
+        Ok(Self { cmd_tx, event_rx, vad_path, device_spec, dump })
     }
 
     fn spawn_worker(
         vad_path: Option<&Path>,
         device_spec: DeviceSpec,
+        dump: Option<crate::debug_wav::DumpTarget>,
     ) -> Result<(mpsc::Sender<Cmd>, mpsc::Receiver<Event>), String> {
         let (cmd_tx, cmd_rx) = mpsc::channel();
         let (event_tx, event_rx) = mpsc::channel();
@@ -198,7 +212,7 @@ impl AudioRecorder {
                     }
                 };
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    worker(cmd_rx, event_tx, vad, device_spec);
+                    worker(cmd_rx, event_tx, vad, device_spec, dump);
                 }));
                 if let Err(panic_info) = result {
                     let msg = if let Some(s) = panic_info.downcast_ref::<String>() {
@@ -237,7 +251,8 @@ impl AudioRecorder {
     /// or Err if it failed to start (e.g. VAD model missing).
     pub fn respawn(&mut self) -> Result<(), String> {
         log::info!("Respawning recorder worker thread");
-        let (cmd_tx, event_rx) = Self::spawn_worker(self.vad_path.as_deref(), self.device_spec.clone())?;
+        let (cmd_tx, event_rx) =
+            Self::spawn_worker(self.vad_path.as_deref(), self.device_spec.clone(), self.dump.clone())?;
         self.cmd_tx = cmd_tx;
         self.event_rx = event_rx;
         Ok(())
@@ -287,7 +302,13 @@ impl AudioRecorder {
     }
 }
 
-fn worker(cmd_rx: mpsc::Receiver<Cmd>, event_tx: mpsc::Sender<Event>, mut vad: Option<Vad>, device_spec: DeviceSpec) {
+fn worker(
+    cmd_rx: mpsc::Receiver<Cmd>,
+    event_tx: mpsc::Sender<Event>,
+    mut vad: Option<Vad>,
+    device_spec: DeviceSpec,
+    dump: Option<crate::debug_wav::DumpTarget>,
+) {
     while let Ok(cmd) = cmd_rx.recv() {
         match cmd {
             Cmd::Start { segment_tx } => {
@@ -317,7 +338,7 @@ fn worker(cmd_rx: mpsc::Receiver<Cmd>, event_tx: mpsc::Sender<Event>, mut vad: O
                         }
                     }
 
-                    match open_stream(&device_spec) {
+                    match open_stream(&device_spec, dump.as_ref()) {
                         Ok(mut handle) => {
                             if !sent_started {
                                 let _ = event_tx.send(Event::Started);
@@ -452,7 +473,7 @@ fn resolve_device(host: &cpal::Host, spec: &DeviceSpec) -> Result<cpal::Device, 
     }
 }
 
-fn open_stream(spec: &DeviceSpec) -> Result<StreamHandle, String> {
+fn open_stream(spec: &DeviceSpec, dump: Option<&crate::debug_wav::DumpTarget>) -> Result<StreamHandle, String> {
     // macOS system audio bypasses cpal entirely: a global CoreAudio process
     // tap isn't bound to any single device, so there's no cpal Device to
     // resolve/configure below. Everything else (mic input, Windows/Linux
@@ -474,7 +495,7 @@ fn open_stream(spec: &DeviceSpec) -> Result<StreamHandle, String> {
             audio_rx,
             resampler,
             disconnected: Arc::new(AtomicBool::new(false)),
-            debug: crate::debug_wav::stream_dump("system", rate),
+            debug: crate::debug_wav::stream_dump_for(dump, "system", rate),
         });
     }
 
@@ -602,7 +623,7 @@ fn open_stream(spec: &DeviceSpec) -> Result<StreamHandle, String> {
         audio_rx,
         resampler,
         disconnected,
-        debug: crate::debug_wav::stream_dump(debug_label, device_rate as u32),
+        debug: crate::debug_wav::stream_dump_for(dump, debug_label, device_rate as u32),
     })
 }
 

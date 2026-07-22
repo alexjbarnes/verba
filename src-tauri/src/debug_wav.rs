@@ -94,23 +94,43 @@ impl StreamDump {
     }
 }
 
-/// Open the raw + 16k dump pair for a stream, or None when debugging is off
-/// or the files can't be created. `label` is "mic" or "system".
-pub fn stream_dump(label: &str, device_rate: u32) -> Option<StreamDump> {
-    if !enabled() {
-        return None;
-    }
-    let dir = dir();
+/// A fixed destination for a stream's dumps: files land in `dir` named
+/// `<prefix>-<label>-{raw,16k}.wav`. Meeting mode passes one of these so its
+/// audio lands beside the transcript, unconditionally.
+#[derive(Clone)]
+pub struct DumpTarget {
+    pub dir: PathBuf,
+    pub prefix: String,
+}
+
+/// Open the raw + 16k dump pair for a stream. With a `DumpTarget` the dump is
+/// always on; without one it only happens when VERBA_DEBUG_AUDIO is set
+/// (files go to the temp dir, timestamp-prefixed). `label` is "mic" or
+/// "system". None when off or the files can't be created.
+pub fn stream_dump_for(
+    target: Option<&DumpTarget>,
+    label: &str,
+    device_rate: u32,
+) -> Option<StreamDump> {
+    let (dir, stem) = match target {
+        Some(t) => (t.dir.clone(), format!("{}-{label}", t.prefix)),
+        None => {
+            if !enabled() {
+                return None;
+            }
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0);
+            (dir(), format!("{ts}-{label}"))
+        }
+    };
     if let Err(e) = std::fs::create_dir_all(&dir) {
         log::warn!("debug-audio: cannot create {}: {e}", dir.display());
         return None;
     }
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
-    let raw_path = dir.join(format!("{ts}-{label}-raw.wav"));
-    let k16_path = dir.join(format!("{ts}-{label}-16k.wav"));
+    let raw_path = unique_path(&dir, &format!("{stem}-raw"));
+    let k16_path = unique_path(&dir, &format!("{stem}-16k"));
     match (DebugWav::create(&raw_path, device_rate), DebugWav::create(&k16_path, 16_000)) {
         (Ok(raw), Ok(k16)) => {
             log::info!(
@@ -125,6 +145,22 @@ pub fn stream_dump(label: &str, device_rate: u32) -> Option<StreamDump> {
             None
         }
     }
+}
+
+/// First non-existing `<stem>.wav`, `<stem>-2.wav`, ... so a stream retry
+/// never truncates the audio already captured before the reconnect.
+fn unique_path(dir: &Path, stem: &str) -> PathBuf {
+    let first = dir.join(format!("{stem}.wav"));
+    if !first.exists() {
+        return first;
+    }
+    for n in 2..100 {
+        let p = dir.join(format!("{stem}-{n}.wav"));
+        if !p.exists() {
+            return p;
+        }
+    }
+    first
 }
 
 /// One-shot WAV write for a complete buffer (used for the diarizer input).

@@ -91,25 +91,6 @@ pub fn start(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
         None
     };
 
-    // Mic: the meeting-specific device if chosen, else the configured/default
-    // input. System audio: the chosen output (loopback) when the platform can.
-    let mic_spec = if cfg.meeting_mic_device.is_empty() {
-        DeviceSpec::ConfigInput
-    } else {
-        DeviceSpec::InputByName(cfg.meeting_mic_device.clone())
-    };
-    let mic = AudioRecorder::new_with_device(Some(&vad_path), mic_spec)?;
-    let preferred_output = Some(cfg.meeting_output_device.as_str()).filter(|s| !s.is_empty());
-    let (loopback_rec, loopback_notice) = match loopback::resolve(preferred_output) {
-        loopback::Loopback::Available(spec) => {
-            match AudioRecorder::new_with_device(Some(&vad_path), spec) {
-                Ok(r) => (Some(r), None),
-                Err(e) => (None, Some(format!("System audio unavailable: {e}"))),
-            }
-        }
-        loopback::Loopback::Unsupported(reason) => (None, Some(reason)),
-    };
-
     let now = chrono::Local::now();
     let meta = MeetingMeta {
         id: format!("{:x}", chrono::Utc::now().timestamp_micros()),
@@ -121,6 +102,37 @@ pub fn start(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
         summary_path: String::new(),
         summarizer_id: String::new(),
         unnamed_speakers: 0,
+    };
+
+    // TEMP(debug): while the diarization capture-loss investigation runs,
+    // every meeting's audio is dumped as WAVs beside the transcript
+    // (<id>-{mic,system}-{raw,16k}.wav). Remove when the investigation closes.
+    let dump_target = if cfg.meeting_transcript_dir.trim().is_empty() {
+        None
+    } else {
+        Some(crate::debug_wav::DumpTarget {
+            dir: std::path::PathBuf::from(&cfg.meeting_transcript_dir),
+            prefix: meta.id.clone(),
+        })
+    };
+
+    // Mic: the meeting-specific device if chosen, else the configured/default
+    // input. System audio: the chosen output (loopback) when the platform can.
+    let mic_spec = if cfg.meeting_mic_device.is_empty() {
+        DeviceSpec::ConfigInput
+    } else {
+        DeviceSpec::InputByName(cfg.meeting_mic_device.clone())
+    };
+    let mic = AudioRecorder::new_with_device_dumping(Some(&vad_path), mic_spec, dump_target.clone())?;
+    let preferred_output = Some(cfg.meeting_output_device.as_str()).filter(|s| !s.is_empty());
+    let (loopback_rec, loopback_notice) = match loopback::resolve(preferred_output) {
+        loopback::Loopback::Available(spec) => {
+            match AudioRecorder::new_with_device_dumping(Some(&vad_path), spec, dump_target.clone()) {
+                Ok(r) => (Some(r), None),
+                Err(e) => (None, Some(format!("System audio unavailable: {e}"))),
+            }
+        }
+        loopback::Loopback::Unsupported(reason) => (None, Some(reason)),
     };
     let filename = store::meeting_filename(&now.format("%Y-%m-%d %H-%M").to_string(), "Meeting");
 
@@ -466,8 +478,11 @@ fn refine_speakers(
         }
     }
 
-    if crate::debug_wav::enabled() {
-        let dir = crate::debug_wav::dir();
+    // TEMP(debug): companion to the per-stream dumps written at meeting start
+    // — the exact waveform the diarizer sees, beside the transcript.
+    let dbg_dir = crate::config::AppConfig::load().meeting_transcript_dir;
+    if !dbg_dir.trim().is_empty() {
+        let dir = std::path::PathBuf::from(&dbg_dir);
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join(format!("{id}-diarize-input.wav"));
         match crate::debug_wav::write_wav(&path, 16_000, &wave) {
