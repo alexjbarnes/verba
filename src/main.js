@@ -5677,7 +5677,6 @@ async function openMeetingView(id) {
     [formatTimestamp(meta.started), fmtMins(meta.duration_ms), `${meta.utterance_count} utterances`].join(' · ');
   showPanel('meeting-view');
   setBottomNavVisible(false);
-  renderMeetingSpeakers(id);
   exitSummaryEdit();
   document.getElementById('meeting-summary-edit-btn').classList.remove('hidden');
 
@@ -5700,7 +5699,10 @@ async function openMeetingView(id) {
   }
 
   meetingTranscriptFilter = null;
-  loadMeetingTranscript(id);
+  // Transcript first: the speaker strip's talk-time bars are computed from the
+  // loaded entries.
+  await loadMeetingTranscript(id);
+  renderMeetingSpeakers(id);
 }
 
 document.getElementById('meeting-view-back').addEventListener('click', () => navigateTo('meetings'));
@@ -5839,9 +5841,14 @@ function renderStructuredTranscript() {
       const color = e.speaker === 'You' ? null : colors[e.speaker];
       const style = color ? ` style="color:${color}"` : '';
       const cls = e.speaker === 'You' ? 'text-primary' : '';
+      // Remote names are tappable: naming and line fixes happen where the
+      // words are ("You" is the mic channel and can't be renamed).
+      const nameEl = e.speaker === 'You'
+        ? `<span class="text-xs font-semibold ${cls}">${escapeHtml(e.speaker)}</span>`
+        : `<button class="ml-name text-xs font-semibold cursor-pointer hover:underline underline-offset-2"${style} data-idx="${e.idx}" title="Name or fix this speaker">${escapeHtml(e.speaker)}</button>`;
       return `<div class="meeting-line">
         <div class="flex items-baseline gap-2">
-          <span class="text-xs font-semibold ${cls}"${style}>${escapeHtml(e.speaker)}</span>
+          ${nameEl}
           <span class="text-[11px] text-on-surface-variant/60 tabular-nums">${escapeHtml(e.clock)}</span>
         </div>
         <p class="mt-0.5">${escapeHtml(e.text)}</p>
@@ -5865,6 +5872,16 @@ function setTranscriptFilter(speaker) {
     .scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 }
 
+// Tapping a name on a transcript row opens the speaker sheet with that row's
+// line context, so "this line isn't them" is fixable in place.
+document.getElementById('meeting-transcript-view-body').addEventListener('click', (e) => {
+  const btn = e.target.closest('.ml-name');
+  if (!btn || !meetingViewId) return;
+  const entry = meetingTranscriptEntries[Number(btn.dataset.idx)];
+  if (!entry) return;
+  openSpeakerSheet(meetingViewId, entry.speaker, { lines: entry.lines || [], text: entry.text });
+});
+
 document.getElementById('meeting-transcript-filter-clear').addEventListener('click', () => {
   meetingTranscriptFilter = null;
   renderStructuredTranscript();
@@ -5872,104 +5889,73 @@ document.getElementById('meeting-transcript-filter-clear').addEventListener('cli
 
 // Show the meeting's speakers as chips; clicking one renames it, which enrolls
 // that voiceprint so future meetings identify the person automatically.
+let meetingSpeakersCache = []; // last meeting_speakers result for the open view
+
+// Words + lines per speaker, from the loaded transcript entries. Powers the
+// talk-time bars on the strip and the sheet header.
+function speakerStats() {
+  const stats = {};
+  for (const e of meetingTranscriptEntries) {
+    const s = (stats[e.speaker] ||= { lines: 0, words: 0 });
+    s.lines += 1;
+    s.words += e.text ? e.text.split(/\s+/).length : 0;
+  }
+  return stats;
+}
+
+function speakerInitial(name, unnamed) {
+  return unnamed ? '?' : (name.trim()[0] || '?').toUpperCase();
+}
+
+// The speaker strip: one chip per remote speaker (avatar, name, talk-time bar).
+// Everything else — rename, merge, line fixes, voice review — lives in the
+// speaker sheet a chip opens. Unnamed speakers are highlighted as the call to
+// action.
 async function renderMeetingSpeakers(id) {
   const section = document.getElementById('meeting-speakers-section');
   const wrap = document.getElementById('meeting-speakers');
   let speakers = [];
   try { speakers = await invoke('meeting_speakers', { id }); } catch (_) {}
-  if (!Array.isArray(speakers) || !speakers.length) {
+  meetingSpeakersCache = Array.isArray(speakers) ? speakers : [];
+  if (!meetingSpeakersCache.length) {
     section.classList.add('hidden');
     wrap.innerHTML = '';
     return;
   }
   section.classList.remove('hidden');
-  wrap.className = 'space-y-2.5';
+  wrap.className = 'flex flex-wrap gap-2';
   wrap.innerHTML = '';
-  // Voiceprint signatures per speaker: more than one means the diarizer blended
-  // two voices, and we offer to split the stray one out.
-  let sigMap = {};
-  try {
-    const sigs = await invoke('meeting_signatures', { id });
-    for (const s of sigs) if (s.signatures.length > 1) sigMap[s.speaker] = s.signatures;
-  } catch (_) {}
-  for (const sp of speakers) {
-    const row = document.createElement('div');
-    row.className = 'flex items-center gap-3';
-    // Chip = [ name | pencil ]. Click the name to filter the transcript to this
-    // speaker (the "who is this?" read); click the pencil to rename + enrol them.
-    // Unnamed speakers are highlighted so the ask stands out.
-    const chip = document.createElement('div');
-    chip.className = 'shrink-0 inline-flex items-center rounded-full overflow-hidden ' +
-      (sp.unnamed ? 'bg-primary/15 text-primary' : 'bg-surface-container-highest text-on-surface');
-    const nameBtn = document.createElement('button');
-    nameBtn.className = 'min-h-9 pl-3 pr-2 text-sm cursor-pointer hover:bg-primary/10 transition-colors';
-    nameBtn.textContent = sp.name;
-    nameBtn.title = `Show only ${sp.name}`;
-    nameBtn.addEventListener('click', () => setTranscriptFilter(sp.name));
-    const editBtn = document.createElement('button');
-    editBtn.className = 'min-h-9 pr-2.5 pl-1 flex items-center cursor-pointer hover:bg-primary/10 transition-colors';
-    editBtn.title = `Rename ${sp.name}`;
-    editBtn.innerHTML = '<span class="material-symbols-outlined text-sm opacity-70">edit</span>';
-    editBtn.addEventListener('click', () => startRenameSpeaker(id, sp.name, chip));
-    chip.appendChild(nameBtn);
-    chip.appendChild(editBtn);
-    row.appendChild(chip);
-    if (sp.sample) {
-      const snip = document.createElement('p');
-      snip.className = 'text-xs text-on-surface-variant/70 truncate flex-1 min-w-0';
-      snip.textContent = `“${sp.sample}”`;
-      row.appendChild(snip);
-    }
-    wrap.appendChild(row);
-    if (sigMap[sp.name]) appendSplitPanel(wrap, id, sp.name, sigMap[sp.name], speakers);
+  const colors = meetingSpeakerColors();
+  const stats = speakerStats();
+  const maxWords = Math.max(1, ...meetingSpeakersCache.map((s) => (stats[s.name] || {}).words || 0));
+  for (const sp of meetingSpeakersCache) {
+    const st = stats[sp.name] || { words: 0, lines: 0 };
+    const color = colors[sp.name] || SPEAKER_COLORS[0];
+    const share = Math.max(4, Math.round((100 * st.words) / maxWords));
+    const chip = document.createElement('button');
+    chip.className =
+      'inline-flex items-center gap-2 rounded-full pl-1.5 pr-3.5 min-h-11 cursor-pointer transition-colors ' +
+      (sp.unnamed
+        ? 'bg-primary/15 hover:bg-primary/25 ring-1 ring-primary/50'
+        : 'bg-surface-container-highest hover:bg-primary/10');
+    chip.title = sp.unnamed ? 'Unnamed - tap to name' : `Options for ${sp.name}`;
+    chip.innerHTML =
+      `<span class="w-7 h-7 rounded-full flex items-center justify-center text-[11px] font-bold shrink-0" style="background:${color}; color:#10131c">${escapeHtml(speakerInitial(sp.name, sp.unnamed))}</span>` +
+      `<span class="flex flex-col items-start leading-tight">` +
+      `<span class="text-sm ${sp.unnamed ? 'text-primary font-semibold' : 'text-on-surface'}">${escapeHtml(sp.name)}</span>` +
+      `<span class="block w-12 h-[3px] rounded bg-outline-variant/30 mt-1"><span class="block h-full rounded" style="width:${share}%; background:${color}"></span></span>` +
+      `</span>`;
+    chip.addEventListener('click', () => openSpeakerSheet(id, sp.name));
+    wrap.appendChild(chip);
   }
-  const unnamed = speakers.filter((s) => s.unnamed).length;
+  const unnamed = meetingSpeakersCache.filter((s) => s.unnamed).length;
   document.getElementById('meeting-speakers-count').textContent = unnamed ? ` · ${unnamed} to name` : '';
   document.getElementById('meeting-speakers-hint').textContent = unnamed
-    ? `${unnamed} speaker${unnamed > 1 ? 's' : ''} to name. Naming them lets Verba recognize them in future meetings.`
-    : 'Naming speakers lets Verba recognize them in future meetings.';
+    ? 'Tap the highlighted speaker to name them - known people are a single tap.'
+    : 'Tap a speaker - or any name in the transcript - to rename, merge, or review.';
 }
 
-// A speaker holding more than one voiceprint signature is a blend. Show each
-// signature with a sample line so the user can split the stray voice out to a
-// fresh speaker (its lines and their voiceprints move together).
-function appendSplitPanel(wrap, id, speaker, sigs, speakers) {
-  const panel = document.createElement('div');
-  panel.className = 'ml-3 pl-3 border-l-2 border-primary/30 space-y-1.5';
-  const head = document.createElement('p');
-  head.className = 'text-xs text-on-surface-variant/80 flex items-center gap-1';
-  head.innerHTML = `<span class="material-symbols-outlined text-sm">alt_route</span>${sigs.length} voices detected in ${escapeHtml(speaker)} — split any that isn't them`;
-  panel.appendChild(head);
-  for (const sig of sigs) {
-    const r = document.createElement('div');
-    r.className = 'flex items-center gap-2';
-    const info = document.createElement('span');
-    info.className = 'text-xs text-on-surface-variant flex-1 min-w-0 truncate';
-    const n = sig.count;
-    info.textContent = `${n} line${n > 1 ? 's' : ''} · “${sig.sample}”`;
-    const btn = document.createElement('button');
-    btn.className = 'shrink-0 min-h-8 px-2.5 text-xs font-semibold text-primary rounded-lg hover:bg-primary/10 transition cursor-pointer';
-    btn.textContent = 'Split out';
-    btn.addEventListener('click', async () => {
-      const to = nextSpeakerName(speakers);
-      try {
-        await invoke('meeting_reassign_lines', { id, lines: sig.lines, to });
-        showToast(`Split ${n} line${n > 1 ? 's' : ''} to ${to}`);
-        if (meetingTranscriptFilter === speaker) meetingTranscriptFilter = null;
-        await loadMeetingTranscript(id);
-        renderMeetingSpeakers(id);
-      } catch (err) {
-        showToast('Split failed: ' + err);
-      }
-    });
-    r.appendChild(info);
-    r.appendChild(btn);
-    panel.appendChild(r);
-  }
-  wrap.appendChild(panel);
-}
-
-// The next free "Speaker N" for a split-out voice; the user renames it after.
+// The next free "Speaker N" for a moved-out voice; the user names it after.
 function nextSpeakerName(speakers) {
   let max = 0;
   for (const s of speakers) {
@@ -5979,41 +5965,196 @@ function nextSpeakerName(speakers) {
   return `Speaker ${max + 1}`;
 }
 
-function startRenameSpeaker(id, from, chip) {
-  const input = document.createElement('input');
-  input.type = 'text';
-  input.value = from;
-  input.spellcheck = false;
-  input.className = 'min-h-9 px-3 rounded-full bg-surface-container-highest text-sm text-on-surface border border-primary/60 focus:outline-none focus:ring-1 focus:ring-primary/50 w-36';
-  chip.replaceWith(input);
-  input.focus();
-  input.select();
-  let done = false;
-  const cancel = () => { if (!done) { done = true; renderMeetingSpeakers(id); } };
-  const commit = async () => {
-    if (done) return;
-    done = true;
-    const to = input.value.trim();
-    if (!to || to === from) { renderMeetingSpeakers(id); return; }
-    try {
-      await invoke('meeting_rename_speaker', { id, from, to });
-      showToast(`Named ${to}`);
-      // Labels changed; follow the rename if the transcript was filtered to the
-      // old name, then reload the structured transcript and the chips.
-      if (meetingTranscriptFilter === from) meetingTranscriptFilter = to;
-      await loadMeetingTranscript(id);
-      renderMeetingSpeakers(id);
-    } catch (err) {
-      showToast('Rename failed: ' + err);
-      renderMeetingSpeakers(id);
-    }
-  };
-  input.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') { e.preventDefault(); commit(); }
-    else if (e.key === 'Escape') { e.preventDefault(); cancel(); }
-  });
-  input.addEventListener('blur', commit);
+// ── Speaker sheet: the one surface for naming, merging, and fixing lines ──
+
+const speakerSheet = document.getElementById('speaker-sheet');
+let speakerSheetCtx = null; // { id, name, lineCtx, gallery, sigs, mergeOpen, reviewOpen }
+
+function closeSpeakerSheet() {
+  speakerSheet.classList.add('hidden');
+  speakerSheetCtx = null;
 }
+document.getElementById('speaker-sheet-overlay').addEventListener('click', closeSpeakerSheet);
+
+// Open for a speaker (from the strip) or for one transcript row (lineCtx =
+// { lines, text }), which adds a "move this line" section on top.
+async function openSpeakerSheet(id, name, lineCtx = null) {
+  speakerSheetCtx = { id, name, lineCtx, gallery: [], sigs: [] };
+  renderSpeakerSheet();
+  speakerSheet.classList.remove('hidden');
+  let gallery = [];
+  try { gallery = await invoke('meeting_gallery_speakers'); } catch (_) {}
+  let sigs = [];
+  try {
+    const all = await invoke('meeting_signatures', { id });
+    const mine = ((all || []).find((s) => s.speaker === name) || {}).signatures || [];
+    // Noise gating: one-line signatures are embedding noise on back-channels,
+    // not extra people (measured: 45% of remote lines, 4% of speech). Review
+    // only when at least two SUBSTANTIAL voices remain.
+    const solid = mine.filter((g) => g.count >= 2);
+    if (solid.length >= 2) sigs = solid;
+  } catch (_) {}
+  if (!speakerSheetCtx || speakerSheetCtx.id !== id || speakerSheetCtx.name !== name) return;
+  speakerSheetCtx.gallery = Array.isArray(gallery) ? gallery : [];
+  speakerSheetCtx.sigs = sigs;
+  renderSpeakerSheet();
+}
+
+function renderSpeakerSheet() {
+  if (!speakerSheetCtx) return;
+  const { name, lineCtx, gallery, sigs } = speakerSheetCtx;
+  const body = document.getElementById('speaker-sheet-body');
+  const colors = meetingSpeakerColors();
+  const color = colors[name] || SPEAKER_COLORS[0];
+  const info = meetingSpeakersCache.find((s) => s.name === name) || {};
+  const st = speakerStats()[name] || { lines: 0, words: 0 };
+  const others = meetingSpeakersCache.filter((s) => s.name !== name).map((s) => s.name);
+  const galleryChips = gallery.filter((g) => g !== name);
+  const moveTargets = [...others, ...galleryChips.filter((g) => !others.includes(g))];
+
+  const chip = (label, act, cls) =>
+    `<button class="ss-act inline-flex items-center min-h-9 px-3.5 rounded-full text-sm cursor-pointer transition-colors ${cls || 'bg-surface-container-highest text-on-surface hover:bg-primary/15'}" ${act}>${escapeHtml(label)}</button>`;
+  const row = (label, sub, act) =>
+    `<button class="ss-act w-full flex items-center justify-between gap-3 min-h-11 text-left cursor-pointer border-t border-outline-variant/15 hover:bg-surface-container-highest/60 px-1 rounded-lg" ${act}>` +
+    `<span class="text-sm text-on-surface">${escapeHtml(label)}</span><span class="text-xs text-on-surface-variant shrink-0 truncate max-w-[45%]">${escapeHtml(sub)}</span></button>`;
+
+  let html =
+    `<div class="flex items-center gap-3">` +
+    `<span class="w-9 h-9 rounded-full flex items-center justify-center text-sm font-bold shrink-0" style="background:${color}; color:#10131c">${escapeHtml(speakerInitial(name, info.unnamed))}</span>` +
+    `<div class="min-w-0"><p class="text-sm font-bold text-on-surface truncate">${escapeHtml(name)}</p>` +
+    `<p class="text-xs text-on-surface-variant truncate">${st.lines} line${st.lines === 1 ? '' : 's'}${info.sample ? ` · “${escapeHtml(info.sample)}”` : ''}</p></div></div>`;
+
+  if (lineCtx && Array.isArray(lineCtx.lines) && lineCtx.lines.length) {
+    html +=
+      `<div class="mt-4"><p class="text-xs font-semibold text-on-surface-variant uppercase tracking-wider mb-2">Not ${escapeHtml(name)}? Move this line to</p>` +
+      `<div class="flex flex-wrap gap-2">` +
+      moveTargets.map((n) => chip(n, `data-act="move-line" data-to="${escapeHtml(n)}"`)).join('') +
+      chip('New speaker', 'data-act="move-line-new"') +
+      `</div>` +
+      `<p class="text-xs text-on-surface-variant/70 mt-1.5 truncate">“${escapeHtml(lineCtx.text || '')}”</p></div>`;
+  }
+
+  html +=
+    `<div class="mt-4"><p class="text-xs font-semibold text-on-surface-variant uppercase tracking-wider mb-2">${info.unnamed ? 'Who is this?' : 'Rename'}</p>` +
+    `<div class="flex flex-wrap gap-2 items-center">` +
+    galleryChips.map((n) => chip(n, `data-act="rename" data-to="${escapeHtml(n)}"`, 'bg-primary text-on-primary font-semibold hover:opacity-90')).join('') +
+    `<input id="ss-name-input" type="text" placeholder="Type a name…" spellcheck="false" class="min-h-9 px-3 rounded-full bg-surface-container-highest text-sm text-on-surface border border-outline-variant/40 focus:outline-none focus:border-primary/60 w-36" />` +
+    `<button class="ss-act min-h-9 px-3.5 rounded-full text-sm font-semibold bg-surface-container-highest text-primary cursor-pointer hover:bg-primary/15" data-act="rename-typed">Save</button>` +
+    `</div></div>`;
+
+  html += `<div class="mt-4">`;
+  html += row('Show only their lines', 'filters the transcript', 'data-act="filter"');
+  if (others.length) {
+    html += row('Merge into another speaker', speakerSheetCtx.mergeOpen ? '' : others.slice(0, 3).join(' · ') + (others.length > 3 ? ' · …' : ''), 'data-act="merge-open"');
+  }
+  if (sigs.length) {
+    html += row('Review voices', `${sigs.length} worth checking`, 'data-act="review-open"');
+  }
+  html += `</div>`;
+
+  if (speakerSheetCtx.mergeOpen && others.length) {
+    html +=
+      `<div class="mt-1 mb-2"><p class="text-xs text-on-surface-variant mb-2">All of ${escapeHtml(name)}’s lines become:</p>` +
+      `<div class="flex flex-wrap gap-2">` + others.map((n) => chip(n, `data-act="merge" data-to="${escapeHtml(n)}"`)).join('') + `</div></div>`;
+  }
+  if (speakerSheetCtx.reviewOpen && sigs.length) {
+    html +=
+      `<div class="mt-1 mb-2 space-y-2"><p class="text-xs text-on-surface-variant">Distinct voices inside ${escapeHtml(name)} - move out any that isn’t them:</p>` +
+      sigs
+        .map(
+          (g, i) =>
+            `<div class="flex items-center gap-2">` +
+            `<span class="text-xs text-on-surface-variant flex-1 min-w-0 truncate">${g.count} lines · “${escapeHtml(g.sample)}”</span>` +
+            chip('Someone else', `data-act="sig-out" data-sig="${i}"`) +
+            `</div>`
+        )
+        .join('') +
+      `</div>`;
+  }
+  body.innerHTML = html;
+}
+
+// One refresh path after any speaker mutation: transcript, strip, then close.
+async function refreshAfterSpeakerChange(id, followRename = null) {
+  if (followRename && meetingTranscriptFilter === followRename.from) {
+    meetingTranscriptFilter = followRename.to;
+  }
+  await loadMeetingTranscript(id);
+  await renderMeetingSpeakers(id);
+  closeSpeakerSheet();
+}
+
+async function speakerSheetRename(to) {
+  const { id, name } = speakerSheetCtx;
+  const target = (to || '').trim();
+  if (!target || target === name) return;
+  try {
+    await invoke('meeting_rename_speaker', { id, from: name, to: target });
+    showToast(`Named ${target}`);
+    await refreshAfterSpeakerChange(id, { from: name, to: target });
+  } catch (err) {
+    showToast('Rename failed: ' + err);
+  }
+}
+
+document.getElementById('speaker-sheet-body').addEventListener('click', async (e) => {
+  const btn = e.target.closest('.ss-act');
+  if (!btn || !speakerSheetCtx) return;
+  const { id, name, lineCtx, sigs } = speakerSheetCtx;
+  const act = btn.dataset.act;
+  if (act === 'rename') {
+    speakerSheetRename(btn.dataset.to);
+  } else if (act === 'rename-typed') {
+    speakerSheetRename(document.getElementById('ss-name-input').value);
+  } else if (act === 'filter') {
+    closeSpeakerSheet();
+    setTranscriptFilter(name);
+  } else if (act === 'merge-open') {
+    speakerSheetCtx.mergeOpen = !speakerSheetCtx.mergeOpen;
+    renderSpeakerSheet();
+  } else if (act === 'review-open') {
+    speakerSheetCtx.reviewOpen = !speakerSheetCtx.reviewOpen;
+    renderSpeakerSheet();
+  } else if (act === 'merge') {
+    const to = btn.dataset.to;
+    const ok = await showConfirm(`Merge ${name} into ${to}? All their lines become ${to}.`, { okLabel: 'Merge', danger: false });
+    if (!ok || !speakerSheetCtx) return;
+    try {
+      await invoke('meeting_rename_speaker', { id, from: name, to });
+      showToast(`Merged into ${to}`);
+      await refreshAfterSpeakerChange(id, { from: name, to });
+    } catch (err) {
+      showToast('Merge failed: ' + err);
+    }
+  } else if (act === 'move-line' || act === 'move-line-new') {
+    const to = act === 'move-line' ? btn.dataset.to : nextSpeakerName(meetingSpeakersCache);
+    try {
+      await invoke('meeting_reassign_lines', { id, lines: lineCtx.lines, to });
+      showToast(`Moved to ${to}`);
+      await refreshAfterSpeakerChange(id);
+    } catch (err) {
+      showToast('Move failed: ' + err);
+    }
+  } else if (act === 'sig-out') {
+    const sig = sigs[Number(btn.dataset.sig)];
+    if (!sig) return;
+    const to = nextSpeakerName(meetingSpeakersCache);
+    try {
+      await invoke('meeting_reassign_lines', { id, lines: sig.lines, to });
+      showToast(`Moved ${sig.count} lines to ${to} - tap it to name them`);
+      if (meetingTranscriptFilter === name) meetingTranscriptFilter = null;
+      await refreshAfterSpeakerChange(id);
+    } catch (err) {
+      showToast('Move failed: ' + err);
+    }
+  }
+});
+document.getElementById('speaker-sheet-body').addEventListener('keydown', (e) => {
+  if (e.target.id === 'ss-name-input' && e.key === 'Enter') {
+    e.preventDefault();
+    speakerSheetRename(e.target.value);
+  }
+});
 
 // ── Meeting settings (Settings > Meeting) ──
 
@@ -6387,6 +6528,7 @@ const BACK_OVERLAYS = [
   { el: feedEditModal, close: closeFeedEditModal },
   { el: document.getElementById('snippet-picker'), close: closeSnippetPicker },
   { el: document.getElementById('snippet-wizard'), close: () => document.getElementById('wiz-cancel').click() },
+  { el: document.getElementById('speaker-sheet'), close: () => closeSpeakerSheet() },
 ];
 
 window.verbaHandleBack = function () {

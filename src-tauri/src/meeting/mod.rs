@@ -975,6 +975,9 @@ pub struct TranscriptEntry {
     pub clock: String,
     pub speaker: String,
     pub text: String,
+    /// Sidecar line indices behind this (possibly merged) display row, for
+    /// line-level reassignment. Empty on the markdown-fallback path.
+    pub lines: Vec<usize>,
 }
 
 /// Structured transcript lines for a finished meeting, parsed from the stored
@@ -995,6 +998,7 @@ pub fn transcript(id: &str) -> Result<Vec<TranscriptEntry>, String> {
                 clock: store::fmt_wall(&started, b.t_ms),
                 speaker: b.speaker,
                 text: b.text,
+                lines: b.lines,
             })
             .collect());
     }
@@ -1022,6 +1026,7 @@ pub fn transcript(id: &str) -> Result<Vec<TranscriptEntry>, String> {
                         clock: clock.to_string(),
                         speaker: speaker.to_string(),
                         text: text.to_string(),
+                        lines: Vec::new(),
                     });
                 }
             }

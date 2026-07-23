@@ -166,6 +166,10 @@ pub struct DisplayBlock {
     pub t_ms: u64,
     pub speaker: String,
     pub text: String,
+    /// Indices into the source utterance slice that compose this block, so
+    /// line-level operations (reassigning a merged row) can address the
+    /// underlying sidecar lines.
+    pub lines: Vec<usize>,
 }
 
 /// Collapse consecutive utterances from the same speaker into display blocks.
@@ -174,7 +178,7 @@ pub struct DisplayBlock {
 pub fn merge_for_display(utterances: &[Utterance]) -> Vec<DisplayBlock> {
     let mut out: Vec<DisplayBlock> = Vec::new();
     let mut last_start: u64 = 0;
-    for u in utterances {
+    for (i, u) in utterances.iter().enumerate() {
         let text = u.text.trim();
         if text.is_empty() {
             continue;
@@ -183,11 +187,17 @@ pub fn merge_for_display(utterances: &[Utterance]) -> Vec<DisplayBlock> {
             if b.speaker == u.speaker && u.t_ms.saturating_sub(last_start) <= MERGE_GAP_MS {
                 b.text.push(' ');
                 b.text.push_str(text);
+                b.lines.push(i);
                 last_start = u.t_ms;
                 continue;
             }
         }
-        out.push(DisplayBlock { t_ms: u.t_ms, speaker: u.speaker.clone(), text: text.to_string() });
+        out.push(DisplayBlock {
+            t_ms: u.t_ms,
+            speaker: u.speaker.clone(),
+            text: text.to_string(),
+            lines: vec![i],
+        });
         last_start = u.t_ms;
     }
     out
