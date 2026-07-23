@@ -315,9 +315,14 @@
                   <label class="text-sm font-medium text-on-surface">Microphone</label>
                   <p class="text-xs text-on-surface-variant mt-0.5">Input used for dictation</p>
                 </div>
-                <select id="audio-device" class="bg-surface-container-highest border border-outline-variant/30 rounded-lg pl-3 pr-8 py-1.5 text-sm text-on-surface focus:outline-none focus:ring-1 focus:ring-primary/50 transition-colors cursor-pointer max-w-[55%]">
-                  <option value="-1">System Default</option>
-                </select>
+                <div class="flex items-center gap-2 min-w-0 max-w-[60%]">
+                  <select id="audio-device" class="bg-surface-container-highest border border-outline-variant/30 rounded-lg pl-3 pr-8 py-1.5 text-sm text-on-surface focus:outline-none focus:ring-1 focus:ring-primary/50 transition-colors cursor-pointer min-w-0 flex-1">
+                    <option value="-1">System Default</option>
+                  </select>
+                  <button id="audio-device-refresh" type="button" title="Rescan for microphones" aria-label="Rescan for microphones" class="shrink-0 flex items-center justify-center w-8 h-8 rounded-lg border border-outline-variant/30 text-on-surface-variant hover:bg-surface-container-highest hover:text-on-surface transition-colors cursor-pointer">
+                    <span class="material-symbols-outlined text-[18px]">refresh</span>
+                  </button>
+                </div>
               </div>
             </div>
             <!-- Android only: desktop has no vibration motor to drive. -->

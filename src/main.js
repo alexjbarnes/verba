@@ -1032,7 +1032,47 @@ async function loadAudioDevices() {
     opt.textContent = dev.name;
     sel.appendChild(opt);
   }
+  return devices;
 }
+
+// Rescan for microphones — plugging in a headset mid-session doesn't reach the
+// list on its own. The stored value is a POSITIONAL index into the host's
+// enumeration, so a new device can shift the one already chosen onto a
+// different mic: re-match the selection by name, persist the new index, and
+// drop back to System Default when the chosen device has gone away.
+async function refreshAudioDevices() {
+  const sel = document.getElementById('audio-device');
+  const btn = document.getElementById('audio-device-refresh');
+  const icon = btn.querySelector('.material-symbols-outlined');
+  const before = Array.from(sel.options).map(o => o.textContent);
+  const wantedName = sel.selectedOptions[0]?.textContent || '';
+  const wasDefault = sel.value === '-1';
+  const previousValue = sel.value;
+
+  btn.disabled = true;
+  icon.classList.add('animate-spin');
+  try {
+    await loadAudioDevices();
+  } catch (err) {
+    showToast('Could not list microphones: ' + err);
+    return;
+  } finally {
+    btn.disabled = false;
+    icon.classList.remove('animate-spin');
+  }
+
+  const match = Array.from(sel.options).find(o => o.textContent === wantedName);
+  sel.value = wasDefault || !match ? '-1' : match.value;
+  if (sel.value !== previousValue) await saveConfig();
+
+  // A lost selection outranks a new arrival: it just changed what records.
+  const added = Array.from(sel.options).map(o => o.textContent).filter(n => !before.includes(n));
+  if (!wasDefault && !match) showToast(`${wantedName} is gone — using System Default`);
+  else if (added.length) showToast(`Found ${added.join(', ')}`);
+  else showToast('No new microphones found');
+}
+
+document.getElementById('audio-device-refresh').addEventListener('click', refreshAudioDevices);
 
 // Meeting-mode device pickers (desktop). Values are device NAMES ("" = system
 // default), matching the backend's InputByName / LoopbackByName specs.
