@@ -5777,9 +5777,80 @@ document.getElementById('meeting-cancel-btn').addEventListener('click', async ()
 });
 
 // ── Meetings list ──
+//
+// The list is grouped by when it happened, filtered by chips, and searchable
+// over what was actually said. Titles repeat ("Standup" every morning), so the
+// date headers carry the structure and search goes through transcripts.
 
-function renderMeetingCard(m, i) {
-  const meta = [formatTimestamp(m.started), fmtMins(m.duration_ms),
+let meetingFilter = 'all';
+let meetingSearchHits = null; // Map(id -> hit) while a search is active, else null
+let meetingSearchTimer = null;
+
+// Start of the local day `date` falls in.
+function startOfDay(date) {
+  const d = new Date(date);
+  d.setHours(0, 0, 0, 0);
+  return d;
+}
+
+// Monday-based week start, matching how a work week reads.
+function startOfWeek(date) {
+  const d = startOfDay(date);
+  d.setDate(d.getDate() - ((d.getDay() + 6) % 7));
+  return d;
+}
+
+// Day-level headings for the last two days, then week, then month — the
+// resolution people actually recall a meeting by.
+function meetingGroupLabel(started, now = new Date()) {
+  const when = new Date(started);
+  if (isNaN(when)) return 'Undated';
+  const day = startOfDay(when).getTime();
+  const today = startOfDay(now).getTime();
+  const dayMs = 86400000;
+  if (day === today) return 'Today';
+  if (day === today - dayMs) return 'Yesterday';
+  const thisWeek = startOfWeek(now).getTime();
+  if (day >= thisWeek) return 'Earlier this week';
+  if (day >= thisWeek - 7 * dayMs) return 'Last week';
+  const sameYear = when.getFullYear() === now.getFullYear();
+  return when.toLocaleDateString(undefined, sameYear ? { month: 'long' } : { month: 'long', year: 'numeric' });
+}
+
+// Meetings in list order (newest first) split into labelled runs. Order is
+// preserved rather than sorted by group, so the headings follow the timeline.
+function groupMeetings(items, now = new Date()) {
+  const groups = [];
+  for (const m of items) {
+    const label = meetingGroupLabel(m.started, now);
+    const last = groups[groups.length - 1];
+    if (last && last.label === label) last.items.push(m);
+    else groups.push({ label, items: [m] });
+  }
+  return groups;
+}
+
+function meetingMatchesFilter(m) {
+  if (meetingFilter === 'summarized') return !!m.summary_path;
+  if (meetingFilter === 'unsummarized') return !m.summary_path;
+  if (meetingFilter === 'unnamed') return m.unnamed_speakers > 0;
+  return true;
+}
+
+function visibleMeetings() {
+  let items = meetingItems.filter(meetingMatchesFilter);
+  if (meetingSearchHits) items = items.filter(m => meetingSearchHits.has(m.id));
+  return items;
+}
+
+function renderMeetingCard(m, i, groupLabel) {
+  // The date header already says which day it was; under Today/Yesterday the
+  // date in the meta line is just noise, so show the time alone there.
+  const dayIsObvious = groupLabel === 'Today' || groupLabel === 'Yesterday';
+  const when = dayIsObvious
+    ? new Date(m.started).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
+    : formatTimestamp(m.started);
+  const meta = [when, fmtMins(m.duration_ms),
     `${m.utterance_count} ${m.utterance_count === 1 ? 'utterance' : 'utterances'}`].join(' · ');
   // A just-stopped meeting stays busy while the backend finishes speaker
   // analysis; its card is highlighted and inert until meeting-state processed.
@@ -5792,11 +5863,21 @@ function renderMeetingCard(m, i) {
     ? `<span class="inline-flex items-center gap-1 text-xs text-primary"><span class="material-symbols-outlined text-sm">person_add</span>${m.unnamed_speakers} to name</span>`
     : '';
   const ring = m.processing ? ' ring-1 ring-primary/40' : '';
+  // Under a search, show where it matched instead of making them open it.
+  const hit = meetingSearchHits && meetingSearchHits.get(m.id);
+  const snippet = hit && hit.snippet
+    ? `<div class="mt-1.5 text-xs text-on-surface-variant/90 border-l-2 border-primary/40 pl-2 line-clamp-2">${
+        hit.speaker ? `<span class="font-semibold text-on-surface/80">${escapeHtml(hit.speaker)}:</span> ` : ''
+      }${escapeHtml(hit.snippet)}${
+        hit.count > 1 ? `<span class="text-primary font-semibold"> +${hit.count - 1} more</span>` : ''
+      }</div>`
+    : '';
   return `
   <div class="meeting-item stagger-in bg-surface-container rounded-xl px-4 py-3.5 cursor-pointer hover:bg-surface-container-high transition-colors${ring}" data-id="${escapeHtml(m.id)}" style="--i:${i}">
     <div class="text-[15px] font-semibold leading-snug text-on-surface truncate">${escapeHtml(m.title)}</div>
     <div class="text-xs text-on-surface-variant tabular-nums mt-1">${escapeHtml(meta)}</div>
     <div class="mt-1.5 flex items-center gap-3">${indicator}${nameBadge}</div>
+    ${snippet}
   </div>`;
 }
 
@@ -5808,17 +5889,47 @@ async function loadMeetings() {
     console.error('Failed to load meetings:', err);
     return;
   }
-  const list = document.getElementById('meetings-list');
+  renderMeetingsList();
+}
+
+function meetingsEmptyState() {
   if (!meetingItems.length) {
-    list.innerHTML = `
+    return `
       <div class="flex flex-col items-center justify-center pt-16 text-on-surface-variant">
         <span class="material-symbols-outlined text-4xl mb-3 opacity-30">groups</span>
         <p class="text-sm">No meetings yet</p>
         <p class="text-xs mt-2 max-w-xs text-center opacity-70">Press the record button to capture and transcribe a meeting</p>
       </div>`;
+  }
+  const what = meetingSearchHits ? 'No meetings match that search' : 'No meetings match this filter';
+  return `
+    <div class="flex flex-col items-center justify-center pt-16 text-on-surface-variant">
+      <span class="material-symbols-outlined text-4xl mb-3 opacity-30">search_off</span>
+      <p class="text-sm">${what}</p>
+    </div>`;
+}
+
+function renderMeetingsList() {
+  const list = document.getElementById('meetings-list');
+  // Chips reflect the active filter (no :checked to lean on for buttons).
+  document.querySelectorAll('.meeting-filter').forEach(btn => {
+    const on = btn.dataset.filter === meetingFilter;
+    btn.className = `meeting-filter shrink-0 text-xs font-semibold px-3 py-1.5 rounded-full border transition-colors cursor-pointer ${
+      on ? 'bg-primary/15 border-primary/40 text-primary' : 'border-outline-variant/30 text-on-surface-variant hover:bg-surface-container-high'}`;
+  });
+
+  const items = visibleMeetings();
+  if (!items.length) {
+    list.innerHTML = meetingsEmptyState();
     return;
   }
-  list.innerHTML = meetingItems.map(renderMeetingCard).join('');
+  let i = 0;
+  list.innerHTML = groupMeetings(items).map(g => `
+    <div class="sticky top-0 z-10 bg-surface py-1.5 text-[11px] font-semibold uppercase tracking-wider text-on-surface-variant">
+      ${escapeHtml(g.label)}<span class="ml-1.5 opacity-60 normal-case tracking-normal">${g.items.length}</span>
+    </div>
+    <div class="space-y-3 pb-4">${g.items.map(m => renderMeetingCard(m, i++, g.label)).join('')}</div>`).join('');
+
   list.querySelectorAll('.meeting-item').forEach(el => {
     // While the post-stop pass runs there is no final transcript to open and
     // deleting would race the finalize thread — hold every action until then.
@@ -5835,6 +5946,47 @@ async function loadMeetings() {
     attachLongPress(el, () => { if (!busy()) openMeetingActionSheet(el.dataset.id); });
   });
 }
+
+document.getElementById('meetings-filters').addEventListener('click', (e) => {
+  const btn = e.target.closest('.meeting-filter');
+  if (!btn) return;
+  meetingFilter = btn.dataset.filter;
+  renderMeetingsList();
+});
+
+// Search reads every transcript on the backend, so debounce it and skip
+// single characters — the results would be everything anyway.
+const meetingsSearchInput = document.getElementById('meetings-search');
+meetingsSearchInput.addEventListener('input', () => {
+  const query = meetingsSearchInput.value.trim();
+  document.getElementById('meetings-search-clear').hidden = !query;
+  clearTimeout(meetingSearchTimer);
+  if (query.length < 2) {
+    meetingSearchHits = null;
+    renderMeetingsList();
+    return;
+  }
+  meetingSearchTimer = setTimeout(async () => {
+    try {
+      const hits = await invoke('meetings_search', { query });
+      // Ignore a result that landed after the query moved on.
+      if (meetingsSearchInput.value.trim() !== query) return;
+      meetingSearchHits = new Map(hits.map(h => [h.id, h]));
+    } catch (err) {
+      console.error('meetings_search failed:', err);
+      meetingSearchHits = null;
+    }
+    renderMeetingsList();
+  }, 250);
+});
+
+document.getElementById('meetings-search-clear').addEventListener('click', () => {
+  meetingsSearchInput.value = '';
+  meetingSearchHits = null;
+  document.getElementById('meetings-search-clear').hidden = true;
+  renderMeetingsList();
+  meetingsSearchInput.focus();
+});
 
 // ── Meeting row long-press action sheet ──
 

@@ -868,11 +868,29 @@
 
   <!-- Meetings tab (Meeting mode home) -->
   <div id="meetings" class="tab-panel hidden flex-1 overflow-y-auto px-5 py-6 flex flex-col">
-    <div class="mb-4">
+    <div class="mb-3">
       <h2 class="text-xl font-bold tracking-tight text-on-surface">Meetings</h2>
       <p class="text-xs text-on-surface-variant mt-0.5">Recorded and transcribed on this device</p>
     </div>
-    <div id="meetings-list" class="flex-1 min-h-0 space-y-3 overflow-y-auto">
+    <!-- Search runs over what was SAID (speakers + words), not just titles —
+         recurring names like "Standup" make title-only search useless. -->
+    <div class="relative mb-2 shrink-0">
+      <span class="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-[18px] text-on-surface-variant pointer-events-none">search</span>
+      <input id="meetings-search" type="search" placeholder="Search transcripts, people, titles"
+        class="w-full bg-surface-container-low border border-outline-variant/30 rounded-xl pl-10 pr-9 py-2.5 text-sm text-on-surface placeholder:text-on-surface-variant/50 focus:outline-none focus:ring-1 focus:ring-primary/50 transition-colors" />
+      <button id="meetings-search-clear" hidden class="absolute right-2 top-1/2 -translate-y-1/2 w-7 h-7 flex items-center justify-center rounded-lg text-on-surface-variant hover:text-on-surface hover:bg-surface-container-highest transition-colors cursor-pointer" aria-label="Clear search">
+        <span class="material-symbols-outlined text-[18px]">close</span>
+      </button>
+    </div>
+    <div id="meetings-filters" class="flex items-center gap-2 mb-3 shrink-0 overflow-x-auto">
+      <button class="meeting-filter shrink-0 text-xs font-semibold px-3 py-1.5 rounded-full border transition-colors cursor-pointer" data-filter="all">All</button>
+      <button class="meeting-filter shrink-0 text-xs font-semibold px-3 py-1.5 rounded-full border transition-colors cursor-pointer" data-filter="summarized">Summarized</button>
+      <button class="meeting-filter shrink-0 text-xs font-semibold px-3 py-1.5 rounded-full border transition-colors cursor-pointer" data-filter="unsummarized">Not summarized</button>
+      <button class="meeting-filter shrink-0 text-xs font-semibold px-3 py-1.5 rounded-full border transition-colors cursor-pointer" data-filter="unnamed">Needs names</button>
+    </div>
+    <!-- Spacing lives in the rendered group blocks (renderMeetingsList), not
+         here: sticky date headers can't sit inside a space-y run. -->
+    <div id="meetings-list" class="flex-1 min-h-0 overflow-y-auto">
       <div class="flex flex-col items-center justify-center pt-16 text-on-surface-variant">
         <span class="material-symbols-outlined text-4xl mb-3 opacity-30">groups</span>
         <p id="meetings-placeholder" class="text-sm">No meetings yet</p>

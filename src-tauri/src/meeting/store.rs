@@ -261,6 +261,103 @@ pub fn delete_transcript(id: &str) {
     }
 }
 
+/// Where a query matched inside one meeting.
+#[derive(Debug, Clone, Serialize)]
+pub struct SearchHit {
+    pub id: String,
+    /// The matching line, trimmed to a readable window around the match.
+    pub snippet: String,
+    /// Who said it ("" when the match came from the title or the markdown
+    /// fallback, which has no structured speaker).
+    pub speaker: String,
+    /// Number of matching lines, so a meeting full of hits reads as such.
+    pub count: u32,
+}
+
+/// Characters of context kept either side of a match.
+const SNIPPET_PAD: usize = 60;
+
+/// A one-line excerpt centred on `at`, with ellipses where text was cut. Cuts
+/// land on char boundaries (transcripts are full of non-ASCII punctuation).
+fn snippet_around(text: &str, at: usize, needle_len: usize) -> String {
+    let start = text[..at].char_indices().rev().nth(SNIPPET_PAD).map(|(i, _)| i);
+    let end_from = at + needle_len;
+    let end = text[end_from..].char_indices().nth(SNIPPET_PAD).map(|(i, _)| end_from + i);
+    let mut out = String::new();
+    if start.is_some() {
+        out.push('…');
+    }
+    out.push_str(text[start.unwrap_or(0)..end.unwrap_or(text.len())].trim());
+    if end.is_some() {
+        out.push('…');
+    }
+    out
+}
+
+/// Case-insensitive search across every meeting's transcript: speaker names and
+/// spoken text from the structured sidecar, falling back to the markdown for
+/// meetings recorded before sidecars existed. Titles match too, so searching a
+/// meeting's name still finds it when nobody said the word aloud.
+///
+/// Reads each transcript from disk per call — fine for a personal archive, and
+/// the frontend debounces. Revisit if this ever grows to thousands of meetings.
+pub fn search(query: &str) -> Vec<SearchHit> {
+    let needle = query.trim().to_lowercase();
+    if needle.is_empty() {
+        return Vec::new();
+    }
+    let mut hits = Vec::new();
+    for meta in MeetingStore::global().list() {
+        if let Some(hit) = search_one(&meta, &needle) {
+            hits.push(hit);
+        }
+    }
+    hits
+}
+
+fn search_one(meta: &MeetingMeta, needle: &str) -> Option<SearchHit> {
+    let mut first: Option<(String, String)> = None; // (speaker, snippet)
+    let mut count = 0u32;
+
+    if let Some(utterances) = load_transcript(&meta.id) {
+        for u in &utterances {
+            let haystack = u.text.to_lowercase();
+            let speaker_match = u.speaker.to_lowercase().contains(needle);
+            let Some(at) = haystack.find(needle).or(speaker_match.then_some(0)) else {
+                continue;
+            };
+            count += 1;
+            if first.is_none() {
+                let snippet = if speaker_match && !haystack.contains(needle) {
+                    u.text.chars().take(SNIPPET_PAD * 2).collect()
+                } else {
+                    snippet_around(&u.text, at, needle.len())
+                };
+                first = Some((u.speaker.clone(), snippet));
+            }
+        }
+    } else if !meta.transcript_path.is_empty() {
+        // Pre-sidecar meeting: scan the exported markdown line by line. A file
+        // that has gone missing must still fall through to the title check.
+        if let Ok(text) = std::fs::read_to_string(&meta.transcript_path) {
+            for line in text.lines() {
+                let Some(at) = line.to_lowercase().find(needle) else { continue };
+                count += 1;
+                if first.is_none() {
+                    first = Some((String::new(), snippet_around(line, at, needle.len())));
+                }
+            }
+        }
+    }
+
+    // A title-only match still surfaces the meeting, with no snippet to show.
+    if count == 0 && meta.title.to_lowercase().contains(needle) {
+        return Some(SearchHit { id: meta.id.clone(), snippet: String::new(), speaker: String::new(), count: 0 });
+    }
+    let (speaker, snippet) = first?;
+    Some(SearchHit { id: meta.id.clone(), snippet, speaker, count })
+}
+
 /// Transcript markdown: title, the user's own notes verbatim, then the
 /// merged display blocks as `**[HH:MM:SS] Speaker:** text` lines (wall clock).
 pub fn transcript_markdown(meta: &MeetingMeta, notes: &str, utterances: &[Utterance]) -> String {
@@ -330,6 +427,30 @@ mod tests {
             unnamed_speakers: 0,
             processing: false,
         }
+    }
+
+    #[test]
+    fn snippet_keeps_context_and_marks_where_it_cut() {
+        let line = "We should check the Grafana dashboard before the release goes out";
+        let at = line.find("Grafana").unwrap();
+        // Short line: nothing trimmed, so no ellipses.
+        assert_eq!(snippet_around(line, at, 7), line);
+
+        let long = format!("{} Grafana {}", "a ".repeat(80), "b ".repeat(80));
+        let at = long.find("Grafana").unwrap();
+        let snippet = snippet_around(&long, at, 7);
+        assert!(snippet.starts_with('…') && snippet.ends_with('…'));
+        assert!(snippet.contains("Grafana"));
+        assert!(snippet.len() < long.len());
+    }
+
+    #[test]
+    fn snippet_cuts_on_char_boundaries() {
+        // Multi-byte either side: slicing mid-character would panic.
+        let line = format!("{}—Grafana—{}", "é".repeat(80), "ü".repeat(80));
+        let at = line.find("Grafana").unwrap();
+        let snippet = snippet_around(&line, at, 7);
+        assert!(snippet.contains("Grafana"));
     }
 
     #[test]

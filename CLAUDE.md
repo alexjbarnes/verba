@@ -77,7 +77,7 @@ Third top-level mode beside Speak/Listen — a local meeting assistant. Live-tra
 - `speakers.rs` - LIVE loopback labelling: per-utterance embedding grouped into a provisional online cluster whose ACCUMULATED voiceprint is matched against the gallery (enrolled name) else `Speaker N`; model-free `ProvisionalClusterer` is unit-tested
 - `diarize.rs` - OFFLINE batch pass at stop: sherpa `OfflineSpeakerDiarization` (pyannote segmentation + eres2net) over the reconstructed waveform, then a pooled re-embed MERGE + relative-floor CONSOLIDATE that recover the true speaker count automatically (POC on AMI: ~13% DER vs ~37% for the old online clusterer)
 - `gallery.rs` - persisted cross-meeting voiceprint gallery (`data_dir/verba/speakers.json`, name->embeddings, loaded into a sherpa `SpeakerEmbeddingManager`) + per-meeting voiceprint sidecars that back speaker naming
-- `store.rs` - `meetings.json` index + Markdown transcript/summary writers to the configured dirs
+- `store.rs` - `meetings.json` index + Markdown transcript/summary writers to the configured dirs. `search(query)` is full-text across every meeting (speaker names + spoken words from the sidecar, markdown fallback for pre-sidecar ones, title as a last resort), returning one snippet + match count per meeting; the frontend debounces it and groups results by day/week
 - Requires cpal 0.18 (AAudio host) -> Android `minSdkVersion` 26 (in tauri.conf.json). Depends on the meeting model package (see MODEL_PACKAGES.md)
 
 ### Key Rust modules (`src-tauri/src/`)

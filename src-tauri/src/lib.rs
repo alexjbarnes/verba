@@ -802,6 +802,16 @@ fn meeting_get(id: String) -> Option<meeting::store::MeetingMeta> {
     meeting::store::MeetingStore::global().get(&id)
 }
 
+/// Full-text search across meeting transcripts (speakers and spoken words).
+#[cfg(not(target_os = "android"))]
+#[tauri::command]
+async fn meetings_search(query: String) -> Vec<meeting::store::SearchHit> {
+    // Reads every transcript from disk; keep it off the main thread.
+    tauri::async_runtime::spawn_blocking(move || meeting::store::search(&query))
+        .await
+        .unwrap_or_default()
+}
+
 #[cfg(not(target_os = "android"))]
 #[tauri::command]
 fn meeting_delete(id: String, delete_files: Option<bool>) -> Result<(), String> {
@@ -991,6 +1001,11 @@ fn meetings_list() -> Vec<serde_json::Value> {
 #[tauri::command]
 fn meeting_get(_id: String) -> Option<serde_json::Value> {
     None
+}
+#[cfg(target_os = "android")]
+#[tauri::command]
+async fn meetings_search(_query: String) -> Vec<serde_json::Value> {
+    Vec::new()
 }
 #[cfg(target_os = "android")]
 #[tauri::command]
@@ -1946,6 +1961,7 @@ pub fn run() {
             meeting_audio_sources,
             meetings_list,
             meeting_get,
+            meetings_search,
             meeting_delete,
             meeting_read_file,
             meeting_summarize,
