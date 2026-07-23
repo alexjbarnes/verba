@@ -405,16 +405,26 @@
             <div>
               <label class="text-sm font-medium text-on-surface">Microphone</label>
               <p class="text-xs text-on-surface-variant mt-0.5">Captures your voice</p>
-              <select id="cfg-meeting-mic" class="w-full mt-2 bg-surface-container-highest border border-outline-variant/30 rounded-lg px-3 py-2.5 text-sm text-on-surface focus:outline-none focus:ring-1 focus:ring-primary/50 transition-colors cursor-pointer">
-                <option value="">System Default</option>
-              </select>
+              <div class="flex items-center gap-2 mt-2">
+                <select id="cfg-meeting-mic" class="flex-1 min-w-0 bg-surface-container-highest border border-outline-variant/30 rounded-lg px-3 py-2.5 text-sm text-on-surface focus:outline-none focus:ring-1 focus:ring-primary/50 transition-colors cursor-pointer">
+                  <option value="">System Default</option>
+                </select>
+                <button id="cfg-meeting-mic-refresh" type="button" title="Rescan for microphones" aria-label="Rescan for microphones" class="shrink-0 flex items-center justify-center w-10 h-10 rounded-lg border border-outline-variant/30 text-on-surface-variant hover:bg-surface-container-highest hover:text-on-surface transition-colors cursor-pointer">
+                  <span class="material-symbols-outlined text-[18px]">refresh</span>
+                </button>
+              </div>
             </div>
             <div class="border-t border-outline-variant/20 pt-4">
               <label class="text-sm font-medium text-on-surface">System audio</label>
               <p class="text-xs text-on-surface-variant mt-0.5">Speaker output to capture — everyone else on the call</p>
-              <select id="cfg-meeting-speaker" class="w-full mt-2 bg-surface-container-highest border border-outline-variant/30 rounded-lg px-3 py-2.5 text-sm text-on-surface focus:outline-none focus:ring-1 focus:ring-primary/50 transition-colors cursor-pointer">
-                <option value="">System Default</option>
-              </select>
+              <div class="flex items-center gap-2 mt-2">
+                <select id="cfg-meeting-speaker" class="flex-1 min-w-0 bg-surface-container-highest border border-outline-variant/30 rounded-lg px-3 py-2.5 text-sm text-on-surface focus:outline-none focus:ring-1 focus:ring-primary/50 transition-colors cursor-pointer">
+                  <option value="">System Default</option>
+                </select>
+                <button id="cfg-meeting-speaker-refresh" type="button" title="Rescan for outputs" aria-label="Rescan for outputs" class="shrink-0 flex items-center justify-center w-10 h-10 rounded-lg border border-outline-variant/30 text-on-surface-variant hover:bg-surface-container-highest hover:text-on-surface transition-colors cursor-pointer">
+                  <span class="material-symbols-outlined text-[18px]">refresh</span>
+                </button>
+              </div>
             </div>
           </div>
         </section>
@@ -881,6 +891,26 @@
       <button id="meeting-silence-stop" class="text-xs font-semibold text-primary hover:brightness-110 px-2 min-h-9 rounded-lg cursor-pointer shrink-0">Stop &amp; save</button>
       <button id="meeting-silence-dismiss" class="text-on-surface-variant hover:text-on-surface p-1 rounded cursor-pointer shrink-0" title="Keep recording">
         <span class="material-symbols-outlined text-sm">close</span>
+      </button>
+    </div>
+
+    <!-- Live device swap: switching headsets mid-meeting shouldn't mean
+         stopping. Each change restarts that one stream on the same clock. -->
+    <div class="flex items-end gap-2 mt-3">
+      <div class="flex-1 min-w-0">
+        <label class="text-[10px] font-semibold text-on-surface-variant uppercase tracking-wider block mb-1">Microphone</label>
+        <select id="meeting-live-mic" class="w-full bg-surface-container-low border border-outline-variant/30 rounded-lg pl-2.5 pr-7 py-1.5 text-xs text-on-surface focus:outline-none focus:ring-1 focus:ring-primary/50 transition-colors cursor-pointer disabled:opacity-50">
+          <option value="">System Default</option>
+        </select>
+      </div>
+      <div class="flex-1 min-w-0">
+        <label class="text-[10px] font-semibold text-on-surface-variant uppercase tracking-wider block mb-1">System audio</label>
+        <select id="meeting-live-speaker" class="w-full bg-surface-container-low border border-outline-variant/30 rounded-lg pl-2.5 pr-7 py-1.5 text-xs text-on-surface focus:outline-none focus:ring-1 focus:ring-primary/50 transition-colors cursor-pointer disabled:opacity-50">
+          <option value="">System Default</option>
+        </select>
+      </div>
+      <button id="meeting-live-devices-refresh" type="button" title="Rescan for devices" aria-label="Rescan for devices" class="shrink-0 flex items-center justify-center w-8 h-8 rounded-lg border border-outline-variant/30 text-on-surface-variant hover:bg-surface-container-highest hover:text-on-surface transition-colors cursor-pointer">
+        <span class="material-symbols-outlined text-[16px]">refresh</span>
       </button>
     </div>
 

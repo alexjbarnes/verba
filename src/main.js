@@ -1023,14 +1023,13 @@ listen('model-error', (event) => {
   }
 });
 
-// ── Dictation input device (Settings > Speak) ──
-
-// Options are keyed by device NAME ("" = system default), matching the
+// ── Audio device pickers ──
+//
+// Every picker is keyed by device NAME ("" = system default), matching the
 // backend's name-first resolution. An index would shift under the choice
 // whenever another device appeared.
-async function loadAudioDevices() {
-  const devices = await invoke('list_audio_devices');
-  const sel = document.getElementById('audio-device');
+
+function fillDeviceSelect(sel, devices) {
   sel.innerHTML = '<option value="">System Default</option>';
   for (const dev of devices) {
     const opt = document.createElement('option');
@@ -1038,60 +1037,148 @@ async function loadAudioDevices() {
     opt.textContent = dev.name;
     sel.appendChild(opt);
   }
-  return devices;
 }
 
-// Rescan — plugging in a headset mid-session doesn't reach the list on its own.
-// A chosen device that isn't connected keeps its selection (shown as "(not
-// connected)" by selectDeviceOption) so it's used again the moment it returns.
-async function refreshAudioDevices() {
-  const sel = document.getElementById('audio-device');
-  const btn = document.getElementById('audio-device-refresh');
+// Rescan one picker — plugging in a headset mid-session doesn't reach the list
+// on its own. A chosen device that isn't connected keeps its selection (shown
+// as "(not connected)") so it's used again the moment it returns.
+// `noun` names the thing being scanned for in the result toast.
+async function refreshDeviceSelect(sel, btn, cmd, noun) {
   const icon = btn.querySelector('.material-symbols-outlined');
   const before = Array.from(sel.options).map(o => o.value).filter(Boolean);
   const wanted = sel.value;
 
   btn.disabled = true;
   icon.classList.add('animate-spin');
+  let devices;
   try {
-    await loadAudioDevices();
+    devices = await invoke(cmd);
   } catch (err) {
-    showToast('Could not list microphones: ' + err);
+    showToast(`Could not list ${noun}: ` + err);
     return;
   } finally {
     btn.disabled = false;
     icon.classList.remove('animate-spin');
   }
+  fillDeviceSelect(sel, devices);
   selectDeviceOption(sel, wanted);
 
-  const now = Array.from(sel.options).map(o => o.value).filter(Boolean);
+  const now = devices.map(d => d.name);
   const added = now.filter(n => !before.includes(n));
   if (added.length) showToast(`Found ${added.join(', ')}`);
   else if (wanted && !now.includes(wanted)) showToast(`${wanted} is still not connected`);
-  else showToast('No new microphones found');
+  else showToast(`No new ${noun} found`);
 }
 
-document.getElementById('audio-device-refresh').addEventListener('click', refreshAudioDevices);
+async function loadAudioDevices() {
+  const devices = await invoke('list_audio_devices');
+  fillDeviceSelect(document.getElementById('audio-device'), devices);
+  return devices;
+}
 
-// Meeting-mode device pickers (desktop). Values are device NAMES ("" = system
-// default), matching the backend's InputByName / LoopbackByName specs.
+document.getElementById('audio-device-refresh').addEventListener('click', () =>
+  refreshDeviceSelect(document.getElementById('audio-device'),
+    document.getElementById('audio-device-refresh'), 'list_audio_devices', 'microphones'));
+
+// Meeting-mode device pickers (desktop): Settings and the live view share the
+// same device lists and the same stored names.
 async function loadMeetingDevices() {
   const [inputs, outputs] = await Promise.all([
     invoke('list_audio_devices'),
     invoke('list_audio_output_devices'),
   ]);
-  const fill = (sel, devices) => {
-    sel.innerHTML = '<option value="">System Default</option>';
-    for (const dev of devices) {
-      const opt = document.createElement('option');
-      opt.value = dev.name;
-      opt.textContent = dev.name;
-      sel.appendChild(opt);
-    }
-  };
-  fill(document.getElementById('cfg-meeting-mic'), inputs);
-  fill(document.getElementById('cfg-meeting-speaker'), outputs);
+  fillDeviceSelect(document.getElementById('cfg-meeting-mic'), inputs);
+  fillDeviceSelect(document.getElementById('cfg-meeting-speaker'), outputs);
+  return { inputs, outputs };
 }
+
+document.getElementById('cfg-meeting-mic-refresh').addEventListener('click', () =>
+  refreshDeviceSelect(document.getElementById('cfg-meeting-mic'),
+    document.getElementById('cfg-meeting-mic-refresh'), 'list_audio_devices', 'microphones'));
+document.getElementById('cfg-meeting-speaker-refresh').addEventListener('click', () =>
+  refreshDeviceSelect(document.getElementById('cfg-meeting-speaker'),
+    document.getElementById('cfg-meeting-speaker-refresh'), 'list_audio_output_devices', 'outputs'));
+
+// The same two devices are pickable from Settings and from the live meeting
+// view, so both surfaces render one shared value: whatever is actually being
+// recorded from.
+const MEETING_DEVICE_SELECTS = {
+  mic: ['cfg-meeting-mic', 'meeting-live-mic'],
+  system: ['cfg-meeting-speaker', 'meeting-live-speaker'],
+};
+const meetingDeviceApplied = { mic: '', system: '' };
+
+function setMeetingDeviceValue(kind, name) {
+  meetingDeviceApplied[kind] = name;
+  for (const id of MEETING_DEVICE_SELECTS[kind]) {
+    const el = document.getElementById(id);
+    if (el) selectDeviceOption(el, name);
+  }
+}
+
+// Rebuild every meeting picker from a fresh device scan, then select what is
+// (or will be) recording. Returns the device names found, for refresh diffing.
+async function syncMeetingDevicePickers(mic, system) {
+  const { inputs, outputs } = await loadMeetingDevices();
+  fillDeviceSelect(document.getElementById('meeting-live-mic'), inputs);
+  fillDeviceSelect(document.getElementById('meeting-live-speaker'), outputs);
+  setMeetingDeviceValue('mic', mic);
+  setMeetingDeviceValue('system', system);
+  return [...inputs, ...outputs].map(d => d.name);
+}
+
+// One path for both surfaces: while a meeting records, the change swaps that
+// stream live (meeting_set_device persists the name itself); otherwise it is
+// just a setting. A device that won't open reverts the pickers to what is
+// actually recording, so they never lie about the live stream.
+async function changeMeetingDevice(kind, name) {
+  if (name === meetingDeviceApplied[kind]) return;
+  const previous = meetingDeviceApplied[kind];
+  if (!meetingRecording) {
+    setMeetingDeviceValue(kind, name);
+    await saveConfig();
+    return;
+  }
+  const selects = MEETING_DEVICE_SELECTS[kind].map(id => document.getElementById(id)).filter(Boolean);
+  selects.forEach(s => { s.disabled = true; });
+  try {
+    await invoke('meeting_set_device', { kind, name });
+    setMeetingDeviceValue(kind, name);
+    if (kind === 'system') setMeetingLoopbackNotice(null); // it works now
+    showToast(`${kind === 'mic' ? 'Microphone' : 'System audio'}: ${name || 'System Default'}`);
+  } catch (err) {
+    showToast(String(err));
+    setMeetingDeviceValue(kind, previous);
+  } finally {
+    selects.forEach(s => { s.disabled = false; });
+  }
+}
+
+for (const [kind, ids] of Object.entries(MEETING_DEVICE_SELECTS)) {
+  for (const id of ids) {
+    document.getElementById(id)?.addEventListener('change', (e) => changeMeetingDevice(kind, e.target.value));
+  }
+}
+
+document.getElementById('meeting-live-devices-refresh').addEventListener('click', async () => {
+  const btn = document.getElementById('meeting-live-devices-refresh');
+  const icon = btn.querySelector('.material-symbols-outlined');
+  const before = Array.from(document.getElementById('meeting-live-mic').options)
+    .concat(Array.from(document.getElementById('meeting-live-speaker').options))
+    .map(o => o.value).filter(Boolean);
+  btn.disabled = true;
+  icon.classList.add('animate-spin');
+  try {
+    const now = await syncMeetingDevicePickers(meetingDeviceApplied.mic, meetingDeviceApplied.system);
+    const added = now.filter(n => !before.includes(n));
+    showToast(added.length ? `Found ${added.join(', ')}` : 'No new devices found');
+  } catch (err) {
+    showToast('Could not list devices: ' + err);
+  } finally {
+    btn.disabled = false;
+    icon.classList.remove('animate-spin');
+  }
+});
 
 // Select a device by name, adding a placeholder option first if it isn't
 // currently connected, so a saved choice survives the device being unplugged.
@@ -1258,17 +1345,13 @@ async function loadConfig() {
   // Meeting settings (desktop only): diarization toggle + transcript/summary
   // folders. Persisted through the same saveConfig round-trip.
   if (isDesktop) {
-    await loadMeetingDevices();
+    await syncMeetingDevicePickers(cfg.meeting_mic_device || '', cfg.meeting_output_device || '');
     document.getElementById('cfg-meeting-diarize').checked = cfg.meeting_diarize !== false;
     document.getElementById('cfg-meeting-transcript-dir').value = cfg.meeting_transcript_dir || '';
     document.getElementById('cfg-meeting-summary-dir').value = cfg.meeting_summary_dir || '';
-    selectDeviceOption(document.getElementById('cfg-meeting-mic'), cfg.meeting_mic_device || '');
-    selectDeviceOption(document.getElementById('cfg-meeting-speaker'), cfg.meeting_output_device || '');
     document.getElementById('cfg-meeting-diarize').addEventListener('change', saveConfig);
     document.getElementById('cfg-meeting-transcript-dir').addEventListener('change', saveConfig);
     document.getElementById('cfg-meeting-summary-dir').addEventListener('change', saveConfig);
-    document.getElementById('cfg-meeting-mic').addEventListener('change', saveConfig);
-    document.getElementById('cfg-meeting-speaker').addEventListener('change', saveConfig);
   }
 }
 
@@ -5552,6 +5635,8 @@ async function startMeeting() {
   startMeetingClock(0);
   showPanel('meeting-live');
   setBottomNavVisible(false);
+  // Live pickers, so a headset swapped on mid-meeting doesn't mean stopping.
+  syncMeetingDevicePickers(meetingDeviceApplied.mic, meetingDeviceApplied.system).catch(() => {});
 }
 
 // Restores an in-progress meeting after a reload (or first paint) so the live
@@ -5578,6 +5663,8 @@ async function checkMeetingRehydrate() {
   stopBtn.textContent = 'Stop';
   setMeetingLoopbackNotice(status.notice);
   startMeetingClock(status.elapsed_ms || 0);
+  // Devices come from the session, not this tab's stale state.
+  syncMeetingDevicePickers(status.mic_device || '', status.output_device || '').catch(() => {});
   setMode('meeting');
 }
 

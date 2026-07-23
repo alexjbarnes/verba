@@ -55,6 +55,9 @@ struct Session {
     mic: AudioRecorder,
     loopback: Option<AudioRecorder>,
     loopback_notice: Option<String>,
+    /// Where this meeting's debug WAVs go, so a device swapped in mid-meeting
+    /// keeps dumping alongside the stream it replaced.
+    dump: Option<crate::debug_wav::DumpTarget>,
     /// Loopback speech buffered as (segment-start ms, 16kHz samples) so the
     /// offline batch pass at stop can reconstruct the timeline and diarize.
     /// Held only for the meeting's life, discarded with the Session.
@@ -261,6 +264,7 @@ pub fn start(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
         mic,
         loopback: loopback_rec,
         loopback_notice,
+        dump: dump_target,
         loopback_audio,
         last_activity,
         stopping,
@@ -757,6 +761,190 @@ fn majority_speaker(spans: &[diarize::Span], start: f32, end: f32) -> Option<usi
         .map(|(k, _)| k)
 }
 
+/// Swap a live meeting's capture device without interrupting the meeting:
+/// `kind` is "mic" or "system", `name` a device name ("" = the configured
+/// default). The old stream is stopped and its leftover audio still
+/// transcribed, a fresh recorder starts on the same session clock, and the
+/// choice is saved so the next meeting starts on it too.
+///
+/// A failure to open the new device restores the old one rather than leaving
+/// the meeting deaf. Speaker labels on a swapped system stream restart their
+/// numbering — the offline pass at stop relabels everything anyway.
+pub fn set_device(app: tauri::AppHandle, kind: String, name: String) -> Result<(), String> {
+    let mut slot = session_slot().lock().unwrap();
+    let session = slot.as_mut().ok_or("no meeting is recording")?;
+
+    let transcriber = crate::engine::with(|e| e.transcriber_arc()).ok_or("engine not ready")?;
+    let vad_path = crate::models::ModelManager::global()
+        .ensure_vad_model()
+        .map_err(|e| format!("voice detection unavailable: {e}"))?;
+    let dump = session.dump.clone();
+
+    match kind.as_str() {
+        "mic" => {
+            let spec = if name.is_empty() {
+                DeviceSpec::ConfigInput
+            } else {
+                DeviceSpec::InputByName(name.clone())
+            };
+            let rec = AudioRecorder::new_with_device_dumping(Some(&vad_path), spec, dump)
+                .map_err(|e| format!("{}: {e}", display_device(&name)))?;
+            // Stop the old stream only once the replacement exists, so a
+            // device that can't be opened costs nothing.
+            let tail = session.mic.stop().unwrap_or_default();
+            let rx = match rec.start_streaming() {
+                Ok(rx) => rx,
+                Err(e) => {
+                    restore_stream(session, "mic", &transcriber, &app);
+                    return Err(format!("{}: {e}", display_device(&name)));
+                }
+            };
+            session.consumers.push(spawn_consumer(
+                rx,
+                "mic",
+                transcriber.clone(),
+                session.started_at,
+                session.utterances.clone(),
+                app.clone(),
+                None,
+                None,
+                session.last_activity.clone(),
+            ));
+            session.mic = rec;
+            flush_tail(&app, "mic", tail, session, transcriber);
+        }
+        "system" => {
+            let preferred = Some(name.as_str()).filter(|s| !s.is_empty());
+            let spec = match loopback::resolve(preferred) {
+                loopback::Loopback::Available(spec) => spec,
+                loopback::Loopback::Unsupported(reason) => return Err(reason),
+            };
+            let rec = AudioRecorder::new_with_device_dumping(Some(&vad_path), spec, dump)
+                .map_err(|e| format!("{}: {e}", display_device(&name)))?;
+            if let Some(old) = &session.loopback {
+                let tail = old.stop().unwrap_or_default();
+                flush_tail(&app, "system", tail, session, transcriber.clone());
+            }
+            let rx = match rec.start_streaming() {
+                Ok(rx) => rx,
+                Err(e) => {
+                    restore_stream(session, "system", &transcriber, &app);
+                    return Err(format!("{}: {e}", display_device(&name)));
+                }
+            };
+            let cfg = crate::config::AppConfig::load();
+            let labeler = if cfg.meeting_diarize {
+                crate::models::ModelManager::global()
+                    .speaker_model_path()
+                    .and_then(|p| speakers::SpeakerLabeler::new(&p))
+            } else {
+                None
+            };
+            session.consumers.push(spawn_consumer(
+                rx,
+                "system",
+                transcriber,
+                session.started_at,
+                session.utterances.clone(),
+                app.clone(),
+                labeler,
+                Some(session.loopback_audio.clone()),
+                session.last_activity.clone(),
+            ));
+            session.loopback = Some(rec);
+            session.loopback_notice = None;
+        }
+        other => return Err(format!("unknown device kind: {other}")),
+    }
+
+    let mut cfg = crate::config::AppConfig::load();
+    match kind.as_str() {
+        "mic" => cfg.meeting_mic_device = name,
+        _ => cfg.meeting_output_device = name,
+    }
+    let _ = cfg.save();
+    Ok(())
+}
+
+fn display_device(name: &str) -> String {
+    if name.is_empty() { "System default".into() } else { name.into() }
+}
+
+/// Put a stopped stream back on air after a failed swap. Best-effort: if even
+/// the old device won't reopen there is nothing left to fall back to, so the
+/// meeting continues on whatever streams remain.
+fn restore_stream(
+    session: &mut Session,
+    source: &'static str,
+    transcriber: &Arc<crate::transcribe::Transcriber>,
+    app: &tauri::AppHandle,
+) {
+    let old = match source {
+        "mic" => Some(&session.mic),
+        _ => session.loopback.as_ref(),
+    };
+    let Some(old) = old else { return };
+    match old.start_streaming() {
+        Ok(rx) => {
+            let labeler = None; // provisional labels only; stop() relabels
+            session.consumers.push(spawn_consumer(
+                rx,
+                source,
+                transcriber.clone(),
+                session.started_at,
+                session.utterances.clone(),
+                app.clone(),
+                labeler,
+                (source == "system").then(|| session.loopback_audio.clone()),
+                session.last_activity.clone(),
+            ));
+        }
+        Err(e) => log::error!("meeting: could not restore the {source} stream: {e}"),
+    }
+}
+
+/// Transcribe the audio left in a stream that was just stopped mid-meeting, so
+/// swapping devices doesn't drop the words already captured. Runs detached —
+/// the transcriber may be busy with a queued segment.
+fn flush_tail(
+    app: &tauri::AppHandle,
+    source: &'static str,
+    samples: Vec<f32>,
+    session: &Session,
+    transcriber: Arc<crate::transcribe::Transcriber>,
+) {
+    if samples.len() < MIN_SEGMENT_SAMPLES {
+        return;
+    }
+    let seg_ms = (samples.len() as u64) * 1000 / 16_000;
+    let t_ms = (session.started_at.elapsed().as_millis() as u64).saturating_sub(seg_ms);
+    let utterances = session.utterances.clone();
+    let audio_buf = (source == "system").then(|| session.loopback_audio.clone());
+    let app = app.clone();
+    std::thread::Builder::new()
+        .name("meeting-tail".into())
+        .spawn(move || {
+            if let Some(buf) = &audio_buf {
+                buf.lock().unwrap().push((t_ms, samples.clone()));
+            }
+            let Ok(text) = transcriber.transcribe(samples, 16_000) else { return };
+            let text = crate::postprocess::remove_fillers(text.trim());
+            if text.is_empty() {
+                return;
+            }
+            let utterance = Utterance {
+                source: source.into(),
+                speaker: (if source == "mic" { "You" } else { "Speaker 1" }).into(),
+                text,
+                t_ms,
+                embedding: None,
+            };
+            utterances.lock().unwrap().push(utterance.clone());
+            let _ = app.emit("meeting-utterance", &utterance);
+        })
+        .ok();
+}
+
 /// Abandon the meeting: stop capture, remove any autosaved transcript and
 /// index entry. Nothing is kept.
 pub fn cancel(app: tauri::AppHandle) -> Result<(), String> {
@@ -796,16 +984,23 @@ pub fn note_set(text: String) -> Result<(), String> {
 pub fn status() -> serde_json::Value {
     let slot = session_slot().lock().unwrap();
     match slot.as_ref() {
-        Some(s) => serde_json::json!({
-            "state": "recording",
-            "id": s.meta.id,
-            "title": s.meta.title,
-            "elapsed_ms": s.started_at.elapsed().as_millis() as u64,
-            "utterances": s.utterances.lock().unwrap().clone(),
-            "notes": s.notes.lock().unwrap().clone(),
-            "loopback_ok": s.loopback.is_some(),
-            "notice": s.loopback_notice,
-        }),
+        Some(s) => {
+            // Device names come from config: start() reads them from there and
+            // set_device writes them back, so it stays the single source.
+            let cfg = crate::config::AppConfig::load();
+            serde_json::json!({
+                "state": "recording",
+                "id": s.meta.id,
+                "title": s.meta.title,
+                "elapsed_ms": s.started_at.elapsed().as_millis() as u64,
+                "utterances": s.utterances.lock().unwrap().clone(),
+                "notes": s.notes.lock().unwrap().clone(),
+                "loopback_ok": s.loopback.is_some(),
+                "notice": s.loopback_notice,
+                "mic_device": cfg.meeting_mic_device,
+                "output_device": cfg.meeting_output_device,
+            })
+        }
         None => serde_json::json!({ "state": "idle" }),
     }
 }

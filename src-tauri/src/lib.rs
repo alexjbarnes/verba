@@ -772,6 +772,16 @@ fn meeting_note_set(text: String) -> Result<(), String> {
     meeting::note_set(text)
 }
 
+/// Swap the live meeting's mic ("mic") or system-audio source ("system").
+#[cfg(not(target_os = "android"))]
+#[tauri::command]
+async fn meeting_set_device(app: tauri::AppHandle, kind: String, name: String) -> Result<(), String> {
+    // Opening a capture device blocks; keep it off the main thread.
+    tauri::async_runtime::spawn_blocking(move || meeting::set_device(app, kind, name))
+        .await
+        .map_err(|e| format!("device task: {e}"))?
+}
+
 #[cfg(not(target_os = "android"))]
 #[tauri::command]
 fn meetings_list() -> Vec<meeting::store::MeetingMeta> {
@@ -952,6 +962,11 @@ fn meeting_status() -> serde_json::Value {
 #[cfg(target_os = "android")]
 #[tauri::command]
 fn meeting_note_set(_text: String) -> Result<(), String> {
+    Err("Meeting mode is desktop only".into())
+}
+#[cfg(target_os = "android")]
+#[tauri::command]
+async fn meeting_set_device(_app: tauri::AppHandle, _kind: String, _name: String) -> Result<(), String> {
     Err("Meeting mode is desktop only".into())
 }
 #[cfg(target_os = "android")]
@@ -1914,6 +1929,7 @@ pub fn run() {
             meeting_cancel,
             meeting_status,
             meeting_note_set,
+            meeting_set_device,
             meetings_list,
             meeting_get,
             meeting_delete,
