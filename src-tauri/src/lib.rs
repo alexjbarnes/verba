@@ -41,6 +41,168 @@ struct AppState {
     recording: std::sync::atomic::AtomicBool,
 }
 
+/// The push-to-talk accelerator currently registered with the OS, so a change
+/// can unregister the old one. `None` until the first successful registration.
+#[cfg(desktop)]
+static DICTATION_HOTKEY: std::sync::Mutex<Option<tauri_plugin_global_shortcut::Shortcut>> =
+    std::sync::Mutex::new(None);
+
+/// The fixed snippet shortcut (Alt+S). Not configurable, but the dictation
+/// hotkey is, so both sides read it from here rather than duplicating it.
+#[cfg(desktop)]
+fn snippet_hotkey() -> tauri_plugin_global_shortcut::Shortcut {
+    use tauri_plugin_global_shortcut::{Code, Modifiers, Shortcut};
+    Shortcut::new(Some(Modifiers::ALT), Code::KeyS)
+}
+
+/// Point `accel` at the push-to-talk handler, replacing whatever is registered.
+/// On failure the previous shortcut is restored, so a rejected change never
+/// leaves the user without a working hotkey.
+#[cfg(desktop)]
+fn register_dictation_hotkey(app: &tauri::AppHandle, accel: &str) -> Result<(), String> {
+    use std::str::FromStr;
+    use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut};
+
+    let shortcut = Shortcut::from_str(accel).map_err(|_| format!("{accel} is not a valid shortcut"))?;
+    // A bare key would fire globally on every keystroke, so refuse it here too
+    // (the picker blocks it, but the config file and the command are reachable).
+    if shortcut.mods.is_empty() {
+        return Err("A shortcut needs at least one modifier key".into());
+    }
+    if shortcut == snippet_hotkey() {
+        return Err("That shortcut is already used for snippets".into());
+    }
+    let gs = app.global_shortcut();
+    let previous = *DICTATION_HOTKEY.lock().unwrap();
+    if previous == Some(shortcut) {
+        return Ok(());
+    }
+    if let Some(prev) = previous {
+        let _ = gs.unregister(prev);
+    }
+    match gs.on_shortcut(shortcut, dictation_shortcut_handler(app.clone())) {
+        Ok(()) => {
+            *DICTATION_HOTKEY.lock().unwrap() = Some(shortcut);
+            Ok(())
+        }
+        Err(e) => {
+            log::warn!("hotkey register failed for {accel}: {e}");
+            if let Some(prev) = previous {
+                let _ = gs.on_shortcut(prev, dictation_shortcut_handler(app.clone()));
+            }
+            Err("That shortcut is already taken by another app".into())
+        }
+    }
+}
+
+/// Press-to-record / release-to-paste, as a handler that can be bound to any
+/// accelerator (the shortcut is user-configurable and rebound at runtime).
+#[cfg(desktop)]
+fn dictation_shortcut_handler(
+    app_handle: tauri::AppHandle,
+) -> impl Fn(&tauri::AppHandle, &tauri_plugin_global_shortcut::Shortcut, tauri_plugin_global_shortcut::ShortcutEvent)
+       + Send
+       + Sync
+       + 'static {
+    use std::sync::atomic::Ordering;
+    use tauri_plugin_global_shortcut::ShortcutState;
+
+    let captured_target: std::sync::Mutex<Option<paste::PasteTarget>> = std::sync::Mutex::new(None);
+    move |_app, _shortcut, event| {
+        let state = app_handle.state::<AppState>();
+        match event.state {
+            ShortcutState::Pressed => {
+                if state.recording.load(Ordering::SeqCst) {
+                    return;
+                }
+                if dictation_blocked_by_meeting().is_err() {
+                    log::info!("Shortcut ignored: meeting recording");
+                    return;
+                }
+                *captured_target.lock().unwrap() = paste::capture_frontmost_app();
+                let started = engine::with_mut(|eng| eng.start_streaming());
+                match started {
+                    Some(Ok(())) => {
+                        state.recording.store(true, Ordering::SeqCst);
+                        media::pause_media();
+                        sound::play_start();
+                        let _ = app_handle.emit("dictation-state", "recording");
+                        log::info!("Shortcut: recording started");
+                    }
+                    Some(Err(e)) => {
+                        log::error!("Shortcut: failed to start: {e}");
+                        let _ = app_handle.emit("dictation-error", e.as_str());
+                    }
+                    None => {
+                        log::warn!("Shortcut: engine not ready");
+                        let _ = app_handle.emit("dictation-error", "Engine not ready. Wait for model to load.");
+                    }
+                }
+            }
+            ShortcutState::Released => {
+                if !state.recording.swap(false, Ordering::SeqCst) {
+                    return;
+                }
+                sound::play_stop();
+                let _ = app_handle.emit("dictation-state", "processing");
+                log::info!("Shortcut: stopping recording");
+
+                let target = captured_target.lock().unwrap().take();
+                let deliver = delivery::DesktopDelivery { target };
+
+                let pending = match engine::with(|eng| eng.stop_recording()) {
+                    Some(Ok(p)) => p,
+                    Some(Err(e)) => {
+                        log::error!("Shortcut: stop failed: {e}");
+                        media::resume_media();
+                        let _ = app_handle.emit("dictation-state", "idle");
+                        return;
+                    }
+                    None => return,
+                };
+
+                let app_for_paste = app_handle.clone();
+                std::thread::Builder::new()
+                    .name("transcribe".into())
+                    .spawn(move || {
+                        match pending.finalize() {
+                            Some(result) => {
+                                log::info!("Shortcut: transcribed: \"{}\"",
+                                    if result.text.len() > 60 { &result.text[..60] } else { &result.text });
+                                let _ = app_for_paste.emit("transcription-result",
+                                    serde_json::json!({
+                                        "text": &result.text,
+                                        "model_id": &result.model_id,
+                                        "audio_duration_ms": result.audio_duration_ms,
+                                        "transcribe_ms": result.transcribe_ms,
+                                    }));
+                                use delivery::TextDelivery;
+                                match deliver.deliver(&result.text) {
+                                    Ok(delivery::DeliveryResult::Inserted) => {}
+                                    Ok(delivery::DeliveryResult::ClipboardOnly) => {
+                                        sound::play_error();
+                                        let _ = app_for_paste.emit("paste-fallback",
+                                            "Text copied to clipboard — paste manually");
+                                    }
+                                    Err(e) => {
+                                        log::error!("Shortcut: delivery failed: {e}");
+                                        sound::play_error();
+                                    }
+                                }
+                            }
+                            None => {
+                                log::warn!("Shortcut: no text produced");
+                            }
+                        }
+                        media::resume_media();
+                        let _ = app_for_paste.emit("dictation-state", "idle");
+                    })
+                    .ok();
+            }
+        }
+    }
+}
+
 /// The single microphone can serve dictation OR a meeting, never both.
 /// Every dictation start path calls this; meeting_start checks the inverse.
 fn dictation_blocked_by_meeting() -> Result<(), String> {
@@ -750,6 +912,18 @@ fn meeting_gallery_split(name: String, indices: Vec<usize>, to: String) -> Resul
     meeting::gallery::Gallery::global().split(&name, indices, &to)
 }
 
+/// Rebind the push-to-talk shortcut. `accelerator` is a Tauri accelerator whose
+/// key part is a W3C KeyboardEvent code ("Alt+KeyD", "Control+Shift+Space").
+/// Persists only after the OS accepts the registration.
+#[cfg(not(target_os = "android"))]
+#[tauri::command]
+fn set_dictation_hotkey(app: tauri::AppHandle, accelerator: String) -> Result<(), String> {
+    register_dictation_hotkey(&app, &accelerator)?;
+    let mut cfg = config::AppConfig::load();
+    cfg.dictation_hotkey = accelerator;
+    cfg.save()
+}
+
 // Android stubs: same names/signatures, always an error.
 #[cfg(target_os = "android")]
 #[tauri::command]
@@ -859,6 +1033,11 @@ fn meeting_gallery_prints(_name: String) -> Vec<serde_json::Value> {
 #[tauri::command]
 fn meeting_gallery_split(_name: String, _indices: Vec<usize>, _to: String) -> Result<(), String> {
     Err("Meeting mode is desktop only".into())
+}
+#[cfg(target_os = "android")]
+#[tauri::command]
+fn set_dictation_hotkey(_app: tauri::AppHandle, _accelerator: String) -> Result<(), String> {
+    Err("Global shortcuts are desktop only".into())
 }
 
 #[tauri::command]
@@ -1553,110 +1732,26 @@ pub fn run() {
                 use std::sync::atomic::Ordering;
                 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
                 use tauri::tray::TrayIconBuilder;
-                use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
+                use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
-                // Alt+D: press to start recording, release to stop and paste
-                let shortcut = Shortcut::new(Some(Modifiers::ALT), Code::KeyD);
-                let app_handle = app.handle().clone();
-                let captured_target: std::sync::Mutex<Option<paste::PasteTarget>> = std::sync::Mutex::new(None);
-                app.global_shortcut().on_shortcut(shortcut, move |_app, _shortcut, event| {
-                    let state = app_handle.state::<AppState>();
-                    match event.state {
-                        ShortcutState::Pressed => {
-                            if state.recording.load(Ordering::SeqCst) {
-                                return;
-                            }
-                            if dictation_blocked_by_meeting().is_err() {
-                                log::info!("Shortcut ignored: meeting recording");
-                                return;
-                            }
-                            *captured_target.lock().unwrap() = paste::capture_frontmost_app();
-                            let started = engine::with_mut(|eng| eng.start_streaming());
-                            match started {
-                                Some(Ok(())) => {
-                                    state.recording.store(true, Ordering::SeqCst);
-                                    media::pause_media();
-                                    sound::play_start();
-                                    let _ = app_handle.emit("dictation-state", "recording");
-                                    log::info!("Shortcut: recording started");
-                                }
-                                Some(Err(e)) => {
-                                    log::error!("Shortcut: failed to start: {e}");
-                                    let _ = app_handle.emit("dictation-error", e.as_str());
-                                }
-                                None => {
-                                    log::warn!("Shortcut: engine not ready");
-                                    let _ = app_handle.emit("dictation-error", "Engine not ready. Wait for model to load.");
-                                }
-                            }
-                        }
-                        ShortcutState::Released => {
-                            if !state.recording.swap(false, Ordering::SeqCst) {
-                                return;
-                            }
-                            sound::play_stop();
-                            let _ = app_handle.emit("dictation-state", "processing");
-                            log::info!("Shortcut: stopping recording");
-
-                            let target = captured_target.lock().unwrap().take();
-                            let deliver = delivery::DesktopDelivery { target };
-
-                            let pending = match engine::with(|eng| eng.stop_recording()) {
-                                Some(Ok(p)) => p,
-                                Some(Err(e)) => {
-                                    log::error!("Shortcut: stop failed: {e}");
-                                    media::resume_media();
-                                    let _ = app_handle.emit("dictation-state", "idle");
-                                    return;
-                                }
-                                None => return,
-                            };
-
-                            let app_for_paste = app_handle.clone();
-                            std::thread::Builder::new()
-                                .name("transcribe".into())
-                                .spawn(move || {
-                                    match pending.finalize() {
-                                        Some(result) => {
-                                            log::info!("Shortcut: transcribed: \"{}\"",
-                                                if result.text.len() > 60 { &result.text[..60] } else { &result.text });
-                                            let _ = app_for_paste.emit("transcription-result",
-                                                serde_json::json!({
-                                                    "text": &result.text,
-                                                    "model_id": &result.model_id,
-                                                    "audio_duration_ms": result.audio_duration_ms,
-                                                    "transcribe_ms": result.transcribe_ms,
-                                                }));
-                                            use delivery::TextDelivery;
-                                            match deliver.deliver(&result.text) {
-                                                Ok(delivery::DeliveryResult::Inserted) => {}
-                                                Ok(delivery::DeliveryResult::ClipboardOnly) => {
-                                                    sound::play_error();
-                                                    let _ = app_for_paste.emit("paste-fallback",
-                                                        "Text copied to clipboard — paste manually");
-                                                }
-                                                Err(e) => {
-                                                    log::error!("Shortcut: delivery failed: {e}");
-                                                    sound::play_error();
-                                                }
-                                            }
-                                        }
-                                        None => {
-                                            log::warn!("Shortcut: no text produced");
-                                        }
-                                    }
-                                    media::resume_media();
-                                    let _ = app_for_paste.emit("dictation-state", "idle");
-                                })
-                                .ok();
-                        }
+                // Push-to-talk: user-configurable (Settings > Speak), so it
+                // registers from config here and re-registers live via
+                // set_dictation_hotkey. A stale or OS-claimed accelerator falls
+                // back to the default rather than leaving no hotkey at all.
+                let cfg_hotkey = config::AppConfig::load().dictation_hotkey;
+                if let Err(e) = register_dictation_hotkey(app.handle(), &cfg_hotkey) {
+                    log::warn!("hotkey {cfg_hotkey}: {e} — falling back to the default");
+                    let fallback = config::default_dictation_hotkey();
+                    if let Err(e) = register_dictation_hotkey(app.handle(), &fallback) {
+                        log::error!("hotkey {fallback}: {e}");
                     }
-                })?;
+                }
 
                 // Alt+S: press to record a snippet trigger, release to look up
                 // and paste the matching snippet body. If no snippet matches,
                 // emits `snippet-no-match` so the frontend can show a picker.
-                let snippet_shortcut = Shortcut::new(Some(Modifiers::ALT), Code::KeyS);
+                // Fixed, so the configurable dictation hotkey must not collide.
+                let snippet_shortcut = snippet_hotkey();
                 let app_handle_s = app.handle().clone();
                 let captured_target_s: std::sync::Mutex<Option<paste::PasteTarget>> = std::sync::Mutex::new(None);
                 app.global_shortcut().on_shortcut(snippet_shortcut, move |_app, _shortcut, event| {
@@ -1835,6 +1930,7 @@ pub fn run() {
             meeting_gallery_forget,
             meeting_gallery_prints,
             meeting_gallery_split,
+            set_dictation_hotkey,
             storage_summary,
             storage_clear,
             list_history,
@@ -1905,4 +2001,36 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(all(test, desktop))]
+mod tests {
+    use std::str::FromStr;
+    use tauri_plugin_global_shortcut::Shortcut;
+
+    /// The hotkey capture in the frontend emits the browser's KeyboardEvent
+    /// `code` verbatim ("KeyD", "Space", "Digit1"), so the accelerators it
+    /// builds must round-trip through the parser the backend registers with.
+    #[test]
+    fn frontend_accelerator_format_parses() {
+        for accel in [
+            "Alt+KeyD",
+            "Control+Shift+Space",
+            "Super+Alt+Digit1",
+            "Control+Alt+Shift+F5",
+            "Super+Backquote",
+        ] {
+            assert!(Shortcut::from_str(accel).is_ok(), "{accel} should parse");
+        }
+        assert!(Shortcut::from_str("Alt+Nonsense").is_err());
+    }
+
+    /// The default must parse and must not be the snippet shortcut, or a fresh
+    /// install would boot with the fallback rejected by its own collision check.
+    #[test]
+    fn default_hotkey_parses_and_avoids_the_snippet_shortcut() {
+        let accel = crate::config::default_dictation_hotkey();
+        let shortcut = Shortcut::from_str(&accel).expect("default hotkey parses");
+        assert_ne!(shortcut, super::snippet_hotkey());
+    }
 }

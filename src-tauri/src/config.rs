@@ -4,6 +4,10 @@ use std::path::PathBuf;
 
 fn default_true() -> bool { true }
 fn default_silence_timeout() -> u32 { 300 }
+/// Push-to-talk dictation shortcut, as a Tauri accelerator string. The key part
+/// uses W3C KeyboardEvent `code` names, which is exactly what the frontend
+/// capture sends and what global-hotkey's parser accepts.
+pub fn default_dictation_hotkey() -> String { "Alt+KeyD".into() }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -15,6 +19,10 @@ pub struct AppConfig {
     pub active_model_id: String,
     #[serde(default = "default_true")]
     pub haptic_feedback: bool,
+    /// Global push-to-talk shortcut (desktop). Registered at startup and
+    /// re-registered live by `set_dictation_hotkey`.
+    #[serde(default = "default_dictation_hotkey")]
+    pub dictation_hotkey: String,
     /// Speaker ids the user has starred on the Voices page. The player voice
     /// picker shows only these (or all voices when empty).
     /// Superseded by `tts_favourite_voices`; kept for migration of old configs.
@@ -82,6 +90,7 @@ impl Default for AppConfig {
             active_engine: "whisper".into(),
             active_model_id: String::new(),
             haptic_feedback: true,
+            dictation_hotkey: default_dictation_hotkey(),
             tts_favourite_sids: Vec::new(),
             tts_favourite_voices: Vec::new(),
             tts_voice: String::new(),
@@ -185,6 +194,7 @@ tts_model = ""
             active_engine: "parakeet".into(),
             active_model_id: "parakeet-v3-int8".into(),
             haptic_feedback: false,
+            dictation_hotkey: "Control+Shift+Space".into(),
             tts_favourite_sids: vec![3, 7],
             tts_favourite_voices: vec!["tts-piper-alba:0".into()],
             tts_voice: "7".into(),
@@ -213,6 +223,7 @@ tts_model = ""
         assert!(deserialized.meeting_mic_device.is_empty());
         assert_eq!(deserialized.active_model_id, "parakeet-v3-int8");
         assert!(!deserialized.haptic_feedback);
+        assert_eq!(deserialized.dictation_hotkey, "Control+Shift+Space");
         assert_eq!(deserialized.tts_favourite_sids, vec![3, 7]);
         assert_eq!(deserialized.tts_voice, "7");
         assert_eq!(deserialized.tts_voice_speeds.get("7"), Some(&0.75f32));

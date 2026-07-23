@@ -116,7 +116,6 @@ const MORE_ITEMS = {
     { tab: 'debug', label: 'Debug', icon: 'bug_report' },
   ],
   speak: [
-    ...(isDesktop ? [{ tab: 'audio', label: 'Audio', icon: 'mic' }] : []),
     { tab: 'debug', label: 'Debug', icon: 'bug_report' },
   ],
   meeting: [
@@ -1020,7 +1019,7 @@ listen('model-error', (event) => {
   }
 });
 
-// ── Audio tab ──
+// ── Dictation input device (Settings > Speak) ──
 
 async function loadAudioDevices() {
   const devices = await invoke('list_audio_devices');
@@ -1067,11 +1066,122 @@ function selectDeviceOption(sel, value) {
   sel.value = value || '';
 }
 
+// ── Dictation hotkey (desktop) ──
+//
+// Accelerators are "Modifier+…+Code" with the key part as a raw W3C
+// KeyboardEvent `code` ("Alt+KeyD"), which is exactly what global-hotkey's
+// parser accepts on the Rust side — so capture emits e.code untranslated.
+
+const isMac = navigator.userAgent.includes('Mac');
+const HOTKEY_MOD_LABELS = isMac
+  ? { Control: '⌃', Alt: '⌥', Shift: '⇧', Super: '⌘' }
+  : { Control: 'Ctrl', Alt: 'Alt', Shift: 'Shift', Super: 'Win' };
+const HOTKEY_SEP = isMac ? ' ' : ' + ';
+// Held-down modifiers, which can't themselves be the shortcut's key.
+const HOTKEY_MODIFIER_CODES = new Set(['ControlLeft', 'ControlRight', 'AltLeft', 'AltRight',
+  'ShiftLeft', 'ShiftRight', 'MetaLeft', 'MetaRight', 'CapsLock']);
+const HOTKEY_KEY_LABELS = {
+  Space: 'Space', Backquote: '`', Minus: '-', Equal: '=', BracketLeft: '[', BracketRight: ']',
+  Backslash: '\\', Semicolon: ';', Quote: "'", Comma: ',', Period: '.', Slash: '/',
+  ArrowUp: '↑', ArrowDown: '↓', ArrowLeft: '←', ArrowRight: '→',
+};
+
+function hotkeyKeyLabel(code) {
+  if (code.startsWith('Key')) return code.slice(3);
+  if (code.startsWith('Digit')) return code.slice(5);
+  if (code.startsWith('Numpad')) return 'Num ' + code.slice(6);
+  return HOTKEY_KEY_LABELS[code] || code;
+}
+
+// "Alt+KeyD" -> "⌥ D" on macOS, "Alt + D" elsewhere.
+function formatHotkey(accel) {
+  if (!accel) return 'Not set';
+  const parts = accel.split('+');
+  const key = parts.pop();
+  return [...parts.map(m => HOTKEY_MOD_LABELS[m] || m), hotkeyKeyLabel(key)].join(HOTKEY_SEP);
+}
+
+let dictationHotkey = '';
+let hotkeyCapturing = false;
+
+function renderHotkeyBtn() {
+  const btn = document.getElementById('hotkey-btn');
+  if (btn) btn.textContent = formatHotkey(dictationHotkey);
+}
+
+function startHotkeyCapture() {
+  if (hotkeyCapturing) return;
+  hotkeyCapturing = true;
+  const btn = document.getElementById('hotkey-btn');
+  btn.textContent = 'Press keys…';
+  btn.classList.add('ring-1', 'ring-primary', 'text-primary');
+  document.getElementById('hotkey-hint').textContent =
+    'Hold a modifier and press a key. Esc cancels.';
+  // Capture phase so the combination never reaches the page's own handlers.
+  window.addEventListener('keydown', onHotkeyKeydown, true);
+  window.addEventListener('blur', endHotkeyCapture);
+  window.addEventListener('pointerdown', onHotkeyPointerDown, true);
+}
+
+function endHotkeyCapture() {
+  if (!hotkeyCapturing) return;
+  hotkeyCapturing = false;
+  window.removeEventListener('keydown', onHotkeyKeydown, true);
+  window.removeEventListener('blur', endHotkeyCapture);
+  window.removeEventListener('pointerdown', onHotkeyPointerDown, true);
+  const btn = document.getElementById('hotkey-btn');
+  btn.classList.remove('ring-1', 'ring-primary', 'text-primary');
+  document.getElementById('hotkey-hint').textContent = 'Press and hold to dictate';
+  renderHotkeyBtn();
+}
+
+function onHotkeyPointerDown(e) {
+  if (!e.target.closest('#hotkey-btn')) endHotkeyCapture();
+}
+
+async function onHotkeyKeydown(e) {
+  e.preventDefault();
+  e.stopPropagation();
+  if (e.code === 'Escape') { endHotkeyCapture(); return; }
+  const mods = [];
+  if (e.ctrlKey) mods.push('Control');
+  if (e.altKey) mods.push('Alt');
+  if (e.shiftKey) mods.push('Shift');
+  if (e.metaKey) mods.push('Super');
+  const btn = document.getElementById('hotkey-btn');
+  if (HOTKEY_MODIFIER_CODES.has(e.code)) {
+    // Still holding modifiers — show what's down so far.
+    btn.textContent = [...mods.map(m => HOTKEY_MOD_LABELS[m]), '…'].join(HOTKEY_SEP);
+    return;
+  }
+  if (!mods.length) {
+    // A bare key would fire globally while typing anywhere.
+    btn.textContent = 'Add a modifier';
+    return;
+  }
+  const accel = [...mods, e.code].join('+');
+  const previous = dictationHotkey;
+  dictationHotkey = accel;
+  endHotkeyCapture();
+  try {
+    await invoke('set_dictation_hotkey', { accelerator: accel });
+    showToast(`Hotkey set to ${formatHotkey(accel)}`);
+  } catch (err) {
+    dictationHotkey = previous;
+    renderHotkeyBtn();
+    showToast(String(err));
+  }
+}
+
+document.getElementById('hotkey-btn').addEventListener('click', startHotkeyCapture);
+
 // ── General tab ──
 
 async function loadConfig() {
   const cfg = await invoke('get_config');
   document.getElementById('cfg-haptic').checked = cfg.haptic_feedback;
+  dictationHotkey = cfg.dictation_hotkey || '';
+  renderHotkeyBtn();
   // Restore audio device selection
   document.getElementById('audio-device').value = cfg.device_index;
   document.getElementById('cfg-threads').value = String(cfg.threads);
@@ -6578,7 +6688,14 @@ window.verbaHandleBack = function () {
 document.addEventListener('DOMContentLoaded', async () => {
   // Show desktop-only UI elements when not on Android
   if (isDesktop) {
-    document.getElementById('hotkey-row')?.classList.remove('hidden');
+    // Settings > Speak > Dictation rows toggle via the `hidden` attribute so
+    // the card's divide-y only separates rows that are actually shown. The mic
+    // picker moved here from the old Audio page; haptics need a vibration
+    // motor, so that row stays Android-only.
+    const showRow = (id, show) => { const el = document.getElementById(id); if (el) el.hidden = !show; };
+    showRow('hotkey-row', true);
+    showRow('audio-device-row', true);
+    showRow('haptic-row', false);
     // Meeting is a desktop-only third mode: reveal its pill button and its
     // Settings group (both ship hidden so Android stays a two-mode app).
     document.getElementById('mode-meeting-btn')?.classList.remove('hidden');

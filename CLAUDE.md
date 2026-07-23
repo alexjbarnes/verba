@@ -31,7 +31,7 @@ Tauri v2 app with Rust backend, vanilla HTML/JS/CSS frontend, targeting desktop 
 
 ### Three execution paths
 
-1. **Desktop** - Tauri window with global hotkey (Alt+D), system tray, clipboard paste
+1. **Desktop** - Tauri window with a user-configurable push-to-talk hotkey (default Alt+D; `config.dictation_hotkey`, rebound live by the `set_dictation_hotkey` command, snippets stay fixed on Alt+S), system tray, clipboard paste
 2. **Android app** - Tauri WebView, dictation triggered from UI buttons
 3. **Android IME** - Accessibility service with JNI bridge (`android_ime.rs`), no WebView, operates independently from the Tauri app
 
@@ -99,7 +99,7 @@ Desktop-only deps (arboard, enigo, global-shortcut, tauri-plugin-dialog — the 
 
 Three files: `index.html`, `main.js`, `styles.css`. No build step, no framework. Uses Tailwind CDK + Material Symbols icons. Communicates with Rust via `window.__TAURI__.core.invoke()` and `window.__TAURI__.event.listen()`. Tauri embeds these at compile time via `generate_context!()`.
 
-Navigation: Speak/Listen/Meeting mode pill in the header (Meeting is desktop-only, hidden on Android; the pill thumb widths adapt to 2 or 3 modes). Bottom nav per mode (speak: History, Snippets, Settings, More; listen: Library, Feeds, Add, Voices, More; meeting: Meetings, record button, Settings, More). Settings is one shared page grouped into General (Appearance, Updates, Storage) / Speak / Listen / Meeting sections. There is no Models page — the dictation and meeting packages install from Settings. Android back gestures route through `window.verbaHandleBack()` (main.js) via MainActivity's OnBackPressedCallback.
+Navigation: Speak/Listen/Meeting mode pill in the header (Meeting is desktop-only, hidden on Android; the pill thumb widths adapt to 2 or 3 modes). Bottom nav per mode (speak: History, Snippets, Settings, More; listen: Library, Feeds, Add, Voices, More; meeting: Meetings, record button, Settings, More). Settings is one shared page grouped into General (Appearance, Updates, Storage) / Speak / Listen / Meeting sections. There is no Models page or Audio page — the dictation and meeting packages install from Settings, and the dictation mic picker lives in Settings > Speak > Dictation beside the hotkey (desktop-only rows; the haptics toggle is Android-only). Android back gestures route through `window.verbaHandleBack()` (main.js) via MainActivity's OnBackPressedCallback.
 
 ### Android overlay visibility (`VerbaAccessibilityService.kt`)
 
