@@ -33,11 +33,15 @@ function showConfirm(message, { okLabel = 'Delete', danger = true } = {}) {
 
 // Text-input dialog (window.prompt is unavailable in the webview). Resolves to
 // the trimmed string on confirm (may be empty), or null if cancelled.
-function showPrompt(message, { value = '', okLabel = 'Save', placeholder = '' } = {}) {
+// `suggestions` turns the field into a typeahead: matches filter as you type,
+// the whole list shows while it's empty, and arrows + Enter pick one. Enter
+// with nothing highlighted still submits what was typed.
+function showPrompt(message, { value = '', okLabel = 'Save', placeholder = '', suggestions = [] } = {}) {
   return new Promise((resolve) => {
     const dialog = document.getElementById('prompt-dialog');
     document.getElementById('prompt-msg').textContent = message;
     const input = document.getElementById('prompt-input');
+    const list = document.getElementById('prompt-suggestions');
     input.value = value;
     input.placeholder = placeholder;
     document.getElementById('prompt-ok').textContent = okLabel;
@@ -46,20 +50,71 @@ function showPrompt(message, { value = '', okLabel = 'Save', placeholder = '' } 
     input.focus();
     input.select();
 
+    let matches = [];
+    let active = -1; // index into matches; -1 = typed text wins
+
+    const renderSuggestions = () => {
+      const q = input.value.trim().toLowerCase();
+      matches = suggestions
+        .filter(s => !q || (s.toLowerCase().includes(q) && s.toLowerCase() !== q))
+        .slice(0, 6);
+      if (active >= matches.length) active = -1;
+      list.hidden = !matches.length;
+      list.innerHTML = matches.map((s, i) => `
+        <button class="prompt-suggestion text-left text-sm px-3 py-2 rounded-lg transition-colors cursor-pointer ${
+          i === active ? 'bg-primary/15 text-primary' : 'text-on-surface hover:bg-surface-container-highest'}" data-i="${i}">
+          ${escapeHtml(s)}
+        </button>`).join('');
+    };
+
     const cleanup = (result) => {
       dialog.classList.add('hidden');
       dialog.classList.remove('flex');
       document.getElementById('prompt-ok').onclick = null;
       document.getElementById('prompt-cancel').onclick = null;
       input.onkeydown = null;
+      input.oninput = null;
+      list.onclick = null;
+      list.hidden = true;
+      list.innerHTML = '';
       resolve(result);
     };
     document.getElementById('prompt-ok').onclick = () => cleanup(input.value.trim());
     document.getElementById('prompt-cancel').onclick = () => cleanup(null);
-    input.onkeydown = (e) => {
-      if (e.key === 'Enter') { e.preventDefault(); cleanup(input.value.trim()); }
-      else if (e.key === 'Escape') { e.preventDefault(); cleanup(null); }
+    input.oninput = () => { active = -1; renderSuggestions(); };
+    list.onclick = (e) => {
+      const btn = e.target.closest('.prompt-suggestion');
+      if (!btn) return;
+      input.value = matches[Number(btn.dataset.i)];
+      active = -1;
+      renderSuggestions();
+      input.focus();
     };
+    input.onkeydown = (e) => {
+      if (e.key === 'ArrowDown' && matches.length) {
+        e.preventDefault();
+        active = (active + 1) % matches.length;
+        renderSuggestions();
+      } else if (e.key === 'ArrowUp' && matches.length) {
+        e.preventDefault();
+        active = active <= 0 ? matches.length - 1 : active - 1;
+        renderSuggestions();
+      } else if (e.key === 'Enter') {
+        e.preventDefault();
+        // A highlighted suggestion fills the field; a second Enter saves it.
+        if (active >= 0) {
+          input.value = matches[active];
+          active = -1;
+          renderSuggestions();
+          return;
+        }
+        cleanup(input.value.trim());
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        cleanup(null);
+      }
+    };
+    renderSuggestions();
   });
 }
 
@@ -5740,9 +5795,13 @@ document.getElementById('meeting-stop-btn').addEventListener('click', async () =
   const btn = document.getElementById('meeting-stop-btn');
   // Ask for a name before stopping. Cancel backs out (keeps recording); an
   // empty name keeps the auto-generated "Meeting <date>" title.
+  // The typeahead reads the cached list; fill it if this session never opened
+  // the Meetings tab (recording can start straight from the nav button).
+  if (!meetingItems.length) await loadMeetings();
   const title = await showPrompt('Name this meeting', {
     okLabel: 'Save & stop',
     placeholder: 'e.g. Weekly sync',
+    suggestions: pastMeetingTitles(),
   });
   if (title === null) return;
   btn.disabled = true;
@@ -5843,6 +5902,20 @@ function visibleMeetings() {
   let items = meetingItems.filter(meetingMatchesFilter);
   if (meetingSearchHits) items = items.filter(m => meetingSearchHits.has(m.id));
   return items;
+}
+
+// Names used before, newest first, for the "Name this meeting" typeahead.
+// Auto-generated "Meeting 8 Jul 15:22" titles are skipped — nobody wants to
+// reuse one, and they'd crowd out the real names.
+const AUTO_TITLE = /^Meeting \d/;
+function pastMeetingTitles() {
+  const seen = new Map();
+  for (const m of meetingItems) {
+    const title = (m.title || '').trim();
+    if (!title || AUTO_TITLE.test(title)) continue;
+    if (!seen.has(title.toLowerCase())) seen.set(title.toLowerCase(), title);
+  }
+  return [...seen.values()];
 }
 
 // Every tag in use, deduplicated case-insensitively but shown as first written.

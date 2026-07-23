@@ -1129,8 +1129,10 @@
   <div id="prompt-dialog" class="fixed inset-0 z-50 hidden items-center justify-center bg-black/50 backdrop-blur-sm">
     <div class="bg-surface-container-high rounded-2xl p-6 mx-4 max-w-sm w-full shadow-xl border border-outline-variant/20">
       <p id="prompt-msg" class="text-sm font-medium text-on-surface mb-3"></p>
-      <input id="prompt-input" type="text" spellcheck="false" class="w-full bg-surface-container-highest border border-outline-variant/30 rounded-lg px-3 py-2 text-sm text-on-surface placeholder:text-on-surface-variant/50 focus:outline-none focus:ring-1 focus:ring-primary/50 transition-colors mb-5" />
-      <div class="flex justify-end gap-3">
+      <input id="prompt-input" type="text" spellcheck="false" autocomplete="off" class="w-full bg-surface-container-highest border border-outline-variant/30 rounded-lg px-3 py-2 text-sm text-on-surface placeholder:text-on-surface-variant/50 focus:outline-none focus:ring-1 focus:ring-primary/50 transition-colors" />
+      <!-- Past names, filtered as you type (see showPrompt's `suggestions`) -->
+      <div id="prompt-suggestions" hidden class="mt-2 max-h-40 overflow-y-auto flex flex-col gap-0.5"></div>
+      <div class="flex justify-end gap-3 mt-5">
         <button id="prompt-cancel" class="px-4 py-2 text-sm font-medium text-on-surface-variant rounded-lg hover:bg-surface-container-highest transition-colors cursor-pointer">Cancel</button>
         <button id="prompt-ok" class="px-4 py-2 text-sm font-medium text-on-primary bg-primary rounded-lg hover:brightness-110 transition-colors cursor-pointer">Save</button>
       </div>
