@@ -1021,33 +1021,31 @@ listen('model-error', (event) => {
 
 // ── Dictation input device (Settings > Speak) ──
 
+// Options are keyed by device NAME ("" = system default), matching the
+// backend's name-first resolution. An index would shift under the choice
+// whenever another device appeared.
 async function loadAudioDevices() {
   const devices = await invoke('list_audio_devices');
   const sel = document.getElementById('audio-device');
-  // Keep "System Default" as first option, add real devices
-  sel.innerHTML = '<option value="-1">System Default</option>';
+  sel.innerHTML = '<option value="">System Default</option>';
   for (const dev of devices) {
     const opt = document.createElement('option');
-    opt.value = dev.index;
+    opt.value = dev.name;
     opt.textContent = dev.name;
     sel.appendChild(opt);
   }
   return devices;
 }
 
-// Rescan for microphones — plugging in a headset mid-session doesn't reach the
-// list on its own. The stored value is a POSITIONAL index into the host's
-// enumeration, so a new device can shift the one already chosen onto a
-// different mic: re-match the selection by name, persist the new index, and
-// drop back to System Default when the chosen device has gone away.
+// Rescan — plugging in a headset mid-session doesn't reach the list on its own.
+// A chosen device that isn't connected keeps its selection (shown as "(not
+// connected)" by selectDeviceOption) so it's used again the moment it returns.
 async function refreshAudioDevices() {
   const sel = document.getElementById('audio-device');
   const btn = document.getElementById('audio-device-refresh');
   const icon = btn.querySelector('.material-symbols-outlined');
-  const before = Array.from(sel.options).map(o => o.textContent);
-  const wantedName = sel.selectedOptions[0]?.textContent || '';
-  const wasDefault = sel.value === '-1';
-  const previousValue = sel.value;
+  const before = Array.from(sel.options).map(o => o.value).filter(Boolean);
+  const wanted = sel.value;
 
   btn.disabled = true;
   icon.classList.add('animate-spin');
@@ -1060,15 +1058,12 @@ async function refreshAudioDevices() {
     btn.disabled = false;
     icon.classList.remove('animate-spin');
   }
+  selectDeviceOption(sel, wanted);
 
-  const match = Array.from(sel.options).find(o => o.textContent === wantedName);
-  sel.value = wasDefault || !match ? '-1' : match.value;
-  if (sel.value !== previousValue) await saveConfig();
-
-  // A lost selection outranks a new arrival: it just changed what records.
-  const added = Array.from(sel.options).map(o => o.textContent).filter(n => !before.includes(n));
-  if (!wasDefault && !match) showToast(`${wantedName} is gone — using System Default`);
-  else if (added.length) showToast(`Found ${added.join(', ')}`);
+  const now = Array.from(sel.options).map(o => o.value).filter(Boolean);
+  const added = now.filter(n => !before.includes(n));
+  if (added.length) showToast(`Found ${added.join(', ')}`);
+  else if (wanted && !now.includes(wanted)) showToast(`${wanted} is still not connected`);
   else showToast('No new microphones found');
 }
 
@@ -1222,8 +1217,21 @@ async function loadConfig() {
   document.getElementById('cfg-haptic').checked = cfg.haptic_feedback;
   dictationHotkey = cfg.dictation_hotkey || '';
   renderHotkeyBtn();
-  // Restore audio device selection
-  document.getElementById('audio-device').value = cfg.device_index;
+  // Restore the mic. Pre-name configs stored a position in the host
+  // enumeration: convert it to that device's name once, then leave the index
+  // at -1 forever. An unresolvable index just falls back to System Default and
+  // is retried next load (the device may simply be unplugged today).
+  let micDevice = cfg.dictation_mic_device || '';
+  if (!micDevice && cfg.device_index >= 0) {
+    const devices = await invoke('list_audio_devices').catch(() => []);
+    micDevice = devices.find(d => d.index === cfg.device_index)?.name || '';
+    if (micDevice) {
+      cfg.dictation_mic_device = micDevice;
+      cfg.device_index = -1;
+      await invoke('save_config', { cfg }).catch(() => {});
+    }
+  }
+  selectDeviceOption(document.getElementById('audio-device'), micDevice);
   document.getElementById('cfg-threads').value = String(cfg.threads);
 
   // Restore TTS voice favourites, last-selected voice, and per-voice speeds.
@@ -1262,7 +1270,9 @@ async function loadConfig() {
 
 async function saveConfig() {
   const cfg = await invoke('get_config');
-  cfg.device_index = parseInt(document.getElementById('audio-device').value, 10);
+  // Name, not index — see loadConfig. device_index stays retired at -1.
+  cfg.dictation_mic_device = document.getElementById('audio-device').value;
+  cfg.device_index = -1;
   cfg.haptic_feedback = document.getElementById('cfg-haptic').checked;
   cfg.threads = parseInt(document.getElementById('cfg-threads').value, 10);
   if (isDesktop) {

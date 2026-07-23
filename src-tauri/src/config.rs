@@ -14,7 +14,15 @@ pub struct AppConfig {
     pub language: String,
     pub threads: u32,
     pub output_dir: String,
+    /// Deprecated: the dictation mic used to be a position in the host's device
+    /// enumeration, which shifts whenever another device appears. Superseded by
+    /// `dictation_mic_device`; still read when that is empty so pre-migration
+    /// configs keep their device, and set to -1 once migrated.
     pub device_index: i32,
+    /// Dictation microphone by device name; "" = system default. Absent at
+    /// record time means fall back to the default, never forget the choice.
+    #[serde(default)]
+    pub dictation_mic_device: String,
     pub active_engine: String,
     pub active_model_id: String,
     #[serde(default = "default_true")]
@@ -87,6 +95,7 @@ impl Default for AppConfig {
                 .map(|d| d.join("Meetings").to_string_lossy().into_owned())
                 .unwrap_or_default(),
             device_index: -1,
+            dictation_mic_device: String::new(),
             active_engine: "whisper".into(),
             active_model_id: String::new(),
             haptic_feedback: true,
@@ -184,6 +193,25 @@ tts_model = ""
         assert_eq!(cfg.meeting_transcript_dir, default_meetings_dir());
     }
 
+    /// A config written before the mic became name-based keeps its index, and
+    /// the empty name is what routes `resolve_device` to that legacy path.
+    #[test]
+    fn pre_name_mic_config_keeps_its_index() {
+        let toml_src = r#"
+language = "en"
+threads = 4
+output_dir = ""
+device_index = 3
+active_engine = "parakeet"
+active_model_id = ""
+
+[tts_voice_speeds]
+"#;
+        let cfg: AppConfig = toml::from_str(toml_src).unwrap();
+        assert_eq!(cfg.device_index, 3);
+        assert!(cfg.dictation_mic_device.is_empty());
+    }
+
     #[test]
     fn roundtrip_toml() {
         let cfg = AppConfig {
@@ -191,6 +219,7 @@ tts_model = ""
             threads: 8,
             output_dir: "/tmp/test".into(),
             device_index: 2,
+            dictation_mic_device: "Yeti Nano".into(),
             active_engine: "parakeet".into(),
             active_model_id: "parakeet-v3-int8".into(),
             haptic_feedback: false,
@@ -215,6 +244,7 @@ tts_model = ""
         assert_eq!(deserialized.language, "fr");
         assert_eq!(deserialized.threads, 8);
         assert_eq!(deserialized.device_index, 2);
+        assert_eq!(deserialized.dictation_mic_device, "Yeti Nano");
         assert_eq!(deserialized.active_engine, "parakeet");
         assert_eq!(deserialized.meeting_transcript_dir, "/tmp/meet-t");
         assert_eq!(deserialized.meeting_summarizer, "sum-qwen3-1.7b");

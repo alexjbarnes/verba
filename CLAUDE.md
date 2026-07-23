@@ -88,7 +88,7 @@ Third top-level mode beside Speak/Listen — a local meeting assistant. Live-tra
 - `android_ime.rs` - JNI exports for `VerbaAccessibilityService`. Has its own `OVERLAY_STATE` with separate recorder/transcriber instances. Writes to same history file but via separate `History` instance
 - `history.rs` - JSON persistence. `list()` reloads from disk each call to pick up entries from IME path
 - `snippets.rs` - Snippet management with exact/fuzzy matching and trigger learning
-- `config.rs` - AppConfig persistence (language, threads, device index, haptic feedback, active model)
+- `config.rs` - AppConfig persistence (language, threads, mic device, dictation hotkey, haptic feedback, active model). Audio devices are stored by NAME everywhere (`dictation_mic_device`, `meeting_mic_device`, `meeting_output_device`) — a device's position in cpal's enumeration shifts whenever another one appears. `device_index` is the retired positional field, read only when `dictation_mic_device` is empty and migrated to a name on the next config load
 - `engine.rs` - Initialization orchestration and readiness checks
 
 ### Platform-specific code

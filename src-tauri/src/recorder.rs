@@ -414,7 +414,27 @@ fn resolve_device(host: &cpal::Host, spec: &DeviceSpec) -> Result<cpal::Device, 
     match spec {
         DeviceSpec::ConfigInput => {
             let cfg = crate::config::AppConfig::load();
-            if cfg.device_index >= 0 {
+            // By name first: a device's position in the host enumeration shifts
+            // whenever anything else is plugged in, so an index can silently
+            // land on a different mic. An absent device falls through to the
+            // default WITHOUT clearing the choice, so unplugging a headset for
+            // the day doesn't lose it — it's used again when it comes back.
+            if !cfg.dictation_mic_device.is_empty() {
+                if let Ok(inputs) = host.input_devices() {
+                    for dev in inputs {
+                        if dev.description().map(|d| d.name() == cfg.dictation_mic_device).unwrap_or(false) {
+                            log::info!("Using configured input device: {}", cfg.dictation_mic_device);
+                            return Ok(dev);
+                        }
+                    }
+                }
+                log::info!(
+                    "Configured input '{}' is not connected, using the system default",
+                    cfg.dictation_mic_device
+                );
+            } else if cfg.device_index >= 0 {
+                // Pre-name configs: honour the old index until the frontend
+                // migrates it (loadConfig converts it on the next Settings load).
                 let idx = cfg.device_index as usize;
                 if let Ok(inputs) = host.input_devices() {
                     for (i, dev) in inputs.enumerate() {
