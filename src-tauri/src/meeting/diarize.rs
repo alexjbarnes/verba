@@ -387,7 +387,7 @@ fn embed(extractor: &SpeakerEmbeddingExtractor, samples: &[f32]) -> Option<Vec<f
     extractor.compute(&stream)
 }
 
-fn cosine(a: &[f32], b: &[f32]) -> f32 {
+pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
 }
 

@@ -395,14 +395,16 @@ pub fn stop(
         }
     }
 
+    // Per-utterance voiceprints: embed each system utterance from its buffered
+    // audio so speakers stay traceable through later edits without the audio.
+    // Runs BEFORE diarization so refine_speakers can fall back to per-utterance
+    // similarity for anything the span pass can't place.
+    attach_utterance_voiceprints(&session.utterances, &session.loopback_audio);
+
     // Offline batch diarization: reconstruct the loopback timeline and relabel
     // the system utterances accurately. Best-effort — leaves live labels on any
     // gap (models missing, no system audio, diarizer failure).
     refine_speakers(&app, &session.meta.id, &session.loopback_audio, duration_ms, &session.utterances);
-
-    // Per-utterance voiceprints: embed each system utterance from its buffered
-    // audio so speakers stay traceable through later edits without the audio.
-    attach_utterance_voiceprints(&session.utterances, &session.loopback_audio);
 
     // Final transcript + index entry.
     let cfg = crate::config::AppConfig::load();
@@ -547,13 +549,105 @@ fn refine_speakers(
         }
     }
 
+    // Segment length per utterance, for the voiceprint-fallback duration floor.
+    let secs_by_tms: std::collections::HashMap<u64, f32> = {
+        let buf = buffer.lock().unwrap();
+        buf.iter().map(|(t, s)| (*t, s.len() as f32 / 16_000.0)).collect()
+    };
+
     let mut utts = utterances.lock().unwrap();
+    let mut placed = 0usize;
+    let mut by_print = 0usize;
+    let mut orphans = 0usize;
     for u in utts.iter_mut() {
-        if u.source == "system" {
-            if let Some(name) = label_by_tms.get(&u.t_ms) {
-                u.speaker = name.clone();
-            }
+        if u.source != "system" {
+            continue;
         }
+        if let Some(name) = label_by_tms.get(&u.t_ms) {
+            u.speaker = name.clone();
+            placed += 1;
+            continue;
+        }
+        // No diarized span covers this utterance — the span pass can't place
+        // short back-channels that fall between segmentation spans. Its own
+        // voiceprint often can: match it against the meeting's final speakers
+        // (measured on real meetings: short lines are 45% of remote lines but
+        // only 4% of the speech, so this is a labelling win, not a content one).
+        let long_enough =
+            secs_by_tms.get(&u.t_ms).is_some_and(|s| *s >= VOICEPRINT_FALLBACK_MIN_SECS);
+        let matched = match (&u.embedding, long_enough) {
+            (Some(emb), true) => best_speaker_by_voiceprint(emb, &diar.voiceprints),
+            _ => None,
+        };
+        match matched {
+            Some(sid) => {
+                if let Some((name, _)) = labels.get(sid) {
+                    u.speaker = name.clone();
+                    by_print += 1;
+                }
+            }
+            // Sub-floor or ambiguous: a confidently wrong name reads worse than
+            // an honest unknown, so leave it to the renumber pass below.
+            None => orphans += 1,
+        }
+    }
+    renumber_stray_speakers(&mut utts, &labels);
+    log::info!(
+        "diarize: labelled {placed} utterance(s) by span, {by_print} by voiceprint, {orphans} left unplaced"
+    );
+}
+
+/// A short utterance is only assigned by its own voiceprint when it is at least
+/// this long: sub-second embeddings are unreliable enough that matching them
+/// invents confident wrong speakers.
+const VOICEPRINT_FALLBACK_MIN_SECS: f32 = 1.5;
+/// ...and only when the best match is this similar, and this much clearer than
+/// the runner-up. Both bars must clear, so a voice that resembles two speakers
+/// equally stays unassigned rather than picking one by a hair.
+const VOICEPRINT_FALLBACK_SIM: f32 = 0.5;
+const VOICEPRINT_FALLBACK_MARGIN: f32 = 0.08;
+
+/// The final speaker whose voiceprint an utterance's own embedding matches, if
+/// one stands out clearly enough. `None` when nothing clears the bars.
+fn best_speaker_by_voiceprint(emb: &[f32], voiceprints: &[Vec<f32>]) -> Option<usize> {
+    let mut scored: Vec<(usize, f32)> = voiceprints
+        .iter()
+        .enumerate()
+        .map(|(i, vp)| (i, diarize::cosine(emb, vp)))
+        .collect();
+    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    let (best, best_sim) = *scored.first()?;
+    if best_sim < VOICEPRINT_FALLBACK_SIM {
+        return None;
+    }
+    let runner_up = scored.get(1).map(|(_, s)| *s).unwrap_or(0.0);
+    (best_sim - runner_up >= VOICEPRINT_FALLBACK_MARGIN).then_some(best)
+}
+
+/// Renumber leftover live labels so no transcript shows a speaker number above
+/// the count actually found. The live clusterer over-splits (a five-person call
+/// produced a stray "Speaker 8"), and any provisional label the offline pass
+/// never reached used to leak that raw number into the saved transcript.
+fn renumber_stray_speakers(utts: &mut [Utterance], labels: &[(String, bool)]) {
+    let known: std::collections::HashSet<&str> =
+        labels.iter().map(|(n, _)| n.as_str()).collect();
+    let mut next = labels.len() + 1;
+    let mut remap: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for u in utts.iter_mut() {
+        if u.source != "system" || known.contains(u.speaker.as_str()) {
+            continue;
+        }
+        // Only provisional "Speaker N" labels are renumbered; a name the user
+        // (or the gallery) supplied is never rewritten.
+        if !u.speaker.starts_with("Speaker ") {
+            continue;
+        }
+        let mapped = remap.entry(u.speaker.clone()).or_insert_with(|| {
+            let name = format!("Speaker {next}");
+            next += 1;
+            name
+        });
+        u.speaker = mapped.clone();
     }
 }
 
@@ -1131,4 +1225,68 @@ pub fn set_summary(id: &str, body: &str) -> Result<MeetingMeta, String> {
     meta.summary_path = path.to_string_lossy().into_owned();
     store.upsert(meta.clone())?;
     Ok(meta)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn utt(speaker: &str, t_ms: u64, embedding: Option<Vec<f32>>) -> Utterance {
+        Utterance {
+            source: "system".into(),
+            speaker: speaker.into(),
+            text: "hi".into(),
+            t_ms,
+            embedding,
+        }
+    }
+
+    fn unit(v: [f32; 3]) -> Vec<f32> {
+        let n = (v.iter().map(|x| x * x).sum::<f32>()).sqrt();
+        v.iter().map(|x| x / n).collect()
+    }
+
+    #[test]
+    fn voiceprint_fallback_picks_a_clear_match() {
+        let prints = vec![unit([1.0, 0.0, 0.0]), unit([0.0, 1.0, 0.0])];
+        let close = unit([0.95, 0.1, 0.05]);
+        assert_eq!(best_speaker_by_voiceprint(&close, &prints), Some(0));
+    }
+
+    #[test]
+    fn voiceprint_fallback_declines_weak_and_ambiguous() {
+        let prints = vec![unit([1.0, 0.0, 0.0]), unit([0.0, 1.0, 0.0])];
+        // Below the similarity bar: resembles nobody.
+        assert_eq!(best_speaker_by_voiceprint(&unit([0.0, 0.0, 1.0]), &prints), None);
+        // Over the bar for both, but no clear winner — stays unassigned rather
+        // than inventing a speaker by a hair.
+        assert_eq!(best_speaker_by_voiceprint(&unit([1.0, 1.0, 0.0]), &prints), None);
+    }
+
+    #[test]
+    fn renumber_never_exceeds_the_speaker_count() {
+        let labels = vec![("Danillo".to_string(), true), ("Speaker 2".to_string(), false)];
+        let mut utts = vec![
+            utt("Danillo", 0, None),
+            utt("Speaker 8", 1_000, None),
+            utt("Speaker 8", 2_000, None),
+            utt("Speaker 5", 3_000, None),
+        ];
+        renumber_stray_speakers(&mut utts, &labels);
+        assert_eq!(utts[0].speaker, "Danillo", "known speakers are untouched");
+        // Strays renumber above the final count, stably and without collisions.
+        assert_eq!(utts[1].speaker, "Speaker 3");
+        assert_eq!(utts[2].speaker, "Speaker 3", "the same stray keeps one identity");
+        assert_eq!(utts[3].speaker, "Speaker 4");
+    }
+
+    #[test]
+    fn renumber_leaves_real_names_alone() {
+        let labels = vec![("Danillo".to_string(), true)];
+        let mut utts = vec![utt("Ryan", 0, None), utt("You", 1_000, None)];
+        utts[1].source = "mic".into();
+        renumber_stray_speakers(&mut utts, &labels);
+        assert_eq!(utts[0].speaker, "Ryan", "a gallery/user name is never rewritten");
+        assert_eq!(utts[1].speaker, "You", "mic utterances are never touched");
+    }
 }
