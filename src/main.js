@@ -1029,12 +1029,17 @@ listen('model-error', (event) => {
 // backend's name-first resolution. An index would shift under the choice
 // whenever another device appeared.
 
-function fillDeviceSelect(sel, devices) {
-  sel.innerHTML = '<option value="">System Default</option>';
+// Entries are {name} (the stored id) with an optional {label} to show instead.
+function fillDeviceSelect(sel, devices, allLabel = 'System Default') {
+  sel.innerHTML = '';
+  const first = document.createElement('option');
+  first.value = '';
+  first.textContent = allLabel;
+  sel.appendChild(first);
   for (const dev of devices) {
     const opt = document.createElement('option');
     opt.value = dev.name;
-    opt.textContent = dev.name;
+    opt.textContent = dev.label || dev.name;
     sel.appendChild(opt);
   }
 }
@@ -1042,8 +1047,8 @@ function fillDeviceSelect(sel, devices) {
 // Rescan one picker — plugging in a headset mid-session doesn't reach the list
 // on its own. A chosen device that isn't connected keeps its selection (shown
 // as "(not connected)") so it's used again the moment it returns.
-// `noun` names the thing being scanned for in the result toast.
-async function refreshDeviceSelect(sel, btn, cmd, noun) {
+// `load` returns the entries; `noun` names them in the result toast.
+async function refreshDeviceSelect(sel, btn, load, noun, allLabel) {
   const icon = btn.querySelector('.material-symbols-outlined');
   const before = Array.from(sel.options).map(o => o.value).filter(Boolean);
   const wanted = sel.value;
@@ -1052,7 +1057,7 @@ async function refreshDeviceSelect(sel, btn, cmd, noun) {
   icon.classList.add('animate-spin');
   let devices;
   try {
-    devices = await invoke(cmd);
+    devices = await load();
   } catch (err) {
     showToast(`Could not list ${noun}: ` + err);
     return;
@@ -1060,13 +1065,13 @@ async function refreshDeviceSelect(sel, btn, cmd, noun) {
     btn.disabled = false;
     icon.classList.remove('animate-spin');
   }
-  fillDeviceSelect(sel, devices);
+  fillDeviceSelect(sel, devices, allLabel);
   selectDeviceOption(sel, wanted);
 
   const now = devices.map(d => d.name);
   const added = now.filter(n => !before.includes(n));
-  if (added.length) showToast(`Found ${added.join(', ')}`);
-  else if (wanted && !now.includes(wanted)) showToast(`${wanted} is still not connected`);
+  if (added.length) showToast(`Found ${added.map(n => devices.find(d => d.name === n).label || n).join(', ')}`);
+  else if (wanted && !now.includes(wanted)) showToast(`${wanted} is still not there`);
   else showToast(`No new ${noun} found`);
 }
 
@@ -1078,26 +1083,76 @@ async function loadAudioDevices() {
 
 document.getElementById('audio-device-refresh').addEventListener('click', () =>
   refreshDeviceSelect(document.getElementById('audio-device'),
-    document.getElementById('audio-device-refresh'), 'list_audio_devices', 'microphones'));
+    document.getElementById('audio-device-refresh'), () => invoke('list_audio_devices'), 'microphones'));
 
-// Meeting-mode device pickers (desktop): Settings and the live view share the
-// same device lists and the same stored names.
+// Meeting-mode pickers (desktop): Settings and the live view share the same
+// lists and the same stored ids.
+//
+// The System audio picker selects along a different axis per platform, so the
+// backend reports which one (meeting_audio_sources): macOS taps an APP (its
+// tap is process-based and device-independent), Windows opens an output
+// DEVICE, Linux always takes the default monitor and has nothing to choose.
+let meetingSourceKind = 'none';
+
+function meetingSourceLabels() {
+  if (meetingSourceKind === 'apps') {
+    return { label: 'Capture from', hint: 'Which app’s audio to record — everyone else on the call', all: 'All apps' };
+  }
+  return { label: 'System audio', hint: 'Speaker output to capture — everyone else on the call', all: 'System Default' };
+}
+
+// The System audio choices for this platform, as picker entries.
+async function loadMeetingSources() {
+  const sources = await invoke('meeting_audio_sources');
+  meetingSourceKind = sources.kind || 'none';
+  applyMeetingSourceCopy();
+  // An app that's making noise right now is the one you're probably after.
+  return (sources.items || []).map(s => ({
+    name: s.id,
+    label: s.active ? `${s.name} • playing` : s.name,
+  }));
+}
+
 async function loadMeetingDevices() {
   const [inputs, outputs] = await Promise.all([
     invoke('list_audio_devices'),
-    invoke('list_audio_output_devices'),
+    loadMeetingSources(),
   ]);
   fillDeviceSelect(document.getElementById('cfg-meeting-mic'), inputs);
-  fillDeviceSelect(document.getElementById('cfg-meeting-speaker'), outputs);
   return { inputs, outputs };
+}
+
+// Rewrite the System audio rows for whatever this platform selects by, and
+// hide the picker entirely where the choice would be a no-op (Linux).
+function applyMeetingSourceCopy() {
+  const { label, hint, all } = meetingSourceLabels();
+  const selectable = meetingSourceKind !== 'none';
+  for (const [labelId, hintId, rowId] of [
+    ['cfg-meeting-speaker-label', 'cfg-meeting-speaker-hint', 'cfg-meeting-speaker-row'],
+    ['meeting-live-speaker-label', null, 'meeting-live-speaker-row'],
+  ]) {
+    const labelEl = document.getElementById(labelId);
+    if (labelEl) labelEl.textContent = label;
+    const hintEl = hintId && document.getElementById(hintId);
+    if (hintEl) hintEl.textContent = hint;
+    const rowEl = document.getElementById(rowId);
+    if (rowEl) rowEl.hidden = !selectable;
+  }
+  document.getElementById('cfg-meeting-speaker-fixed').hidden = selectable;
+  for (const id of MEETING_DEVICE_SELECTS.system) {
+    const sel = document.getElementById(id);
+    const first = sel && sel.options[0];
+    if (first && !first.value) first.textContent = all;
+  }
 }
 
 document.getElementById('cfg-meeting-mic-refresh').addEventListener('click', () =>
   refreshDeviceSelect(document.getElementById('cfg-meeting-mic'),
-    document.getElementById('cfg-meeting-mic-refresh'), 'list_audio_devices', 'microphones'));
+    document.getElementById('cfg-meeting-mic-refresh'), () => invoke('list_audio_devices'), 'microphones'));
 document.getElementById('cfg-meeting-speaker-refresh').addEventListener('click', () =>
   refreshDeviceSelect(document.getElementById('cfg-meeting-speaker'),
-    document.getElementById('cfg-meeting-speaker-refresh'), 'list_audio_output_devices', 'outputs'));
+    document.getElementById('cfg-meeting-speaker-refresh'), loadMeetingSources,
+    meetingSourceKind === 'apps' ? 'apps' : 'outputs', meetingSourceLabels().all));
 
 // The same two devices are pickable from Settings and from the live meeting
 // view, so both surfaces render one shared value: whatever is actually being
@@ -1110,9 +1165,12 @@ const meetingDeviceApplied = { mic: '', system: '' };
 
 function setMeetingDeviceValue(kind, name) {
   meetingDeviceApplied[kind] = name;
+  // An app that isn't running keeps its slot (capture falls back to all apps
+  // until it comes back); a device that isn't plugged in reads differently.
+  const absent = kind === 'system' && meetingSourceKind === 'apps' ? '(not running)' : '(not connected)';
   for (const id of MEETING_DEVICE_SELECTS[kind]) {
     const el = document.getElementById(id);
-    if (el) selectDeviceOption(el, name);
+    if (el) selectDeviceOption(el, name, absent);
   }
 }
 
@@ -1120,8 +1178,10 @@ function setMeetingDeviceValue(kind, name) {
 // (or will be) recording. Returns the device names found, for refresh diffing.
 async function syncMeetingDevicePickers(mic, system) {
   const { inputs, outputs } = await loadMeetingDevices();
+  const all = meetingSourceLabels().all;
+  fillDeviceSelect(document.getElementById('cfg-meeting-speaker'), outputs, all);
   fillDeviceSelect(document.getElementById('meeting-live-mic'), inputs);
-  fillDeviceSelect(document.getElementById('meeting-live-speaker'), outputs);
+  fillDeviceSelect(document.getElementById('meeting-live-speaker'), outputs, all);
   setMeetingDeviceValue('mic', mic);
   setMeetingDeviceValue('system', system);
   return [...inputs, ...outputs].map(d => d.name);
@@ -1182,11 +1242,11 @@ document.getElementById('meeting-live-devices-refresh').addEventListener('click'
 
 // Select a device by name, adding a placeholder option first if it isn't
 // currently connected, so a saved choice survives the device being unplugged.
-function selectDeviceOption(sel, value) {
+function selectDeviceOption(sel, value, absentSuffix = '(not connected)') {
   if (value && !Array.from(sel.options).some((o) => o.value === value)) {
     const opt = document.createElement('option');
     opt.value = value;
-    opt.textContent = `${value} (not connected)`;
+    opt.textContent = `${value} ${absentSuffix}`;
     sel.appendChild(opt);
   }
   sel.value = value || '';

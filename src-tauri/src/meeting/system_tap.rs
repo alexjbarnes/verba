@@ -1,12 +1,19 @@
-//! Global CoreAudio process tap for macOS system-audio capture.
+//! CoreAudio process tap for macOS system-audio capture.
 //!
 //! This replaces cpal's loopback (a Core Audio process tap bound to one
 //! specific OUTPUT device UID) for Meeting mode's system-audio path. A
 //! device-bound tap silently delivers silence for some outputs — notably
-//! Bluetooth — because it taps a particular device's render path. A GLOBAL
-//! tap instead captures all process audio pre-routing, mixed down to mono,
+//! Bluetooth — because it taps a particular device's render path. Tapping
+//! PROCESSES instead captures audio pre-routing, mixed down to mono,
 //! independent of whatever output device happens to be active. See
 //! `meeting/loopback.rs::resolve_macos`, which selects this path on macOS.
+//!
+//! Two scopes, same machinery: all processes (the default, and the reliable
+//! one) or a single app by bundle id, which keeps music and notification
+//! sounds out of a meeting transcript. Bundle ids are resolved to live process
+//! objects at tap creation because those ids are reassigned every launch; an
+//! app that isn't running falls back to capturing everything rather than
+//! recording silence.
 //!
 //! Structure mirrors a known-working reference implementation (the Meetily
 //! app's `core_audio.rs`): default output device only to park/name the
@@ -39,12 +46,14 @@ use objc2_core_audio::{
     kAudioAggregateDeviceMainSubDeviceKey, kAudioAggregateDeviceNameKey,
     kAudioAggregateDeviceTapAutoStartKey, kAudioAggregateDeviceTapListKey,
     kAudioAggregateDeviceUIDKey, kAudioDevicePropertyDeviceUID,
-    kAudioHardwarePropertyDefaultOutputDevice, kAudioObjectPropertyElementMain,
-    kAudioObjectPropertyScopeGlobal, kAudioObjectSystemObject, kAudioSubTapDriftCompensationKey,
-    kAudioSubTapUIDKey, kAudioTapPropertyFormat, AudioDeviceCreateIOProcIDWithBlock,
-    AudioDeviceDestroyIOProcID, AudioDeviceIOProcID, AudioDeviceStart, AudioDeviceStop,
-    AudioHardwareCreateAggregateDevice, AudioHardwareCreateProcessTap,
-    AudioHardwareDestroyAggregateDevice, AudioHardwareDestroyProcessTap, AudioObjectGetPropertyData,
+    kAudioHardwarePropertyDefaultOutputDevice, kAudioHardwarePropertyProcessObjectList,
+    kAudioObjectPropertyElementMain, kAudioObjectPropertyScopeGlobal, kAudioObjectSystemObject,
+    kAudioProcessPropertyBundleID, kAudioProcessPropertyIsRunningOutput, kAudioProcessPropertyPID,
+    kAudioSubTapDriftCompensationKey, kAudioSubTapUIDKey, kAudioTapPropertyFormat,
+    AudioDeviceCreateIOProcIDWithBlock, AudioDeviceDestroyIOProcID, AudioDeviceIOProcID,
+    AudioDeviceStart, AudioDeviceStop, AudioHardwareCreateAggregateDevice,
+    AudioHardwareCreateProcessTap, AudioHardwareDestroyAggregateDevice,
+    AudioHardwareDestroyProcessTap, AudioObjectGetPropertyData, AudioObjectGetPropertyDataSize,
     AudioObjectID, AudioObjectPropertyAddress, CATapDescription, CATapMuteBehavior,
 };
 use objc2_core_audio_types::{AudioBufferList, AudioStreamBasicDescription, AudioTimeStamp};
@@ -82,10 +91,10 @@ pub struct SystemTapHandle {
 
 impl Drop for SystemTapHandle {
     fn drop(&mut self) {
-        log::info!("system-tap: stopping global system-audio tap");
+        log::info!("system-tap: stopping system-audio tap");
         // SAFETY: `agg_device_id`/`proc_id`/`tap_id` were produced by the
         // matching `AudioHardwareCreate*`/`AudioDeviceCreateIOProcIDWithBlock`
-        // calls in `start_global_tap` and have not been torn down yet (this
+        // calls in `start_tap` and have not been torn down yet (this
         // is the only place that does so). Order matters: the device must
         // stop producing IO callbacks before the IO proc and the aggregate
         // device it belongs to are destroyed, which in turn must happen
@@ -165,13 +174,146 @@ fn cf_key(s: &'static CStr) -> CFRetained<CFString> {
     CFString::from_str(s.to_str().expect("CoreAudio key constants are ASCII"))
 }
 
+/// One app Meeting mode can capture system audio from.
+pub struct AudioApp {
+    /// Bundle id — the stable handle stored in config. Process object ids are
+    /// reassigned per launch, so they can't be persisted.
+    pub id: String,
+    /// What the user calls it ("Microsoft Teams"), from the .app bundle name.
+    pub name: String,
+    /// True while the app is actually playing audio right now.
+    pub active: bool,
+}
+
+/// Every AudioObject CoreAudio knows about that belongs to a process.
+///
+/// # Safety
+/// Reads a variable-size property, so the size is queried first and the buffer
+/// sized from it.
+unsafe fn process_object_ids() -> Result<Vec<AudioObjectID>, String> {
+    let address = AudioObjectPropertyAddress {
+        mSelector: kAudioHardwarePropertyProcessObjectList,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain,
+    };
+    let mut size: u32 = 0;
+    let status = AudioObjectGetPropertyDataSize(
+        kAudioObjectSystemObject as AudioObjectID,
+        NonNull::from(&address),
+        0,
+        std::ptr::null(),
+        NonNull::from(&mut size),
+    );
+    if status != 0 {
+        return Err(format!("process list size query failed: status {status}"));
+    }
+    let count = size as usize / std::mem::size_of::<AudioObjectID>();
+    let mut ids = vec![0 as AudioObjectID; count];
+    if count == 0 {
+        return Ok(ids);
+    }
+    let status = AudioObjectGetPropertyData(
+        kAudioObjectSystemObject as AudioObjectID,
+        NonNull::from(&address),
+        0,
+        std::ptr::null(),
+        NonNull::from(&mut size),
+        NonNull::new(ids.as_mut_ptr()).expect("non-empty vec").cast(),
+    );
+    if status != 0 {
+        return Err(format!("process list read failed: status {status}"));
+    }
+    Ok(ids)
+}
+
+/// The app's display name, taken from the enclosing `.app` bundle in its
+/// executable path ("/Applications/Microsoft Teams.app/Contents/MacOS/MSTeams"
+/// -> "Microsoft Teams"). `None` for anything that isn't in a bundle.
+fn app_name_for_pid(pid: i32) -> Option<String> {
+    let mut buf = vec![0u8; 4096];
+    // SAFETY: proc_pidpath writes at most buffersize bytes into buf and
+    // returns the length written (0 or negative on failure).
+    let written = unsafe { libc::proc_pidpath(pid, buf.as_mut_ptr().cast(), buf.len() as u32) };
+    if written <= 0 {
+        return None;
+    }
+    let path = String::from_utf8_lossy(&buf[..written as usize]).into_owned();
+    path.split('/')
+        .find(|part| part.ends_with(".app"))
+        .map(|part| part.trim_end_matches(".app").to_string())
+}
+
+/// Apps that can be picked as the system-audio source, deduplicated by bundle
+/// id (browsers and Electron apps run many helper processes under one bundle)
+/// and ordered with whatever is currently making noise first. Best-effort:
+/// returns empty rather than failing, which the UI reads as "All apps only".
+pub fn list_audio_apps() -> Vec<AudioApp> {
+    // SAFETY: every property below is read from a process AudioObject with the
+    // type CoreAudio documents for that selector (UInt32, pid_t, CFStringRef).
+    let mut apps: Vec<AudioApp> = Vec::new();
+    unsafe {
+        let ids = match process_object_ids() {
+            Ok(ids) => ids,
+            Err(e) => {
+                log::warn!("system-tap: {e}");
+                return apps;
+            }
+        };
+        for id in ids {
+            // No bundle id means a daemon or helper with nothing to show a user.
+            let Ok(bundle) = get_property_cfstring(id, kAudioProcessPropertyBundleID) else {
+                continue;
+            };
+            let bundle = bundle.to_string();
+            if bundle.is_empty() {
+                continue;
+            }
+            let active = get_property::<u32>(id, kAudioProcessPropertyIsRunningOutput)
+                .map(|v| v != 0)
+                .unwrap_or(false);
+            let name = get_property::<i32>(id, kAudioProcessPropertyPID)
+                .ok()
+                .and_then(app_name_for_pid)
+                .unwrap_or_else(|| {
+                    bundle.rsplit('.').next().unwrap_or(&bundle).to_string()
+                });
+            // position(), not find(): a live &mut from the search would still
+            // be borrowed in the push arm, which borrowck rejects.
+            match apps.iter().position(|a| a.id == bundle) {
+                Some(i) => apps[i].active |= active,
+                None => apps.push(AudioApp { id: bundle, name, active }),
+            }
+        }
+    }
+    apps.sort_by(|a, b| b.active.cmp(&a.active).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())));
+    apps
+}
+
+/// The live process object for a bundle id, or `None` when that app isn't
+/// running — process object ids don't survive a relaunch, so the stored bundle
+/// id is resolved fresh every time a tap starts.
+fn process_object_for(bundle_id: &str) -> Option<AudioObjectID> {
+    // SAFETY: same property contract as list_audio_apps.
+    unsafe {
+        let ids = process_object_ids().ok()?;
+        ids.into_iter().find(|id| {
+            get_property_cfstring(*id, kAudioProcessPropertyBundleID)
+                .map(|b| b.to_string() == bundle_id)
+                .unwrap_or(false)
+        })
+    }
+}
+
 /// Start a global system-audio tap (needs macOS 14.4+ for the permission
 /// prompt to behave; Meeting mode itself gates on 14.6+, see
 /// `meeting/loopback.rs`). Pushes MONO f32 sample chunks to `tx` as they
 /// arrive from the CoreAudio IO thread. Returns the keep-alive handle plus
 /// the tap's native sample rate (Hz) and channel count.
-pub fn start_global_tap(
+/// `app_bundle_id` scopes the tap to one application ("" or an app that isn't
+/// running captures everything, which is the reliable default).
+pub fn start_tap(
     tx: mpsc::Sender<Vec<f32>>,
+    app_bundle_id: &str,
 ) -> Result<(SystemTapHandle, u32, usize), String> {
     // SAFETY: this function is the sole place that drives the CoreAudio
     // process-tap / aggregate-device lifecycle for a given tap; every value
@@ -190,13 +332,38 @@ pub fn start_global_tap(
         let output_uid = get_property_cfstring(output_device_id, kAudioDevicePropertyDeviceUID)
             .map_err(|e| format!("failed to get default output device UID: {e}"))?;
 
-        // Mono global tap, excluding no processes: mirrors the reference's
-        // finding that mono is more reliable for system-audio capture than
-        // stereo, and that including a sub-device alongside the tap
-        // duplicates audio (echo). The tap alone provides everything we need.
-        let exclude: Retained<NSArray<NSNumber>> = NSArray::from_slice(&[]);
-        let tap_desc: Retained<CATapDescription> =
-            CATapDescription::initMonoGlobalTapButExcludeProcesses(CATapDescription::alloc(), &exclude);
+        // Mono either way: mirrors the reference's finding that mono is more
+        // reliable for system-audio capture than stereo, and that including a
+        // sub-device alongside the tap duplicates audio (echo). The tap alone
+        // provides everything we need.
+        //
+        // Scoped to one app when asked and that app is running, else global
+        // (excluding no processes). A stale bundle id must never mean silence,
+        // so anything unresolvable falls back to capturing everything.
+        let scoped = if app_bundle_id.is_empty() {
+            None
+        } else {
+            let found = process_object_for(app_bundle_id);
+            if found.is_none() {
+                log::info!("system-tap: {app_bundle_id} isn't running — capturing all apps");
+            }
+            found
+        };
+        let tap_desc: Retained<CATapDescription> = match scoped {
+            Some(object_id) => {
+                log::info!("system-tap: scoping capture to {app_bundle_id}");
+                let include: Retained<NSArray<NSNumber>> =
+                    NSArray::from_retained_slice(&[NSNumber::numberWithUnsignedInt(object_id)]);
+                CATapDescription::initMonoMixdownOfProcesses(CATapDescription::alloc(), &include)
+            }
+            None => {
+                let exclude: Retained<NSArray<NSNumber>> = NSArray::from_slice(&[]);
+                CATapDescription::initMonoGlobalTapButExcludeProcesses(
+                    CATapDescription::alloc(),
+                    &exclude,
+                )
+            }
+        };
         // Audio is captured by the tap AND still sent to the audio hardware
         // (this is also CATapDescription's default, set explicitly for
         // clarity).
@@ -222,7 +389,7 @@ pub fn start_global_tap(
         let sample_rate = asbd.mSampleRate as u32;
         let channels = asbd.mChannelsPerFrame as usize;
 
-        log::info!("system-tap: global tap created, format {sample_rate} Hz / {channels} ch");
+        log::info!("system-tap: tap created, format {sample_rate} Hz / {channels} ch");
 
         // CRITICAL: only the tap goes into the aggregate (no sub-device-list
         // for the output device) — including both taps the same audio twice.

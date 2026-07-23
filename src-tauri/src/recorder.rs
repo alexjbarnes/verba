@@ -140,9 +140,10 @@ pub enum DeviceSpec {
     /// capture. Meeting mode uses this when the user picks a non-default
     /// speaker/output to record. macOS/Windows only.
     LoopbackByName(String),
-    /// macOS global system-audio process tap (captures all output,
-    /// device-independent). Meeting-mode loopback on macOS.
-    SystemTapGlobal,
+    /// macOS system-audio process tap (device-independent). The payload is an
+    /// app bundle id to scope capture to; empty captures every app. Meeting-
+    /// mode loopback on macOS.
+    SystemTap(String),
 }
 
 /// Audio recorder with a dedicated worker thread.
@@ -489,19 +490,20 @@ fn resolve_device(host: &cpal::Host, spec: &DeviceSpec) -> Result<cpal::Device, 
         }
         // Handled before this function is called (see open_stream); this
         // arm only exists so the match stays exhaustive on all platforms.
-        DeviceSpec::SystemTapGlobal => Err("system tap is not a cpal device".into()),
+        DeviceSpec::SystemTap(_) => Err("system tap is not a cpal device".into()),
     }
 }
 
 fn open_stream(spec: &DeviceSpec, dump: Option<&crate::debug_wav::DumpTarget>) -> Result<StreamHandle, String> {
-    // macOS system audio bypasses cpal entirely: a global CoreAudio process
-    // tap isn't bound to any single device, so there's no cpal Device to
-    // resolve/configure below. Everything else (mic input, Windows/Linux
-    // loopback) stays on the normal cpal path.
+    // macOS system audio bypasses cpal entirely: a CoreAudio process tap isn't
+    // bound to any single device, so there's no cpal Device to resolve/
+    // configure below. Everything else (mic input, Windows/Linux loopback)
+    // stays on the normal cpal path.
     #[cfg(target_os = "macos")]
-    if matches!(spec, DeviceSpec::SystemTapGlobal) {
+    if let DeviceSpec::SystemTap(app_bundle_id) = spec {
         let (audio_tx, audio_rx) = mpsc::channel::<Vec<f32>>();
-        let (handle, rate, _channels) = crate::meeting::system_tap::start_global_tap(audio_tx)?;
+        let (handle, rate, _channels) =
+            crate::meeting::system_tap::start_tap(audio_tx, app_bundle_id)?;
         let resampler = if rate as i32 != TARGET_SAMPLE_RATE {
             Some(
                 LinearResampler::create(rate as i32, TARGET_SAMPLE_RATE)
@@ -582,7 +584,7 @@ fn open_stream(spec: &DeviceSpec, dump: Option<&crate::debug_wav::DumpTarget>) -
         DeviceSpec::ConfigInput => "mic:config".to_string(),
         // Unreachable: open_stream returns before here on macOS (see the
         // early branch above); kept so this match stays exhaustive.
-        DeviceSpec::SystemTapGlobal => "system-tap".to_string(),
+        DeviceSpec::SystemTap(_) => "system-tap".to_string(),
     };
     let mut meter_frames: usize = 0;
     let mut meter_peak: f32 = 0.0;

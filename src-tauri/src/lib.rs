@@ -772,6 +772,14 @@ fn meeting_note_set(text: String) -> Result<(), String> {
     meeting::note_set(text)
 }
 
+/// What the System audio picker can offer here: apps (macOS), output devices
+/// (Windows) or nothing (Linux). See meeting::loopback::sources.
+#[cfg(not(target_os = "android"))]
+#[tauri::command]
+fn meeting_audio_sources() -> serde_json::Value {
+    meeting::loopback::sources()
+}
+
 /// Swap the live meeting's mic ("mic") or system-audio source ("system").
 #[cfg(not(target_os = "android"))]
 #[tauri::command]
@@ -968,6 +976,11 @@ fn meeting_note_set(_text: String) -> Result<(), String> {
 #[tauri::command]
 async fn meeting_set_device(_app: tauri::AppHandle, _kind: String, _name: String) -> Result<(), String> {
     Err("Meeting mode is desktop only".into())
+}
+#[cfg(target_os = "android")]
+#[tauri::command]
+fn meeting_audio_sources() -> serde_json::Value {
+    serde_json::json!({ "kind": "none", "items": [] })
 }
 #[cfg(target_os = "android")]
 #[tauri::command]
@@ -1930,6 +1943,7 @@ pub fn run() {
             meeting_status,
             meeting_note_set,
             meeting_set_device,
+            meeting_audio_sources,
             meetings_list,
             meeting_get,
             meeting_delete,

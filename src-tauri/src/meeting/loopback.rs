@@ -4,19 +4,61 @@
 //! Meeting mode captures what comes OUT of the speakers (everyone else on the
 //! call) alongside the microphone (you):
 //!   - Windows: cpal's default output device opened as an input = WASAPI loopback.
-//!   - macOS 14.6+: a GLOBAL CoreAudio process tap (`meeting/system_tap.rs`),
-//!     device-independent — it captures all process audio pre-routing rather
+//!   - macOS 14.6+: a CoreAudio process tap (`meeting/system_tap.rs`),
+//!     device-independent — it captures process audio pre-routing rather
 //!     than being bound to one output device's UID. cpal's device-bound tap
 //!     (opening a specific output as an input) silently delivered silence for
 //!     some outputs, notably Bluetooth, which is why this isn't cpal-based.
 //!   - Linux: the default sink's `.monitor` source, enumerated as an input by
 //!     the native PipeWire/PulseAudio hosts (the `linux-audio-hosts` feature).
 //!
+//! Those three mechanisms select along DIFFERENT axes, which is what
+//! `sources()` exists to express: Windows picks an output DEVICE, macOS picks
+//! an APP (or all of them), and Linux has nothing to pick. The UI renders
+//! whichever list this module reports rather than guessing from the platform,
+//! and `AppConfig::meeting_output_device` stores whichever kind of id applies.
+//!
 //! When capture isn't possible (macOS < 14.6, no monitor source, headless CI),
 //! `resolve()` returns `Unsupported(reason)` and Meeting mode records mic-only
 //! with that reason surfaced to the UI.
 
 use crate::recorder::DeviceSpec;
+
+/// One choice for the System audio picker, whatever this platform selects by.
+#[derive(serde::Serialize)]
+pub struct Source {
+    /// Stored in config: a device name on Windows, an app bundle id on macOS.
+    pub id: String,
+    pub name: String,
+    /// Currently playing audio (macOS apps only; always false elsewhere).
+    pub active: bool,
+}
+
+/// What the System audio picker can offer here: `kind` is "apps" (macOS),
+/// "outputs" (Windows) or "none" (Linux — always the default monitor), and
+/// `items` is the list to show beside the built-in "everything" default.
+pub fn sources() -> serde_json::Value {
+    #[cfg(target_os = "macos")]
+    let (kind, items): (&str, Vec<Source>) = (
+        "apps",
+        crate::meeting::system_tap::list_audio_apps()
+            .into_iter()
+            .map(|a| Source { id: a.id, name: a.name, active: a.active })
+            .collect(),
+    );
+    #[cfg(target_os = "windows")]
+    let (kind, items): (&str, Vec<Source>) = (
+        "outputs",
+        crate::audio::list_output_devices()
+            .into_iter()
+            .map(|d| Source { id: d.name.clone(), name: d.name, active: false })
+            .collect(),
+    );
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let (kind, items): (&str, Vec<Source>) = ("none", Vec::new());
+
+    serde_json::json!({ "kind": kind, "items": items })
+}
 
 /// Outcome of probing for a loopback capture device.
 pub enum Loopback {
@@ -26,10 +68,10 @@ pub enum Loopback {
     Unsupported(String),
 }
 
-/// Resolve system-audio capture for the current platform. `preferred_output` is
-/// a specific output device name the user chose in Meeting settings (None for
-/// the default output). Honored on Windows/macOS, where loopback opens an OUTPUT
-/// device as input; ignored on Linux, where loopback is a monitor input source.
+/// Resolve system-audio capture for the current platform. `preferred` is the id
+/// the user chose in Meeting settings, which means whatever `sources()` reports
+/// for this platform: an output device name on Windows, an app bundle id on
+/// macOS, nothing on Linux. None (or empty) means capture everything.
 pub fn resolve(preferred_output: Option<&str>) -> Loopback {
     #[cfg(target_os = "windows")]
     {
@@ -62,17 +104,16 @@ fn output_spec(preferred: Option<&str>) -> DeviceSpec {
     }
 }
 
-/// A global CoreAudio process tap needs macOS 14.6+. Gate on the runtime OS
-/// version (a build could run on an older host than it was compiled
-/// against), falling back to mic-only with a clear reason below the floor.
-/// `preferred_output` is unused here: a global tap captures all process
-/// audio pre-routing, independent of whichever output device is selected.
+/// A CoreAudio process tap needs macOS 14.6+. Gate on the runtime OS version
+/// (a build could run on an older host than it was compiled against), falling
+/// back to mic-only with a clear reason below the floor. `preferred` is an app
+/// bundle id to scope the tap to (see `sources()`); empty captures every app,
+/// and so does an app that isn't currently running.
 #[cfg(target_os = "macos")]
-fn resolve_macos(preferred_output: Option<&str>) -> Loopback {
-    let _ = preferred_output;
+fn resolve_macos(preferred: Option<&str>) -> Loopback {
     match macos_product_version() {
         Some((major, minor)) if (major, minor) >= (14, 6) => {
-            Loopback::Available(DeviceSpec::SystemTapGlobal)
+            Loopback::Available(DeviceSpec::SystemTap(preferred.unwrap_or_default().to_string()))
         }
         Some((major, minor)) => Loopback::Unsupported(format!(
             "System audio capture needs macOS 14.6 or newer (this is {major}.{minor}). Recording microphone only."
