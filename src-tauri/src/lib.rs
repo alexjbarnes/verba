@@ -802,6 +802,13 @@ fn meeting_get(id: String) -> Option<meeting::store::MeetingMeta> {
     meeting::store::MeetingStore::global().get(&id)
 }
 
+/// Replace a meeting's tags.
+#[cfg(not(target_os = "android"))]
+#[tauri::command]
+fn meeting_set_tags(id: String, tags: Vec<String>) -> Result<(), String> {
+    meeting::store::set_tags(&id, tags)
+}
+
 /// Full-text search across meeting transcripts (speakers and spoken words).
 #[cfg(not(target_os = "android"))]
 #[tauri::command]
@@ -1006,6 +1013,11 @@ fn meeting_get(_id: String) -> Option<serde_json::Value> {
 #[tauri::command]
 async fn meetings_search(_query: String) -> Vec<serde_json::Value> {
     Vec::new()
+}
+#[cfg(target_os = "android")]
+#[tauri::command]
+fn meeting_set_tags(_id: String, _tags: Vec<String>) -> Result<(), String> {
+    Err("Meeting mode is desktop only".into())
 }
 #[cfg(target_os = "android")]
 #[tauri::command]
@@ -1962,6 +1974,7 @@ pub fn run() {
             meetings_list,
             meeting_get,
             meetings_search,
+            meeting_set_tags,
             meeting_delete,
             meeting_read_file,
             meeting_summarize,

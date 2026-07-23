@@ -58,6 +58,11 @@ pub struct MeetingMeta {
     /// list shows the entry as busy and blocks open/delete until it clears.
     #[serde(default)]
     pub processing: bool,
+    /// Free-form labels for grouping across dates. Recurring meetings get a
+    /// series tag applied automatically (see `seed_series_tag`); everything
+    /// else is the user's own.
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 pub struct MeetingStore {
@@ -71,7 +76,18 @@ impl MeetingStore {
             // A processing flag is only true while a finalize thread lives, so
             // any set at boot is an orphan from a killed process. Clear them so
             // the card unsticks (the autosaved transcript stays reachable).
-            if clear_stale_processing(&mut items) {
+            let mut dirty = clear_stale_processing(&mut items);
+            // Series tags only get applied as meetings are recorded, so
+            // meetings that predate the feature need one sweep. Marked with a
+            // sentinel file rather than repeated every boot: a tag the user
+            // removes must stay removed.
+            if let Some(marker) = Self::index_path().map(|p| p.with_file_name(".series-backfilled")) {
+                if !marker.exists() && !items.is_empty() {
+                    dirty |= backfill_series_tags(&mut items);
+                    let _ = std::fs::write(&marker, "1");
+                }
+            }
+            if dirty {
                 let _ = Self::save_to_disk(&items);
             }
             Self { items: Mutex::new(items) }
@@ -261,6 +277,105 @@ pub fn delete_transcript(id: &str) {
     }
 }
 
+/// Tag every meeting whose title recurs, for the existing archive. Returns true
+/// when anything changed. Runs once (see the sentinel in `global`).
+fn backfill_series_tags(items: &mut [MeetingMeta]) -> bool {
+    let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for m in items.iter() {
+        let slug = series_slug(&m.title);
+        if !slug.is_empty() {
+            *counts.entry(slug).or_default() += 1;
+        }
+    }
+    let mut changed = false;
+    for m in items.iter_mut() {
+        let slug = series_slug(&m.title);
+        if slug.is_empty() || counts.get(&slug).copied().unwrap_or(0) < 2 {
+            continue;
+        }
+        if !m.tags.iter().any(|t| t == &slug) {
+            m.tags.push(slug);
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// A title reduced to its comparable form, used to spot a recurring meeting:
+/// case and punctuation are noise ("Standup", "standup!" and "Stand up" are
+/// one series). Returns "" for titles with nothing left to compare.
+pub fn series_slug(title: &str) -> String {
+    let mut out = String::new();
+    let mut pending_sep = false;
+    for c in title.trim().chars() {
+        if c.is_alphanumeric() {
+            if pending_sep && !out.is_empty() {
+                out.push('-');
+            }
+            pending_sep = false;
+            out.extend(c.to_lowercase());
+        } else {
+            pending_sep = true;
+        }
+    }
+    out
+}
+
+/// Auto-tag recurring meetings. A meeting whose title matches an existing one
+/// joins that series; when the series is FIRST formed (exactly one other
+/// meeting shares the title) the older meeting is tagged too, so the pair
+/// groups together straight away.
+///
+/// Deliberately not re-applied to older meetings beyond that first pairing: a
+/// tag the user removed should stay removed.
+pub fn seed_series_tag(id: &str) -> Result<(), String> {
+    let store = MeetingStore::global();
+    let items = store.list();
+    let Some(me) = items.iter().find(|m| m.id == id) else {
+        return Ok(());
+    };
+    let slug = series_slug(&me.title);
+    if slug.is_empty() {
+        return Ok(());
+    }
+    let siblings: Vec<&MeetingMeta> =
+        items.iter().filter(|m| m.id != id && series_slug(&m.title) == slug).collect();
+    if siblings.is_empty() {
+        return Ok(());
+    }
+    let mut updates: Vec<MeetingMeta> = Vec::new();
+    if !me.tags.iter().any(|t| t == &slug) {
+        let mut m = me.clone();
+        m.tags.push(slug.clone());
+        updates.push(m);
+    }
+    // Exactly one other: the series is new, so bring that one along.
+    if siblings.len() == 1 && !siblings[0].tags.iter().any(|t| t == &slug) {
+        let mut m = siblings[0].clone();
+        m.tags.push(slug.clone());
+        updates.push(m);
+    }
+    for m in updates {
+        store.upsert(m)?;
+    }
+    Ok(())
+}
+
+/// Replace a meeting's tags (trimmed, deduplicated, empties dropped).
+pub fn set_tags(id: &str, tags: Vec<String>) -> Result<(), String> {
+    let store = MeetingStore::global();
+    let mut meta = store.get(id).ok_or("meeting not found")?;
+    let mut clean: Vec<String> = Vec::new();
+    for t in tags {
+        let t = t.trim().to_string();
+        if !t.is_empty() && !clean.iter().any(|e| e.eq_ignore_ascii_case(&t)) {
+            clean.push(t);
+        }
+    }
+    meta.tags = clean;
+    store.upsert(meta)
+}
+
 /// Where a query matched inside one meeting.
 #[derive(Debug, Clone, Serialize)]
 pub struct SearchHit {
@@ -350,8 +465,10 @@ fn search_one(meta: &MeetingMeta, needle: &str) -> Option<SearchHit> {
         }
     }
 
-    // A title-only match still surfaces the meeting, with no snippet to show.
-    if count == 0 && meta.title.to_lowercase().contains(needle) {
+    // A title or tag match still surfaces the meeting, with no snippet to show.
+    let labelled = meta.title.to_lowercase().contains(needle)
+        || meta.tags.iter().any(|t| t.to_lowercase().contains(needle));
+    if count == 0 && labelled {
         return Some(SearchHit { id: meta.id.clone(), snippet: String::new(), speaker: String::new(), count: 0 });
     }
     let (speaker, snippet) = first?;
@@ -426,7 +543,38 @@ mod tests {
             summarizer_id: String::new(),
             unnamed_speakers: 0,
             processing: false,
+            tags: Vec::new(),
         }
+    }
+
+    #[test]
+    fn backfill_tags_only_recurring_titles() {
+        let titled = |id: &str, title: &str| {
+            let mut m = meta(id);
+            m.title = title.into();
+            m
+        };
+        let mut items = vec![
+            titled("a", "Standup"),
+            titled("b", "standup "),   // same series, different typing
+            titled("c", "Planning"),   // one-off, stays untagged
+        ];
+        assert!(backfill_series_tags(&mut items));
+        assert_eq!(items[0].tags, vec!["standup"]);
+        assert_eq!(items[1].tags, vec!["standup"]);
+        assert!(items[2].tags.is_empty());
+        // Idempotent: a second sweep adds nothing.
+        assert!(!backfill_series_tags(&mut items));
+    }
+
+    #[test]
+    fn series_slug_folds_case_and_punctuation() {
+        assert_eq!(series_slug("Standup"), "standup");
+        assert_eq!(series_slug("  standup! "), "standup");
+        assert_eq!(series_slug("Stand up"), "stand-up"); // spacing is a real difference
+        assert_eq!(series_slug("1-1 Ryan"), "1-1-ryan");
+        assert_eq!(series_slug("Weekly  ·  Sync"), "weekly-sync");
+        assert_eq!(series_slug("   "), "");
     }
 
     #[test]

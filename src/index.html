@@ -887,6 +887,9 @@
       <button class="meeting-filter shrink-0 text-xs font-semibold px-3 py-1.5 rounded-full border transition-colors cursor-pointer" data-filter="summarized">Summarized</button>
       <button class="meeting-filter shrink-0 text-xs font-semibold px-3 py-1.5 rounded-full border transition-colors cursor-pointer" data-filter="unsummarized">Not summarized</button>
       <button class="meeting-filter shrink-0 text-xs font-semibold px-3 py-1.5 rounded-full border transition-colors cursor-pointer" data-filter="unnamed">Needs names</button>
+      <!-- Tag chips render here (renderMeetingsList); `contents` keeps them in
+           the same flex run as the status chips. -->
+      <span id="meetings-tag-chips" class="contents"></span>
     </div>
     <!-- Spacing lives in the rendered group blocks (renderMeetingsList), not
          here: sticky date headers can't sit inside a space-y run. -->
@@ -964,6 +967,9 @@
         <span class="material-symbols-outlined">arrow_back</span>
       </button>
       <h2 id="meeting-view-title" class="text-base font-bold tracking-tight text-on-surface truncate flex-1">Meeting</h2>
+      <button id="meeting-view-tags" class="w-10 h-10 shrink-0 flex items-center justify-center text-on-surface-variant hover:text-on-surface rounded-lg hover:bg-surface-container-highest transition-colors cursor-pointer" title="Tags">
+        <span class="material-symbols-outlined text-[20px]">sell</span>
+      </button>
       <button id="meeting-view-folder" class="w-10 h-10 shrink-0 flex items-center justify-center text-on-surface-variant hover:text-on-surface rounded-lg hover:bg-surface-container-highest transition-colors cursor-pointer" title="Open folder">
         <span class="material-symbols-outlined text-[20px]">folder_open</span>
       </button>
@@ -1049,6 +1055,16 @@
 
   <!-- Speaker naming / review sheet (meeting view): rename via known-speaker
        chips, merge, line reassignment, and gated voice review in one surface -->
+  <!-- Meeting tag editor: current tags, a free-text add, and every tag already
+       in use as one-tap chips (typing a tag twice is how tag sets rot). -->
+  <div id="meeting-tags-sheet" class="fixed inset-0 z-50 hidden">
+    <div id="meeting-tags-overlay" class="absolute inset-0 bg-black/50"></div>
+    <div class="sheet-anim absolute bottom-0 left-0 right-0 bg-surface-container-high rounded-t-2xl shadow-xl border-t border-outline-variant/20 max-h-[75vh] flex flex-col" style="padding-bottom: max(1.25rem, env(safe-area-inset-bottom));">
+      <div class="w-10 h-1 bg-outline-variant/40 rounded-full mx-auto mt-3 mb-4 shrink-0"></div>
+      <div id="meeting-tags-body" class="overflow-y-auto px-5 pb-3"></div>
+    </div>
+  </div>
+
   <div id="speaker-sheet" class="fixed inset-0 z-50 hidden">
     <div id="speaker-sheet-overlay" class="absolute inset-0 bg-black/50"></div>
     <div class="sheet-anim absolute bottom-0 left-0 right-0 bg-surface-container-high rounded-t-2xl shadow-xl border-t border-outline-variant/20 max-h-[75vh] flex flex-col" style="padding-bottom: max(1.25rem, env(safe-area-inset-bottom));">

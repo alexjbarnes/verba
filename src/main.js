@@ -5783,6 +5783,7 @@ document.getElementById('meeting-cancel-btn').addEventListener('click', async ()
 // date headers carry the structure and search goes through transcripts.
 
 let meetingFilter = 'all';
+let meetingTagFilter = ''; // lowercased tag, '' = any. Combines with the above.
 let meetingSearchHits = null; // Map(id -> hit) while a search is active, else null
 let meetingSearchTimer = null;
 
@@ -5831,6 +5832,7 @@ function groupMeetings(items, now = new Date()) {
 }
 
 function meetingMatchesFilter(m) {
+  if (meetingTagFilter && !(m.tags || []).some(t => t.toLowerCase() === meetingTagFilter)) return false;
   if (meetingFilter === 'summarized') return !!m.summary_path;
   if (meetingFilter === 'unsummarized') return !m.summary_path;
   if (meetingFilter === 'unnamed') return m.unnamed_speakers > 0;
@@ -5841,6 +5843,17 @@ function visibleMeetings() {
   let items = meetingItems.filter(meetingMatchesFilter);
   if (meetingSearchHits) items = items.filter(m => meetingSearchHits.has(m.id));
   return items;
+}
+
+// Every tag in use, deduplicated case-insensitively but shown as first written.
+function allMeetingTags() {
+  const seen = new Map();
+  for (const m of meetingItems) {
+    for (const t of m.tags || []) {
+      if (!seen.has(t.toLowerCase())) seen.set(t.toLowerCase(), t);
+    }
+  }
+  return [...seen.values()].sort((a, b) => a.localeCompare(b));
 }
 
 function renderMeetingCard(m, i, groupLabel) {
@@ -5863,6 +5876,10 @@ function renderMeetingCard(m, i, groupLabel) {
     ? `<span class="inline-flex items-center gap-1 text-xs text-primary"><span class="material-symbols-outlined text-sm">person_add</span>${m.unnamed_speakers} to name</span>`
     : '';
   const ring = m.processing ? ' ring-1 ring-primary/40' : '';
+  const tags = (m.tags || []).length
+    ? `<div class="mt-1.5 flex flex-wrap gap-1">${m.tags.map(t =>
+        `<span class="text-[10px] font-medium px-1.5 py-0.5 rounded bg-surface-container-highest text-on-surface-variant">#${escapeHtml(t)}</span>`).join('')}</div>`
+    : '';
   // Under a search, show where it matched instead of making them open it.
   const hit = meetingSearchHits && meetingSearchHits.get(m.id);
   const snippet = hit && hit.snippet
@@ -5877,6 +5894,7 @@ function renderMeetingCard(m, i, groupLabel) {
     <div class="text-[15px] font-semibold leading-snug text-on-surface truncate">${escapeHtml(m.title)}</div>
     <div class="text-xs text-on-surface-variant tabular-nums mt-1">${escapeHtml(meta)}</div>
     <div class="mt-1.5 flex items-center gap-3">${indicator}${nameBadge}</div>
+    ${tags}
     ${snippet}
   </div>`;
 }
@@ -5911,11 +5929,15 @@ function meetingsEmptyState() {
 
 function renderMeetingsList() {
   const list = document.getElementById('meetings-list');
+  const chipClass = on => `shrink-0 text-xs font-semibold px-3 py-1.5 rounded-full border transition-colors cursor-pointer ${
+    on ? 'bg-primary/15 border-primary/40 text-primary' : 'border-outline-variant/30 text-on-surface-variant hover:bg-surface-container-high'}`;
+  // Tag chips are a second, independent axis: they narrow whatever status
+  // filter is active rather than replacing it.
+  document.getElementById('meetings-tag-chips').innerHTML = allMeetingTags().map(t =>
+    `<button class="meeting-tag-filter ${chipClass(t.toLowerCase() === meetingTagFilter)}" data-tag="${escapeHtml(t.toLowerCase())}">#${escapeHtml(t)}</button>`).join('');
   // Chips reflect the active filter (no :checked to lean on for buttons).
   document.querySelectorAll('.meeting-filter').forEach(btn => {
-    const on = btn.dataset.filter === meetingFilter;
-    btn.className = `meeting-filter shrink-0 text-xs font-semibold px-3 py-1.5 rounded-full border transition-colors cursor-pointer ${
-      on ? 'bg-primary/15 border-primary/40 text-primary' : 'border-outline-variant/30 text-on-surface-variant hover:bg-surface-container-high'}`;
+    btn.className = `meeting-filter ${chipClass(btn.dataset.filter === meetingFilter)}`;
   });
 
   const items = visibleMeetings();
@@ -5948,10 +5970,112 @@ function renderMeetingsList() {
 }
 
 document.getElementById('meetings-filters').addEventListener('click', (e) => {
+  const tagBtn = e.target.closest('.meeting-tag-filter');
+  if (tagBtn) {
+    // Tapping the active tag clears it — no separate "all tags" chip needed.
+    meetingTagFilter = tagBtn.dataset.tag === meetingTagFilter ? '' : tagBtn.dataset.tag;
+    renderMeetingsList();
+    return;
+  }
   const btn = e.target.closest('.meeting-filter');
   if (!btn) return;
   meetingFilter = btn.dataset.filter;
   renderMeetingsList();
+});
+
+// ── Meeting tags ──
+
+const meetingTagsSheet = document.getElementById('meeting-tags-sheet');
+let meetingTagsTarget = null;
+
+function openMeetingTagsSheet(id) {
+  meetingTagsTarget = id;
+  renderMeetingTagsSheet();
+  meetingTagsSheet.classList.remove('hidden');
+}
+function closeMeetingTagsSheet() {
+  meetingTagsSheet.classList.add('hidden');
+  meetingTagsTarget = null;
+}
+
+function renderMeetingTagsSheet() {
+  const m = meetingItems.find(x => x.id === meetingTagsTarget)
+    || (meetingViewMeta && meetingViewMeta.id === meetingTagsTarget ? meetingViewMeta : null);
+  if (!m) return;
+  const tags = m.tags || [];
+  const suggestions = allMeetingTags().filter(t => !tags.some(x => x.toLowerCase() === t.toLowerCase()));
+  document.getElementById('meeting-tags-body').innerHTML = `
+    <p class="text-sm font-bold text-on-surface mb-1">Tags</p>
+    <p class="text-xs text-on-surface-variant mb-4">${escapeHtml(m.title)}</p>
+    <div class="flex flex-wrap gap-2 mb-4">
+      ${tags.length ? tags.map(t => `
+        <span class="inline-flex items-center gap-1 text-xs font-medium pl-2.5 pr-1.5 py-1.5 rounded-full bg-primary/15 text-primary">
+          #${escapeHtml(t)}
+          <button class="mt-tag-remove w-5 h-5 flex items-center justify-center rounded-full hover:bg-primary/20 cursor-pointer" data-tag="${escapeHtml(t)}" aria-label="Remove ${escapeHtml(t)}">
+            <span class="material-symbols-outlined text-[14px]">close</span>
+          </button>
+        </span>`).join('')
+        : '<p class="text-xs text-on-surface-variant/70">No tags yet</p>'}
+    </div>
+    <div class="flex items-center gap-2 mb-4">
+      <input id="mt-input" type="text" placeholder="Add a tag" maxlength="32"
+        class="flex-1 min-w-0 bg-surface-container-highest border border-outline-variant/30 rounded-lg px-3 py-2 text-sm text-on-surface placeholder:text-on-surface-variant/50 focus:outline-none focus:ring-1 focus:ring-primary/50" />
+      <button id="mt-add" class="shrink-0 text-xs font-semibold px-4 py-2 bg-primary text-on-primary rounded-lg hover:brightness-110 transition-all cursor-pointer">Add</button>
+    </div>
+    ${suggestions.length ? `
+      <p class="text-[11px] font-semibold text-on-surface-variant uppercase tracking-wider mb-2">Already in use</p>
+      <div class="flex flex-wrap gap-2">
+        ${suggestions.map(t => `<button class="mt-tag-add text-xs font-medium px-2.5 py-1.5 rounded-full border border-outline-variant/30 text-on-surface-variant hover:bg-surface-container-highest cursor-pointer" data-tag="${escapeHtml(t)}">#${escapeHtml(t)}</button>`).join('')}
+      </div>` : ''}`;
+}
+
+// Tags persist on every edit — no save button to forget.
+async function commitMeetingTags(tags) {
+  const id = meetingTagsTarget;
+  try {
+    await invoke('meeting_set_tags', { id, tags });
+  } catch (err) {
+    showToast('Could not save tags: ' + err);
+    return;
+  }
+  const local = meetingItems.find(x => x.id === id);
+  if (local) local.tags = tags;
+  if (meetingViewMeta && meetingViewMeta.id === id) meetingViewMeta.tags = tags;
+  // A tag that just disappeared shouldn't leave the list filtered to nothing.
+  if (meetingTagFilter && !allMeetingTags().some(t => t.toLowerCase() === meetingTagFilter)) {
+    meetingTagFilter = '';
+  }
+  renderMeetingTagsSheet();
+  renderMeetingsList();
+}
+
+document.getElementById('meeting-tags-overlay').addEventListener('click', closeMeetingTagsSheet);
+document.getElementById('meeting-tags-body').addEventListener('click', (e) => {
+  const m = meetingItems.find(x => x.id === meetingTagsTarget)
+    || (meetingViewMeta && meetingViewMeta.id === meetingTagsTarget ? meetingViewMeta : null);
+  if (!m) return;
+  const tags = (m.tags || []).slice();
+  const remove = e.target.closest('.mt-tag-remove');
+  if (remove) {
+    commitMeetingTags(tags.filter(t => t !== remove.dataset.tag));
+    return;
+  }
+  const add = e.target.closest('.mt-tag-add');
+  if (add) {
+    commitMeetingTags(tags.concat(add.dataset.tag));
+    return;
+  }
+  if (e.target.closest('#mt-add')) {
+    const input = document.getElementById('mt-input');
+    const value = input.value.trim();
+    if (value) commitMeetingTags(tags.concat(value));
+  }
+});
+document.getElementById('meeting-tags-body').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && e.target.id === 'mt-input') {
+    e.preventDefault();
+    document.getElementById('mt-add').click();
+  }
 });
 
 // Search reads every transcript on the backend, so debounce it and skip
@@ -6001,6 +6125,7 @@ function openMeetingActionSheet(id) {
   const summarizerReady = !!(pkgStatus && pkgStatus.meeting && pkgStatus.meeting.state === 'installed');
   const actions = [
     { action: 'open', icon: 'visibility', label: 'Open' },
+    { action: 'tags', icon: 'sell', label: (m.tags || []).length ? 'Edit tags' : 'Add tags' },
     ...(summarizerReady ? [{ action: 'summarize', icon: 'auto_awesome', label: 'Summarize' }] : []),
     { action: 'open-folder', icon: 'folder_open', label: 'Open folder' },
     { action: 'delete', icon: 'delete', label: 'Delete', danger: true },
@@ -6021,6 +6146,7 @@ document.getElementById('meeting-action-list').addEventListener('click', async (
   const action = btn.dataset.action;
   closeMeetingActionSheet();
   if (action === 'open') openMeetingView(id);
+  else if (action === 'tags') openMeetingTagsSheet(id);
   else if (action === 'summarize') { await openMeetingView(id); summarizeMeeting(id); }
   else if (action === 'open-folder') openMeetingFolder(id);
   else if (action === 'delete') deleteMeeting(id);
@@ -6157,7 +6283,8 @@ async function openMeetingView(id) {
   meetingViewMeta = meta;
   document.getElementById('meeting-view-title').textContent = meta.title;
   document.getElementById('meeting-view-meta').textContent =
-    [formatTimestamp(meta.started), fmtMins(meta.duration_ms), `${meta.utterance_count} utterances`].join(' · ');
+    [formatTimestamp(meta.started), fmtMins(meta.duration_ms), `${meta.utterance_count} utterances`,
+      ...(meta.tags || []).map(t => `#${t}`)].join(' · ');
   showPanel('meeting-view');
   setBottomNavVisible(false);
   exitSummaryEdit();
@@ -6191,6 +6318,9 @@ async function openMeetingView(id) {
 document.getElementById('meeting-view-back').addEventListener('click', () => navigateTo('meetings'));
 document.getElementById('meeting-view-folder').addEventListener('click', () => {
   if (meetingViewId) openMeetingFolder(meetingViewId);
+});
+document.getElementById('meeting-view-tags').addEventListener('click', () => {
+  if (meetingViewId) openMeetingTagsSheet(meetingViewId);
 });
 document.getElementById('meeting-summarize-btn').addEventListener('click', () => {
   if (meetingViewId) summarizeMeeting(meetingViewId);
@@ -7012,6 +7142,7 @@ const BACK_OVERLAYS = [
   { el: document.getElementById('snippet-picker'), close: closeSnippetPicker },
   { el: document.getElementById('snippet-wizard'), close: () => document.getElementById('wiz-cancel').click() },
   { el: document.getElementById('speaker-sheet'), close: () => closeSpeakerSheet() },
+  { el: meetingTagsSheet, close: closeMeetingTagsSheet },
 ];
 
 window.verbaHandleBack = function () {

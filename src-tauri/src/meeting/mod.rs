@@ -112,6 +112,7 @@ pub fn start(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
         summarizer_id: String::new(),
         unnamed_speakers: 0,
         processing: false,
+        tags: Vec::new(),
     };
 
     // TEMP(debug): while the diarization capture-loss investigation runs,
@@ -501,6 +502,11 @@ fn finalize(
     let _ = store::save_transcript(&meta.id, &utts);
     if let Err(e) = store::MeetingStore::global().upsert(meta.clone()) {
         log::warn!("meeting finalize: index update failed: {e}");
+    }
+    // Recurring titles group themselves: this runs after the index write so it
+    // sees the final title the user typed at stop.
+    if let Err(e) = store::seed_series_tag(&meta.id) {
+        log::warn!("meeting finalize: series tag failed: {e}");
     }
     let _ = app.emit(
         "meeting-state",
