@@ -176,3 +176,21 @@ select {
 .cover-6 { background: linear-gradient(135deg, #3b6fd4, #9ba8ff); }
 .cover-7 { background: linear-gradient(135deg, #4a45a8, #8999ff); }
 [data-theme="light"] .cover { color: rgb(255 255 255 / 0.92); }
+
+/* ── Raised nav button clearance ──
+   Listen's Add and Meeting's Record are circular buttons that sit 16px proud
+   of the bar (56px circle, -1.25rem margin against the bar's 0.25rem top pad),
+   so they float over the bottom of whatever is scrolled beneath them. In those
+   modes the scrolling surface gets a taller bottom pad: the panels' usual
+   1.5rem plus the overhang plus a little air.
+
+   Padding has to land on the element that actually scrolls, exactly once.
+   Panels come in two shapes: `flex flex-col` ones delegate scrolling to a
+   child, the rest scroll themselves — so :not(.flex) picks the self-scrollers
+   without double-padding the others. #feeds-scroll is the one scroller sitting
+   a level deeper, under its pull-to-refresh wrapper. */
+body.has-nav-fab .tab-panel:not(.flex).overflow-y-auto,
+body.has-nav-fab .tab-panel > .overflow-y-auto,
+body.has-nav-fab #feeds-scroll {
+  padding-bottom: 3rem;
+}

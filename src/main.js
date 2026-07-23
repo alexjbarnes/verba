@@ -157,6 +157,10 @@ function navigateTo(tab) {
 
 function renderBottomNav() {
   const items = BOTTOM_NAV[currentMode] || [];
+  // The center button is a raised circle that overhangs the bar and floats
+  // over the panel scrolled beneath it; flag the body so those panels pad
+  // their last row clear of it (see .has-nav-fab in styles.css).
+  document.body.classList.toggle('has-nav-fab', items.some(it => it.center));
   bottomNav.innerHTML = items.map(it => {
     if (it.center) {
       return `<button class="nav-slot flex-1 flex items-center justify-center" data-action="${it.action}">
