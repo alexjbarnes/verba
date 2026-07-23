@@ -5313,15 +5313,19 @@ listen('meeting-utterance', (event) => {
   }
 });
 
-// A session ending from somewhere other than this tab's own Stop/Cancel must
-// still clear the mode-switch guard, or meetingRecording stays stuck true.
+// Post-stop lifecycle (the UI has already left the live screen by the time
+// these fire): diarizing/processed drive the busy card on the meetings list.
+// idle covers a session ending from somewhere other than this tab's own
+// Stop/Cancel, which must still clear the mode-switch guard.
 listen('meeting-state', (event) => {
   const state = event.payload?.state;
   if (state === 'diarizing') {
-    // The offline speaker pass runs at stop and can take a while on long
-    // meetings; keep the user informed instead of a silent "Stopping…".
-    const btn = document.getElementById('meeting-stop-btn');
-    if (btn) btn.textContent = 'Analyzing speakers…';
+    const label = document.querySelector(
+      `.meeting-item[data-id="${event.payload?.id}"] .processing-label`);
+    if (label) label.textContent = 'Analyzing speakers…';
+  } else if (state === 'processed') {
+    if (event.payload?.error) showToast('Meeting processing: ' + event.payload.error);
+    loadMeetings(); // unstick the card (or surface it, if the list never saw it)
   } else if (state === 'idle' && meetingRecording) {
     endMeetingSession();
   }
@@ -5435,10 +5439,13 @@ document.getElementById('meeting-stop-btn').addEventListener('click', async () =
   clearTimeout(meetingNotesSaveTimer);
   try {
     const notes = document.getElementById('meeting-notes').value;
-    const meta = await invoke('meeting_stop', { notes, title: title || null });
+    // Returns as soon as capture ends; speaker analysis and the transcript
+    // write continue in the backend. Land on the list so a new meeting can
+    // start immediately — the card shows Processing until it's ready.
+    await invoke('meeting_stop', { notes, title: title || null });
     endMeetingSession();
-    showToast('Meeting saved');
-    openMeetingView(meta.id);
+    showToast('Meeting saved — analyzing speakers');
+    navigateTo('meetings');
   } catch (err) {
     showToast('Stop failed: ' + err);
     btn.disabled = false;
@@ -5463,14 +5470,19 @@ document.getElementById('meeting-cancel-btn').addEventListener('click', async ()
 function renderMeetingCard(m, i) {
   const meta = [formatTimestamp(m.started), fmtMins(m.duration_ms),
     `${m.utterance_count} ${m.utterance_count === 1 ? 'utterance' : 'utterances'}`].join(' · ');
-  const indicator = m.summary_path
-    ? '<span class="inline-flex items-center gap-1 text-xs text-primary"><span class="material-symbols-outlined text-sm">auto_awesome</span>Summarized</span>'
-    : '<span class="inline-flex items-center gap-1 text-xs text-on-surface-variant"><span class="material-symbols-outlined text-sm">description</span>Transcript only</span>';
-  const nameBadge = m.unnamed_speakers > 0
+  // A just-stopped meeting stays busy while the backend finishes speaker
+  // analysis; its card is highlighted and inert until meeting-state processed.
+  const indicator = m.processing
+    ? '<span class="inline-flex items-center gap-1 text-xs text-primary"><span class="material-symbols-outlined text-sm animate-spin">progress_activity</span><span class="processing-label">Processing…</span></span>'
+    : m.summary_path
+      ? '<span class="inline-flex items-center gap-1 text-xs text-primary"><span class="material-symbols-outlined text-sm">auto_awesome</span>Summarized</span>'
+      : '<span class="inline-flex items-center gap-1 text-xs text-on-surface-variant"><span class="material-symbols-outlined text-sm">description</span>Transcript only</span>';
+  const nameBadge = !m.processing && m.unnamed_speakers > 0
     ? `<span class="inline-flex items-center gap-1 text-xs text-primary"><span class="material-symbols-outlined text-sm">person_add</span>${m.unnamed_speakers} to name</span>`
     : '';
+  const ring = m.processing ? ' ring-1 ring-primary/40' : '';
   return `
-  <div class="meeting-item stagger-in bg-surface-container rounded-xl px-4 py-3.5 cursor-pointer hover:bg-surface-container-high transition-colors" data-id="${escapeHtml(m.id)}" style="--i:${i}">
+  <div class="meeting-item stagger-in bg-surface-container rounded-xl px-4 py-3.5 cursor-pointer hover:bg-surface-container-high transition-colors${ring}" data-id="${escapeHtml(m.id)}" style="--i:${i}">
     <div class="text-[15px] font-semibold leading-snug text-on-surface truncate">${escapeHtml(m.title)}</div>
     <div class="text-xs text-on-surface-variant tabular-nums mt-1">${escapeHtml(meta)}</div>
     <div class="mt-1.5 flex items-center gap-3">${indicator}${nameBadge}</div>
@@ -5497,11 +5509,19 @@ async function loadMeetings() {
   }
   list.innerHTML = meetingItems.map(renderMeetingCard).join('');
   list.querySelectorAll('.meeting-item').forEach(el => {
+    // While the post-stop pass runs there is no final transcript to open and
+    // deleting would race the finalize thread — hold every action until then.
+    const busy = () => {
+      const m = meetingItems.find(x => x.id === el.dataset.id);
+      if (m && m.processing) { showToast('Still processing — ready shortly'); return true; }
+      return false;
+    };
     el.addEventListener('click', () => {
       if (el._longPressed) { el._longPressed = false; return; }
+      if (busy()) return;
       openMeetingView(el.dataset.id);
     });
-    attachLongPress(el, () => openMeetingActionSheet(el.dataset.id));
+    attachLongPress(el, () => { if (!busy()) openMeetingActionSheet(el.dataset.id); });
   });
 }
 

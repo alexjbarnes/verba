@@ -15,9 +15,9 @@ only exist where a sweep was run; blank means unmeasured, judge by ear.
 
 | Voice | Sex | Accent | Drift | Status | Notes |
 |---|---|---|---|---|---|
-| Alba | F | Scottish | 2.7 | keep | Favourite. Default voice. |
+| Alba | F | Scottish | 2.7 | keep (confirmed 2026-07-21) | Favourite. Default voice. User: definitely keep. |
 | Jenny | F | Irish (not southern English) | 2.1 | keep for now (2026-07-14) | Favourite. Dioco dataset, Dublin speaker. User: listenable but does have some voice variance (matches the 2.1 st drift - mild, about half the removed voices'). |
-| Alan | M | English | 1.8 | | Steadiest live voice. |
+| Alan | M | English | 1.8 | keep for now (2026-07-21) | Steadiest live voice. User: OK, far from a favourite; UK male; better at 1.2x speed. |
 | Cori | F | accent unverified | 2.3 | keep for now (2026-07-14) | User (post-fix build): very similar to Cori HQ, maybe slightly more noticeable variance. |
 | Cori HQ | F | accent unverified | | keep for now (2026-07-14) | User: OK, not a favourite - quite a bit of variance, a little robotic in places. Judged on the post-fix build (13 Jul phoneme fix already applied), so this is her true ceiling. |
 | Northern English Male | M | Northern English | 3.2 | **remove** (2026-07-14) | User: same issues as Southern English Female - jumps around, sounds like completely different voices. Consistent with the 3.2 st measured drift. VCTK northern males (Yorkshire, Newcastle, Cumbria, Manchester) are the replacements. |
@@ -26,8 +26,8 @@ only exist where a sweep was run; blank means unmeasured, judge by ear.
 | Spike (semaine) | M | English | | **remove** (2026-07-14) | User: doesn't flow - each word delivered separately like its own sentence; struggles with p's and f's. (Spike is the corpus's angry character - the staccato is the acted affect, and it doesn't suit reading.) |
 | Obadiah (semaine) | M | English | | keep for now (2026-07-14) | User: not a favourite - quite a slow, dull voice - but technically fine. (In the corpus Obadiah is the gloomy character, so the dullness is the acted affect.) |
 | Poppy (semaine) | F | English | | keep for now (2026-07-14) | User: quite high pitched, not a favourite but seems OK; accent drifts a little Chinese/Australian in places. |
-| Aru 1 | ? | UK (per-speaker accent unknown) | 1.0 | | |
-| Aru 2 | ? | UK (per-speaker accent unknown) |  | | |
+| Aru 1 | F | UK (per-speaker accent unknown) | 1.0 | **remove** (2026-07-21) | User: nothing flows - every word seems completely different. Per-speaker removal (catalogue entry) - executes with the end-of-review batch. |
+| Aru 2 | M | UK (per-speaker accent unknown) |  | keep (2026-07-21) | User: really likes it - a good male voice, definite keep. |
 | Aru 3 | ? | UK (per-speaker accent unknown) |  | keep (2026-07-20) | User: fine. |
 | Aru 4 | ? | UK (per-speaker accent unknown) |  | **remove** (2026-07-20) | User: sounds very robotic. Per-speaker removal (catalogue entry) - executes with the end-of-review batch. |
 | Aru 5 | ? | UK (per-speaker accent unknown) |  | **remove** (2026-07-20) | User: doesn't flow well and doesn't sound right. Per-speaker removal (catalogue entry) - executes with the end-of-review batch. |
@@ -44,26 +44,34 @@ only exist where a sweep was run; blank means unmeasured, judge by ear.
 One model, 70 UK speakers by documented accent. Six auditioned already:
 https://claude.ai/code/artifact/0dfd071a-19e4-4f05-b727-a6c0bc4f6a79
 
+Speed-variance note (2026-07-21): word-level pace variance is the recurring
+VCTK complaint (p231/p257 removed for it, p228/p240 borderline) and the
+pitch-drift column does not predict it. Agreed follow-up after the listening
+pass: test lowering the model's duration-noise parameter (noise_w in
+piper.rs, read from the voice config JSON) for the VCTK pack - several
+otherwise-liked speakers hinge on it, and pacing removals get re-auditioned
+if it works.
+
 ### Female
 
 | Speaker | Age | Region | Drift | Status | Notes |
 |---|---|---|---|---|---|
-| p225 | 23 | Southern England | 1.2 | | |
-| p228 | 22 | Southern England | 1.7 | | |
-| p229 | 23 | Southern England | 0.6 | | |
-| p231 | 23 | Southern England | 1.2 | | |
-| p240 | 21 | Southern England | 1.1 | | |
-| p257 | 24 | Southern England | 1.3 | | |
-| p268 | 23 | Southern England | 1.9 | | |
-| p236 | 23 | Manchester |  | | |
-| p244 | 22 | Manchester |  | | |
-| p269 | 20 | Newcastle |  | | |
-| p282 | 23 | Newcastle |  | | |
-| p277 | 23 | Northeast England |  | | |
-| p276 | 24 | Oxford | 1.7 | | |
-| p250 | 22 | Southeast England | 1.5 | | |
-| p239 | 22 | Southwest England |  | | |
-| p233 | 23 | Staffordshire |  | | |
+| p225 | 23 | Southern England | 1.2 | keep for now (2026-07-21) | User: listens OK but sounds poor quality - almost like an old phone. |
+| p228 | 22 | Southern England | 1.7 | keep for now (2026-07-21) | User: OK, same old-phone quality note as p225. Better at 1.2x - difficult listen at 1x. |
+| p229 | 23 | Southern England | 0.6 | keep (2026-07-21) | User: really likes it. (Lowest drift of the southern females, 0.6 st.) |
+| p231 | 23 | Southern England | 1.2 | **remove** (2026-07-21) | User: too fast, and word-level pace is too variable - some words very slow, some too fast, at any playback speed. Per-speaker removal (catalogue entry) - executes with the end-of-review batch. |
+| p240 | 21 | Southern England | 1.1 | keep for now (2026-07-21) | User: OK - similar word-level speed variance to p231 but less noticeable. |
+| p257 | 24 | Southern England | 1.3 | **remove** (2026-07-21) | User: no good - way too much speed variance. Per-speaker removal (catalogue entry) - executes with the end-of-review batch. |
+| p268 | 23 | Southern England | 1.9 | keep for now (2026-07-21) | User: OK, far from a favourite - a bit of voice variance. Low down the list. |
+| p236 | 23 | Manchester |  | **remove** (2026-07-22) | User: good to have a northern female, but variance is too high. Per-speaker removal (catalogue entry) - executes with the end-of-review batch. |
+| p244 | 22 | Manchester |  | keep (2026-07-22) | User: perfectly OK - better at 0.9x, might need noise_w tweaking (see speed-variance note above). Covers the northern-female slot after p236's removal. |
+| p269 | 20 | Newcastle |  | keep (2026-07-22) | User: good, likes it. Wouldn't have placed it as Newcastle - hears a Scottish note and almost some American. |
+| p282 | 23 | Newcastle |  | keep (2026-07-22) | User: OK - would never have guessed Newcastle. Word speed drifts a little (noise_w candidate) but good otherwise. |
+| p277 | 23 | Northeast England |  | keep (2026-07-22) | User: fine. |
+| p276 | 24 | Oxford | 1.7 | keep (2026-07-22) | User: good at 1.05x. |
+| p250 | 22 | Southeast England | 1.5 | keep (2026-07-22) | User: fine, better at 0.9x. |
+| p239 | 22 | Southwest England |  | keep for now (2026-07-22) | User: OK, better at 0.9x - word speed needs tweaking (noise_w candidate). |
+| p233 | 23 | Staffordshire |  | keep (2026-07-22) | User: good. |
 | p230 | 22 | Stockton-on-tees |  | | |
 | p234 |  | UK (region unconfirmed) |  | | |
 | p238 |  | UK (region unconfirmed) |  | | |

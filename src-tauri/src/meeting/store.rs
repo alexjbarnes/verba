@@ -53,6 +53,11 @@ pub struct MeetingMeta {
     /// Count of still-unnamed "Speaker N" speakers, for the meetings-list badge.
     #[serde(default)]
     pub unnamed_speakers: u32,
+    /// True while the post-stop pass (tail transcription, speaker refinement,
+    /// final transcript write) still runs on the finalize thread; the meetings
+    /// list shows the entry as busy and blocks open/delete until it clears.
+    #[serde(default)]
+    pub processing: bool,
 }
 
 pub struct MeetingStore {
@@ -61,8 +66,15 @@ pub struct MeetingStore {
 
 impl MeetingStore {
     pub fn global() -> &'static Self {
-        STORE.get_or_init(|| Self {
-            items: Mutex::new(Self::load_from_disk().unwrap_or_default()),
+        STORE.get_or_init(|| {
+            let mut items = Self::load_from_disk().unwrap_or_default();
+            // A processing flag is only true while a finalize thread lives, so
+            // any set at boot is an orphan from a killed process. Clear them so
+            // the card unsticks (the autosaved transcript stays reachable).
+            if clear_stale_processing(&mut items) {
+                let _ = Self::save_to_disk(&items);
+            }
+            Self { items: Mutex::new(items) }
         })
     }
 
@@ -130,6 +142,17 @@ impl MeetingStore {
         }
         Ok(())
     }
+}
+
+/// Clear orphaned processing flags (finalize thread died with its process).
+/// Returns true when anything changed, so the caller knows to persist.
+fn clear_stale_processing(items: &mut [MeetingMeta]) -> bool {
+    let mut changed = false;
+    for m in items.iter_mut().filter(|m| m.processing) {
+        m.processing = false;
+        changed = true;
+    }
+    changed
 }
 
 /// "2026-07-07 14-30 Meeting.md" — filesystem-safe, sorts chronologically.
@@ -305,7 +328,16 @@ mod tests {
             summary_path: String::new(),
             summarizer_id: String::new(),
             unnamed_speakers: 0,
+            processing: false,
         }
+    }
+
+    #[test]
+    fn clear_stale_processing_flips_only_flagged_entries() {
+        let mut items = vec![meta("a"), { let mut m = meta("b"); m.processing = true; m }];
+        assert!(clear_stale_processing(&mut items));
+        assert!(items.iter().all(|m| !m.processing));
+        assert!(!clear_stale_processing(&mut items)); // nothing left to change
     }
 
     #[test]

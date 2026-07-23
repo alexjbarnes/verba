@@ -62,6 +62,10 @@ struct Session {
     /// Wall-clock of the last speech segment from either stream, for
     /// end-of-meeting (silence) detection.
     last_activity: Arc<Mutex<Instant>>,
+    /// Per-session stop signal for the autosaver. It must NOT watch the global
+    /// MEETING_ACTIVE: a new meeting can start (re-raising the flag) while this
+    /// session's finalize thread still waits on the join.
+    stopping: Arc<AtomicBool>,
     consumers: Vec<std::thread::JoinHandle<()>>,
     autosaver: Option<std::thread::JoinHandle<()>>,
 }
@@ -104,6 +108,7 @@ pub fn start(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
         summary_path: String::new(),
         summarizer_id: String::new(),
         unnamed_speakers: 0,
+        processing: false,
     };
 
     // TEMP(debug): while the diarization capture-loss investigation runs,
@@ -187,8 +192,9 @@ pub fn start(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
     }
 
     // Crash-safety autosave: rewrite the transcript markdown every ~30s while
-    // the meeting runs. Watches MEETING_ACTIVE at 1s granularity so stop()
-    // doesn't wait half a minute for the thread.
+    // the meeting runs. Watches this session's stopping flag at 1s granularity
+    // so stop() doesn't wait half a minute for the thread.
+    let stopping = Arc::new(AtomicBool::new(false));
     let autosaver = {
         let meta = meta.clone();
         let filename = filename.clone();
@@ -196,13 +202,14 @@ pub fn start(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
         let utterances = utterances.clone();
         let app = app.clone();
         let last_activity = last_activity.clone();
+        let stopping = stopping.clone();
         let silence_timeout = crate::config::AppConfig::load().meeting_silence_timeout_secs;
         std::thread::Builder::new()
             .name("meeting-autosave".into())
             .spawn(move || {
                 let mut ticks = 0u32;
                 let mut silence_notified = false;
-                while MEETING_ACTIVE.load(Ordering::SeqCst) {
+                while !stopping.load(Ordering::SeqCst) {
                     std::thread::sleep(std::time::Duration::from_secs(1));
                     ticks += 1;
                     // End-of-meeting: offer to stop after a long quiet stretch.
@@ -218,6 +225,11 @@ pub fn start(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
                     }
                     if ticks % 30 != 0 {
                         continue;
+                    }
+                    // stop() upserts the processing entry right after raising
+                    // the flag; don't race it with a stale autosave write.
+                    if stopping.load(Ordering::SeqCst) {
+                        break;
                     }
                     let cfg = crate::config::AppConfig::load();
                     let notes = notes.lock().unwrap().clone();
@@ -251,6 +263,7 @@ pub fn start(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
         loopback_notice,
         loopback_audio,
         last_activity,
+        stopping,
         consumers,
         autosaver,
     });
@@ -330,8 +343,12 @@ fn spawn_consumer(
         .expect("spawn meeting consumer")
 }
 
-/// Stop the meeting: flush tails, write the final transcript, index it.
-/// Returns the finished meta (summarization is a separate step).
+/// Stop the meeting. Capture ends here (mic freed, so a new meeting can start
+/// immediately); tail transcription, the offline speaker pass, and the final
+/// transcript write continue on a detached finalize thread. Returns the
+/// provisional meta with `processing = true` so the meetings list shows the
+/// entry straight away; `meeting-state {state:"processed", id}` fires when the
+/// background work lands and the index entry clears the flag.
 pub fn stop(
     app: tauri::AppHandle,
     final_notes: String,
@@ -343,14 +360,15 @@ pub fn stop(
         .take()
         .ok_or("no meeting is recording")?;
     MEETING_ACTIVE.store(false, Ordering::SeqCst);
+    session.stopping.store(true, Ordering::SeqCst);
 
     if !final_notes.is_empty() {
         *session.notes.lock().unwrap() = final_notes;
     }
 
     // Stopping the recorders closes their segment channels; consumers drain
-    // what's queued and exit. Tails come back as raw samples.
-    let transcriber = crate::engine::with(|e| e.transcriber_arc());
+    // what's queued and exit (joined on the finalize thread). Tails come back
+    // as raw samples for the finalize thread to transcribe.
     let mut tails: Vec<(&'static str, Vec<f32>)> = Vec::new();
     match session.mic.stop() {
         Ok(t) => tails.push(("mic", t)),
@@ -362,6 +380,43 @@ pub fn stop(
             Err(e) => log::warn!("loopback stop: {e}"),
         }
     }
+
+    let mut meta = session.meta.clone();
+    meta.duration_ms = session.started_at.elapsed().as_millis() as u64;
+    meta.utterance_count = session.utterances.lock().unwrap().len() as u32;
+    if let Some(t) = title {
+        let t = t.trim();
+        if !t.is_empty() {
+            meta.title = t.to_string();
+        }
+    }
+    // Keep the autosaved transcript path (if a 30s tick wrote one) so a crash
+    // mid-finalize still leaves an openable meeting once boot clears the flag.
+    if let Some(existing) = store::MeetingStore::global().get(&meta.id) {
+        meta.transcript_path = existing.transcript_path;
+    }
+    meta.processing = true;
+    store::MeetingStore::global().upsert(meta.clone())?;
+
+    let bg_meta = meta.clone();
+    std::thread::Builder::new()
+        .name("meeting-finalize".into())
+        .spawn(move || finalize(app, session, tails, bg_meta))
+        .map_err(|e| format!("finalize thread: {e}"))?;
+    Ok(meta)
+}
+
+/// Background half of stop(): drain consumers, transcribe tails, attach
+/// voiceprints, run the offline speaker pass, write the final transcript, and
+/// flip the index entry out of `processing`. Every exit path upserts with the
+/// flag cleared and emits `meeting-state processed` (with `error` on failure)
+/// so the meetings-list card never sticks.
+fn finalize(
+    app: tauri::AppHandle,
+    session: Session,
+    tails: Vec<(&'static str, Vec<f32>)>,
+    mut meta: MeetingMeta,
+) {
     for h in session.consumers {
         let _ = h.join();
     }
@@ -369,8 +424,8 @@ pub fn stop(
         let _ = h.join();
     }
 
-    let duration_ms = session.started_at.elapsed().as_millis() as u64;
-    if let Some(t) = transcriber {
+    let duration_ms = meta.duration_ms;
+    if let Some(t) = crate::engine::with(|e| e.transcriber_arc()) {
         for (source, samples) in tails {
             if samples.len() < MIN_SEGMENT_SAMPLES {
                 continue;
@@ -411,15 +466,7 @@ pub fn stop(
     let notes = session.notes.lock().unwrap().clone();
     let mut utts = session.utterances.lock().unwrap().clone();
     utts.sort_by_key(|u| u.t_ms);
-    let mut meta = session.meta.clone();
-    meta.duration_ms = duration_ms;
     meta.utterance_count = utts.len() as u32;
-    if let Some(t) = title {
-        let t = t.trim();
-        if !t.is_empty() {
-            meta.title = t.to_string();
-        }
-    }
     meta.unnamed_speakers = {
         let mut s = std::collections::BTreeSet::new();
         for u in &utts {
@@ -429,19 +476,32 @@ pub fn stop(
         }
         s.len() as u32
     };
+    meta.processing = false;
     let started_local = chrono::DateTime::parse_from_rfc3339(&meta.started)
         .map(|d| d.with_timezone(&chrono::Local).format("%Y-%m-%d %H-%M").to_string())
         .unwrap_or_else(|_| "meeting".into());
     let filename = store::meeting_filename(&started_local, "Meeting");
     let md = store::transcript_markdown(&meta, &notes, &utts);
-    let path = store::write_markdown(&cfg.meeting_transcript_dir, &filename, &md)?;
-    meta.transcript_path = path.to_string_lossy().into_owned();
+    let error = match store::write_markdown(&cfg.meeting_transcript_dir, &filename, &md) {
+        Ok(path) => {
+            meta.transcript_path = path.to_string_lossy().into_owned();
+            None
+        }
+        // The autosaved path (already on meta) keeps the meeting openable.
+        Err(e) => {
+            log::warn!("meeting finalize: transcript write failed: {e}");
+            Some(e)
+        }
+    };
     // Structured sidecar (source of truth for speaker ops; carries voiceprints).
     let _ = store::save_transcript(&meta.id, &utts);
-    store::MeetingStore::global().upsert(meta.clone())?;
-
-    let _ = app.emit("meeting-state", serde_json::json!({ "state": "idle" }));
-    Ok(meta)
+    if let Err(e) = store::MeetingStore::global().upsert(meta.clone()) {
+        log::warn!("meeting finalize: index update failed: {e}");
+    }
+    let _ = app.emit(
+        "meeting-state",
+        serde_json::json!({ "state": "processed", "id": meta.id, "error": error }),
+    );
 }
 
 /// Reconstruct the loopback timeline from buffered speech, run offline
@@ -706,6 +766,7 @@ pub fn cancel(app: tauri::AppHandle) -> Result<(), String> {
         .take()
         .ok_or("no meeting is recording")?;
     MEETING_ACTIVE.store(false, Ordering::SeqCst);
+    session.stopping.store(true, Ordering::SeqCst);
 
     let _ = session.mic.stop();
     if let Some(rec) = &session.loopback {

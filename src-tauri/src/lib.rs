@@ -584,8 +584,9 @@ async fn meeting_stop(
     notes: Option<String>,
     title: Option<String>,
 ) -> Result<meeting::store::MeetingMeta, String> {
-    // Stop flushes tails through the transcriber and runs the offline speaker
-    // pass — real work, so async off the main thread.
+    // Stop only ends capture (the heavy tail/diarize/write work continues on
+    // the finalize thread), but recorder teardown still belongs off the main
+    // thread. Returns provisional meta with processing = true.
     tauri::async_runtime::spawn_blocking(move || meeting::stop(app, notes.unwrap_or_default(), title))
         .await
         .map_err(|e| format!("stop task: {e}"))?
