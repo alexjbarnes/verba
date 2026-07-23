@@ -479,6 +479,16 @@ mod tests {
         for (spk, secs) in &dur {
             eprintln!("    speaker {spk}: {secs:.1}s");
         }
+        // VERBA_DUMP_SPANS=<path>: one "start end speaker" line per span, for
+        // scoring a real meeting's labels against its transcript.
+        if let Ok(path) = std::env::var("VERBA_DUMP_SPANS") {
+            let mut out = String::new();
+            for s in &d.spans {
+                out.push_str(&format!("{:.3} {:.3} {}\n", s.start, s.end, s.speaker));
+            }
+            std::fs::write(&path, out).expect("write spans");
+            eprintln!("[diarize_real] wrote {} spans to {path}", d.spans.len());
+        }
         assert!(d.speaker_count > 1, "expected more than one speaker, got {}", d.speaker_count);
     }
 
