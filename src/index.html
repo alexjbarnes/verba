@@ -4,7 +4,13 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover" />
   <title>Verba</title>
-  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Tailwind is VENDORED, not loaded from cdn.tailwindcss.com, because the
+       CDN script generates every utility class at runtime: on a cold or
+       auto-launch when the network stack isn't up yet, the fetch failed and
+       the whole app rendered unstyled (white) until a manual reload. Served
+       from frontendDist like fflate.js/readability.js, so it always loads.
+       Keeps the inline tailwind.config below (the Play engine reads it). -->
+  <script src="/tailwind.js"></script>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
   <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet" />
   <style>
