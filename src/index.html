@@ -11,8 +11,10 @@
        from frontendDist like fflate.js/readability.js, so it always loads.
        Keeps the inline tailwind.config below (the Play engine reads it). -->
   <script src="/tailwind.js"></script>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
-  <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet" />
+  <!-- Inter + Material Symbols are self-hosted too (see @font-face in
+       styles.css) — same cold-boot reason as Tailwind above. -->
+  <link rel="preload" as="font" type="font/woff2" href="/fonts/inter-latin.woff2" crossorigin />
+  <link rel="preload" as="font" type="font/woff2" href="/fonts/material-symbols-outlined.woff2" crossorigin />
   <style>
     :root {
       --c-primary-dim: 72 99 255;
