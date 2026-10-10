@@ -11,6 +11,7 @@ covers:
   - src-tauri/gen/android/app/src/main/java/com/alexb151/verba/
   - src-tauri/src/share.rs
   - src-tauri/src/android_bridge.rs
+last_commit: 12ebb616a103c7f54cb562830c524f729e4d5099
 ---
 
 - Shared-text intake (fixed 2026-10-10): MainActivity.handleSharedIntent must read EXTRA_TEXT with getCharSequenceExtra().toString(), not getStringExtra(): EXTRA_TEXT is a CharSequence by contract and senders that share a styled selection hand over a Spanned, for which Bundle.getString logs a typeWarning and returns null, so the share was silently dropped (app opened, nothing imported). Also: the frontend used to treat ANY shared text containing an http(s) URL as an article to fetch, so a paragraph mentioning a link was discarded when the fetch failed; importSharedText now falls back to saving the raw text with no url attached (helper fetchSharedArticle returns null on any failure). Manifest matches ACTION_SEND + text/plain only; MainActivity additionally checks type.startsWith("text/"). <!-- id:cfe3 -->

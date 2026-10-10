@@ -7,7 +7,7 @@ entry_points:
 covers:
   - src-tauri/src/library.rs
   - src-tauri/src/lib.rs
-last_commit: 
+last_commit: 12ebb616a103c7f54cb562830c524f729e4d5099
 ---
 
 - Archive added 2026-09-24: LibraryItem.archived (serde default false, so legacy JSON loads), Library::set_archived, command library_set_archived(id, archived). Archive only flips the flag; progress/tags untouched so unarchive restores exactly. Archived items stay in library_list, so feed dedupe (libraryUrlSet, byGuid 'Added' badges) still sees them and never re-imports. Every mutator follows the same lock, find, mutate, save_to_disk pattern; there is no partial write. <!-- id:fd2d -->
