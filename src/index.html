@@ -1,0 +1,562 @@
+<!DOCTYPE html>
+<html class="dark" lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <title>Verba</title>
+  <!-- Tailwind is VENDORED, not loaded from cdn.tailwindcss.com, because the
+       CDN script generates every utility class at runtime: on a cold or
+       auto-launch when the network stack isn't up yet, the fetch failed and
+       the whole app rendered unstyled (white) until a manual reload. Served
+       from frontendDist like readability.js, so it always loads.
+       Keeps the inline tailwind.config below (the Play engine reads it). -->
+  <script src="/tailwind.js"></script>
+  <!-- Inter + Material Symbols are self-hosted too (see @font-face in
+       styles.css) — same cold-boot reason as Tailwind above. -->
+  <link rel="preload" as="font" type="font/woff2" href="/fonts/inter-latin.woff2" crossorigin />
+  <link rel="preload" as="font" type="font/woff2" href="/fonts/material-symbols-outlined.woff2" crossorigin />
+  <style>
+    :root {
+      --c-primary-dim: 72 99 255;
+      --c-primary: 155 168 255;
+      --c-on-primary: 0 28 141;
+      --c-primary-container: 137 153 255;
+      --c-on-primary-container: 0 20 111;
+      --c-secondary: 152 145 254;
+      --c-secondary-dim: 152 145 254;
+      --c-secondary-container: 63 54 159;
+      --c-on-secondary: 23 0 116;
+      --c-on-secondary-container: 207 203 255;
+      --c-tertiary: 255 159 227;
+      --c-tertiary-container: 246 141 218;
+      --c-success: 110 214 145;
+      --c-error: 255 110 132;
+      --c-error-container: 167 1 56;
+      --c-on-error: 73 0 19;
+      --c-on-error-container: 255 178 185;
+      --c-surface: 14 14 14;
+      --c-surface-dim: 14 14 14;
+      --c-surface-bright: 44 44 44;
+      --c-surface-container-lowest: 0 0 0;
+      --c-surface-container-low: 19 19 19;
+      --c-surface-container: 26 26 26;
+      --c-surface-container-high: 32 32 31;
+      --c-surface-container-highest: 38 38 38;
+      --c-surface-variant: 38 38 38;
+      --c-on-surface: 255 255 255;
+      --c-on-surface-variant: 173 170 170;
+      --c-outline: 118 117 117;
+      --c-outline-variant: 72 72 71;
+      --c-inverse-surface: 252 249 248;
+      --c-inverse-on-surface: 86 85 85;
+      --c-inverse-primary: 40 73 238;
+      --c-surface-tint: 155 168 255;
+      /* Pill switches (Speak/Listen, Articles/Archive): a recessed track with a
+         raised thumb. Dark needs different physics than light — a black inset
+         shadow is invisible on near-black, so the recess comes from a
+         translucent black well, a bottom lip highlight, and a top sheen +
+         drop shadow lifting the thumb. */
+      --pill-track-bg: rgb(0 0 0 / 0.55);
+      --pill-track-shadow: inset 0 1px 3px rgba(0,0,0,0.85), inset 0 -1px 0 rgba(255,255,255,0.05);
+      --pill-thumb-bg: rgb(var(--c-surface-bright));
+      --pill-thumb-shadow: 0 2px 6px rgba(0,0,0,0.5), inset 0 1px 0 rgba(255,255,255,0.07);
+    }
+    [data-theme="light"] {
+      --c-primary-dim: 40 73 238;
+      --c-primary: 54 82 225;
+      --c-on-primary: 255 255 255;
+      --c-primary-container: 222 224 255;
+      --c-on-primary-container: 0 20 111;
+      --c-secondary: 90 82 199;
+      --c-secondary-dim: 90 82 199;
+      --c-secondary-container: 227 223 255;
+      --c-on-secondary: 255 255 255;
+      --c-on-secondary-container: 23 0 116;
+      --c-tertiary: 168 61 138;
+      --c-tertiary-container: 255 215 240;
+      --c-success: 22 128 61;
+      --c-error: 186 26 58;
+      --c-error-container: 255 218 221;
+      --c-on-error: 255 255 255;
+      --c-on-error-container: 64 0 18;
+      --c-surface: 250 248 255;
+      --c-surface-dim: 218 217 224;
+      --c-surface-bright: 250 248 255;
+      --c-surface-container-lowest: 255 255 255;
+      --c-surface-container-low: 244 242 250;
+      --c-surface-container: 238 236 244;
+      --c-surface-container-high: 232 230 239;
+      --c-surface-container-highest: 226 224 233;
+      --c-surface-variant: 226 224 233;
+      --c-on-surface: 26 27 33;
+      --c-on-surface-variant: 70 70 79;
+      --c-outline: 118 118 128;
+      --c-outline-variant: 199 197 208;
+      --c-inverse-surface: 47 48 54;
+      --c-inverse-on-surface: 241 240 247;
+      --c-inverse-primary: 155 168 255;
+      --c-surface-tint: 54 82 225;
+      /* Light: the look the dark treatment is matching — keep as-is. */
+      --pill-track-bg: rgb(var(--c-surface-container));
+      --pill-track-shadow: inset 0 1px 2px rgba(0,0,0,0.15);
+      --pill-thumb-bg: rgb(var(--c-surface-bright));
+      --pill-thumb-shadow: 0 4px 6px -1px rgba(0,0,0,0.1), 0 2px 4px -2px rgba(0,0,0,0.1);
+    }
+  </style>
+  <script>
+    (function(){
+      var t = 'dark';
+      try { t = localStorage.getItem('verba-theme') || 'dark'; } catch(e) {}
+      var r = t === 'system' ? (matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark') : t;
+      if (r === 'light') document.documentElement.dataset.theme = 'light';
+    })();
+  </script>
+  <script>
+    tailwind.config = {
+      darkMode: "class",
+      theme: {
+        extend: {
+          colors: {
+            "primary-dim": "rgb(var(--c-primary-dim) / <alpha-value>)",
+            "primary": "rgb(var(--c-primary) / <alpha-value>)",
+            "on-primary": "rgb(var(--c-on-primary) / <alpha-value>)",
+            "primary-container": "rgb(var(--c-primary-container) / <alpha-value>)",
+            "on-primary-container": "rgb(var(--c-on-primary-container) / <alpha-value>)",
+            "secondary": "rgb(var(--c-secondary) / <alpha-value>)",
+            "secondary-dim": "rgb(var(--c-secondary-dim) / <alpha-value>)",
+            "secondary-container": "rgb(var(--c-secondary-container) / <alpha-value>)",
+            "on-secondary": "rgb(var(--c-on-secondary) / <alpha-value>)",
+            "on-secondary-container": "rgb(var(--c-on-secondary-container) / <alpha-value>)",
+            "tertiary": "rgb(var(--c-tertiary) / <alpha-value>)",
+            "tertiary-container": "rgb(var(--c-tertiary-container) / <alpha-value>)",
+            "success": "rgb(var(--c-success) / <alpha-value>)",
+            "error": "rgb(var(--c-error) / <alpha-value>)",
+            "error-container": "rgb(var(--c-error-container) / <alpha-value>)",
+            "on-error": "rgb(var(--c-on-error) / <alpha-value>)",
+            "on-error-container": "rgb(var(--c-on-error-container) / <alpha-value>)",
+            "surface": "rgb(var(--c-surface) / <alpha-value>)",
+            "surface-dim": "rgb(var(--c-surface-dim) / <alpha-value>)",
+            "surface-bright": "rgb(var(--c-surface-bright) / <alpha-value>)",
+            "surface-container-lowest": "rgb(var(--c-surface-container-lowest) / <alpha-value>)",
+            "surface-container-low": "rgb(var(--c-surface-container-low) / <alpha-value>)",
+            "surface-container": "rgb(var(--c-surface-container) / <alpha-value>)",
+            "surface-container-high": "rgb(var(--c-surface-container-high) / <alpha-value>)",
+            "surface-container-highest": "rgb(var(--c-surface-container-highest) / <alpha-value>)",
+            "surface-variant": "rgb(var(--c-surface-variant) / <alpha-value>)",
+            "on-surface": "rgb(var(--c-on-surface) / <alpha-value>)",
+            "on-surface-variant": "rgb(var(--c-on-surface-variant) / <alpha-value>)",
+            "outline": "rgb(var(--c-outline) / <alpha-value>)",
+            "outline-variant": "rgb(var(--c-outline-variant) / <alpha-value>)",
+            "inverse-surface": "rgb(var(--c-inverse-surface) / <alpha-value>)",
+            "inverse-on-surface": "rgb(var(--c-inverse-on-surface) / <alpha-value>)",
+            "inverse-primary": "rgb(var(--c-inverse-primary) / <alpha-value>)",
+            "surface-tint": "rgb(var(--c-surface-tint) / <alpha-value>)",
+          },
+          fontFamily: {
+            "sans": ["Inter", "system-ui", "sans-serif"],
+          },
+          borderRadius: {
+            "DEFAULT": "0.5rem",
+            "lg": "0.75rem",
+            "xl": "1rem",
+          },
+        },
+      },
+    }
+  </script>
+  <link rel="stylesheet" href="/styles.css" />
+  <!-- Mozilla Readability (Apache-2.0), vendored: extracts article text from
+       fetched HTML for the share-a-URL feature. Classic script -> global. -->
+  <script src="/readability.js"></script>
+  <script type="module" src="/main.js" defer></script>
+</head>
+<body class="bg-surface text-on-surface font-sans antialiased overflow-hidden h-screen flex flex-col select-none">
+
+  <!-- General tab -->
+  <div id="general" class="tab-panel hidden flex-1 overflow-y-auto px-5 py-6 space-y-8">
+
+    <!-- General group: Appearance, Updates, Storage -->
+    <div class="settings-group" data-group="general">
+      <button type="button" class="settings-group-toggle w-full flex items-center justify-between mb-3 cursor-pointer" data-group-toggle="general">
+        <span class="text-xs font-semibold text-on-surface-variant uppercase tracking-wider">General</span>
+        <span class="material-symbols-outlined text-on-surface-variant/60 text-[20px] settings-chevron">expand_more</span>
+      </button>
+      <div class="space-y-6 settings-group-body">
+        <!-- Appearance section -->
+        <section>
+          <div class="mb-2">
+            <h2 class="text-sm font-semibold text-on-surface">Appearance</h2>
+          </div>
+          <div class="bg-surface-container-low rounded-xl p-5">
+            <div class="flex items-center justify-between">
+              <div>
+                <label class="text-sm font-medium text-on-surface">Theme</label>
+                <p class="text-xs text-on-surface-variant mt-0.5">Choose the app's color scheme</p>
+              </div>
+              <select id="theme-select" class="bg-surface-container-highest border border-outline-variant/30 rounded-lg pl-3 pr-8 py-1.5 text-sm text-on-surface focus:outline-none focus:ring-1 focus:ring-primary/50 transition-colors cursor-pointer">
+                <option value="dark">Dark</option>
+                <option value="light">Light</option>
+                <option value="system">System</option>
+              </select>
+            </div>
+          </div>
+        </section>
+
+      </div>
+    </div>
+
+
+    <!-- Listen group: Reading -->
+    <div class="settings-group" data-group="listen">
+      <button type="button" class="settings-group-toggle w-full flex items-center justify-between mb-3 cursor-pointer" data-group-toggle="listen">
+        <span class="text-xs font-semibold text-on-surface-variant uppercase tracking-wider">Listen</span>
+        <span class="material-symbols-outlined text-on-surface-variant/60 text-[20px] settings-chevron">expand_more</span>
+      </button>
+      <div class="space-y-6 settings-group-body">
+        <!-- Reading section -->
+        <section>
+          <div class="mb-2">
+            <h2 class="text-sm font-semibold text-on-surface">Reading</h2>
+          </div>
+          <div class="bg-surface-container-low rounded-xl p-5">
+            <div class="flex items-center justify-between mb-2">
+              <label class="text-sm font-medium text-on-surface">Reading text size</label>
+              <span id="font-scale-label" class="text-xs font-mono text-on-surface-variant">100%</span>
+            </div>
+            <input id="font-scale-range" type="range" min="85" max="140" step="5" value="100" class="w-full accent-primary" />
+          </div>
+        </section>
+      </div>
+    </div>
+
+
+  </div>
+
+  <div id="library" class="tab-panel hidden flex-1 flex flex-col px-5 py-6 min-h-0">
+    <div class="flex items-center justify-between mb-4 gap-3">
+      <h2 class="text-xl font-bold tracking-tight text-on-surface">Library</h2>
+      <div class="flex items-center gap-2 shrink-0">
+        <div id="lib-switch" class="pill-track relative flex w-44 shrink-0 p-1 rounded-full">
+          <span id="lib-thumb" class="pill-thumb absolute top-1 bottom-1 left-1 w-[calc(50%-0.25rem)] rounded-full ring-1 ring-outline-variant/20 transition-transform duration-300 ease-[cubic-bezier(0.4,0,0.2,1)]"></span>
+          <button class="lib-tab-btn relative z-10 flex-1 flex items-center justify-center py-1 rounded-full text-xs font-semibold transition-colors text-primary" data-lib="articles">Articles</button>
+          <button class="lib-tab-btn relative z-10 flex-1 flex items-center justify-center py-1 rounded-full text-xs font-semibold transition-colors text-on-surface-variant" data-lib="archive">Archive</button>
+        </div>
+        <!-- Settings / Debug entry (moved off the bottom bar) -->
+        <button id="lib-more-btn" class="w-10 h-10 -mr-2 flex items-center justify-center text-on-surface-variant hover:text-on-surface rounded-lg hover:bg-surface-container-highest transition-colors cursor-pointer" title="More">
+          <span class="material-symbols-outlined">more_horiz</span>
+        </button>
+      </div>
+    </div>
+    <!-- Search + filters, applied within whichever tab is showing. -->
+    <div id="lib-filters-wrap" class="shrink-0">
+      <div class="relative mb-2">
+        <span class="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-[18px] text-on-surface-variant pointer-events-none">search</span>
+        <input id="lib-search" type="search" placeholder="Search titles and text"
+          class="w-full bg-surface-container-low border border-outline-variant/30 rounded-xl pl-10 pr-9 py-2.5 text-sm text-on-surface placeholder:text-on-surface-variant/50 focus:outline-none focus:ring-1 focus:ring-primary/50 transition-colors" />
+        <button id="lib-search-clear" hidden class="absolute right-2 top-1/2 -translate-y-1/2 w-7 h-7 flex items-center justify-center rounded-lg text-on-surface-variant hover:text-on-surface hover:bg-surface-container-highest transition-colors cursor-pointer" aria-label="Clear search">
+          <span class="material-symbols-outlined text-[18px]">close</span>
+        </button>
+      </div>
+      <div id="lib-filters" class="flex items-center gap-2 mb-3 overflow-x-auto">
+        <button class="lib-filter shrink-0 text-xs font-semibold px-3 py-1.5 rounded-full border transition-colors cursor-pointer" data-source="all">All</button>
+        <button class="lib-filter shrink-0 text-xs font-semibold px-3 py-1.5 rounded-full border transition-colors cursor-pointer" data-source="feeds">Feeds</button>
+        <button class="lib-filter shrink-0 text-xs font-semibold px-3 py-1.5 rounded-full border transition-colors cursor-pointer" data-source="web">Links</button>
+        <button class="lib-filter shrink-0 text-xs font-semibold px-3 py-1.5 rounded-full border transition-colors cursor-pointer" data-source="text">Text</button>        <!-- Tag chips render here; `contents` keeps them in the same flex run. -->
+        <span id="lib-tag-chips" class="contents"></span>
+      </div>
+      <p id="lib-count" class="text-xs text-on-surface-variant tabular-nums mb-3" role="status"></p>
+    </div>
+    <div id="lib-scroll" class="flex-1 min-h-0 overflow-y-auto">
+      <div id="lib-list" class="space-y-2"></div>
+      <div id="lib-empty" class="hidden flex flex-col items-center justify-center pt-16 text-on-surface-variant">
+        <span class="material-symbols-outlined text-4xl mb-3 opacity-30">library_books</span>
+        <p id="lib-empty-title" class="text-sm font-medium text-on-surface">No saved texts yet</p>
+        <p id="lib-empty-sub" class="text-xs mt-1 opacity-70">Articles and pasted text all live here</p>
+        <button id="lib-empty-add" class="mt-5 flex items-center gap-1.5 bg-primary text-on-primary text-xs font-semibold px-5 min-h-10 rounded-full cursor-pointer hover:brightness-110 transition-all active:scale-[0.98]">
+          <span class="material-symbols-outlined text-base">add</span>
+          Add your first
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Reading view (opened from Library; not a nav item) -->
+  <div id="reading" class="tab-panel hidden flex-1 flex flex-col px-5 py-6 min-h-0">
+    <div class="flex items-center gap-2 mb-3">
+      <button id="reading-back" class="text-on-surface-variant hover:text-on-surface p-1 -ml-1 rounded-lg hover:bg-surface-container-highest transition-colors cursor-pointer">
+        <span class="material-symbols-outlined">arrow_back</span>
+      </button>
+      <h2 id="reading-title" class="text-base font-bold tracking-tight text-on-surface truncate flex-1">Reading</h2>
+      <!-- Reader display: font, size, paper colour (Kindle-style Aa sheet) -->
+      <button id="reading-format" class="w-10 h-10 shrink-0 flex items-center justify-center text-on-surface-variant hover:text-on-surface rounded-lg hover:bg-surface-container-highest transition-colors cursor-pointer" title="Display settings">
+        <span class="material-symbols-outlined text-[20px]">text_format</span>
+      </button>      <!-- Full management for the open item, via the same sheet the library
+           list uses on long-press. -->
+      <button id="reading-menu" class="w-10 h-10 shrink-0 flex items-center justify-center text-on-surface-variant hover:text-on-surface rounded-lg hover:bg-surface-container-highest transition-colors cursor-pointer" title="Manage">
+        <span class="material-symbols-outlined text-[20px]">more_vert</span>
+      </button>
+    </div>
+
+
+    <!-- Rendered text with per-word spans for highlighting. Playback is driven
+         entirely by the player bar (shown while a reading is open). -->
+    <!-- Full-strength text: this is the app's core reading surface, not
+         secondary chrome. The active-word highlight still reads over it. -->
+    <div id="reading-text" class="flex-1 min-h-0 overflow-y-auto text-[17px] leading-[1.7] text-on-surface/90 whitespace-pre-wrap"></div>
+  </div>
+
+  <!-- Add source chooser: how to bring text into the library -->
+  <div id="add-chooser-modal" class="fixed inset-0 z-50 hidden items-center justify-center bg-black/50 backdrop-blur-sm">
+    <div class="bg-surface-container-high rounded-2xl p-5 mx-4 max-w-sm w-full shadow-xl border border-outline-variant/20">
+      <div class="flex items-center justify-between mb-4">
+        <p class="text-sm font-semibold text-on-surface">Add to library</p>
+        <button id="add-chooser-cancel" class="w-8 h-8 flex items-center justify-center rounded-full text-on-surface-variant hover:bg-surface-container-highest transition-colors cursor-pointer">
+          <span class="material-symbols-outlined text-[20px]">close</span>
+        </button>
+      </div>
+      <div class="space-y-2">
+        <button class="add-source w-full flex items-center gap-3 p-3 rounded-xl text-left hover:bg-surface-container-highest transition-colors cursor-pointer" data-source="text">
+          <span class="w-10 h-10 shrink-0 flex items-center justify-center rounded-lg bg-primary/15 text-primary"><span class="material-symbols-outlined text-[22px]">article</span></span>
+          <span class="min-w-0 flex-1">
+            <span class="block text-sm font-medium text-on-surface">Text</span>
+            <span class="block text-xs text-on-surface-variant">Paste or type text</span>
+          </span>
+          <span class="material-symbols-outlined text-[20px] text-on-surface-variant/50">chevron_right</span>
+        </button>
+        <button class="add-source w-full flex items-center gap-3 p-3 rounded-xl text-left hover:bg-surface-container-highest transition-colors cursor-pointer" data-source="url">
+          <span class="w-10 h-10 shrink-0 flex items-center justify-center rounded-lg bg-primary/15 text-primary"><span class="material-symbols-outlined text-[22px]">link</span></span>
+          <span class="min-w-0 flex-1">
+            <span class="block text-sm font-medium text-on-surface">URL</span>
+            <span class="block text-xs text-on-surface-variant">Fetch an article from a link</span>
+          </span>
+          <span class="material-symbols-outlined text-[20px] text-on-surface-variant/50">chevron_right</span>
+        </button>
+        <button class="add-source w-full flex items-center gap-3 p-3 rounded-xl text-left hover:bg-surface-container-highest transition-colors cursor-pointer" data-source="file">
+          <span class="w-10 h-10 shrink-0 flex items-center justify-center rounded-lg bg-primary/15 text-primary"><span class="material-symbols-outlined text-[22px]">description</span></span>
+          <span class="min-w-0 flex-1">
+            <span class="block text-sm font-medium text-on-surface">File</span>
+            <span class="block text-xs text-on-surface-variant">Text, Markdown or PDF</span>
+          </span>
+          <span class="material-symbols-outlined text-[20px] text-on-surface-variant/50">chevron_right</span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Add text modal -->
+  <div id="lib-add-modal" class="fixed inset-0 z-50 hidden items-center justify-center bg-black/50 backdrop-blur-sm">
+    <div class="bg-surface-container-high rounded-2xl p-6 mx-4 max-w-sm w-full shadow-xl border border-outline-variant/20 space-y-4">
+      <p class="text-sm font-semibold text-on-surface">Add text</p>
+      <input id="lib-add-title" type="text" placeholder="Title (optional)" class="w-full bg-surface-container-highest border border-outline-variant/30 rounded-lg px-3 py-2 text-sm text-on-surface placeholder:text-on-surface-variant/50 focus:outline-none focus:ring-1 focus:ring-primary/50" />
+      <textarea id="lib-add-body" rows="6" placeholder="Paste your article or text here..." class="w-full bg-surface-container-highest border border-outline-variant/30 rounded-lg px-3 py-2 text-sm text-on-surface placeholder:text-on-surface-variant/50 focus:outline-none focus:ring-1 focus:ring-primary/50 resize-none"></textarea>
+      <!-- Tag picker, populated by renderPendingTags('text') -->
+      <div data-tagpicker="text"></div>
+      <div class="flex justify-end gap-3">
+        <button id="lib-add-cancel" class="px-4 py-2 text-sm font-medium text-on-surface-variant rounded-lg hover:bg-surface-container-highest transition-colors cursor-pointer">Cancel</button>
+        <button id="lib-add-save" class="px-4 py-2 text-sm font-medium text-on-primary bg-primary rounded-lg hover:brightness-110 transition-colors cursor-pointer">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Add from URL modal -->
+  <div id="add-url-modal" class="fixed inset-0 z-50 hidden items-center justify-center bg-black/50 backdrop-blur-sm">
+    <div class="bg-surface-container-high rounded-2xl p-6 mx-4 max-w-sm w-full shadow-xl border border-outline-variant/20 space-y-4">
+      <p class="text-sm font-semibold text-on-surface">Add from URL</p>
+      <input id="add-url-input" type="url" inputmode="url" autocapitalize="off" autocomplete="off" placeholder="https://example.com/article" class="w-full bg-surface-container-highest border border-outline-variant/30 rounded-lg px-3 py-2 text-sm text-on-surface placeholder:text-on-surface-variant/50 focus:outline-none focus:ring-1 focus:ring-primary/50" />
+      <p class="text-xs text-on-surface-variant">We'll fetch the page and pull out the article text.</p>
+      <!-- Tag picker, populated by renderPendingTags('url') -->
+      <div data-tagpicker="url"></div>
+      <div class="flex justify-end gap-3">
+        <button id="add-url-cancel" class="px-4 py-2 text-sm font-medium text-on-surface-variant rounded-lg hover:bg-surface-container-highest transition-colors cursor-pointer">Cancel</button>
+        <button id="add-url-save" class="px-4 py-2 text-sm font-medium text-on-primary bg-primary rounded-lg hover:brightness-110 transition-colors cursor-pointer">Add</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Hidden picker for File import; accept is set in main.js
+       (pickImportFile). Not shown directly — its click is triggered
+       programmatically from the chooser modal. -->
+  <input id="import-file-input" type="file" class="hidden" />
+
+  <!-- Feeds tab (RSS subscriptions) -->
+  <div id="feeds" class="tab-panel hidden flex-1 flex flex-col px-5 py-6 min-h-0">
+    <div class="flex items-center justify-between mb-4">
+      <div>
+        <h2 class="text-xl font-bold tracking-tight text-on-surface">Feeds</h2>
+        <p class="text-xs text-on-surface-variant mt-0.5">Newsletters pulled into your library</p>
+      </div>
+      <div class="flex items-center gap-2">
+        <button id="feeds-refresh" class="text-xs font-semibold text-on-surface-variant hover:text-primary transition-colors px-3 py-1.5 rounded-lg hover:bg-primary/10 cursor-pointer">Refresh</button>
+        <button id="feed-add-btn" class="text-xs font-semibold text-on-primary bg-primary px-3 py-1.5 rounded-lg hover:brightness-110 transition-colors cursor-pointer">Add feed</button>
+      </div>
+    </div>
+    <!-- Pull-to-refresh: indicator rides in the gap that opens as the list is
+         dragged down; overflow-hidden clips it when parked above. -->
+    <div class="relative flex-1 min-h-0 overflow-hidden">
+      <div id="feeds-ptr" class="pointer-events-none absolute inset-x-0 top-0 z-10 flex h-12 items-center justify-center gap-2 text-on-surface-variant" style="transform:translateY(-100%)">
+        <span id="feeds-ptr-icon" class="material-symbols-outlined text-[20px] transition-transform duration-200">arrow_downward</span>
+        <span id="feeds-ptr-text" class="text-xs font-medium">Pull to refresh</span>
+      </div>
+      <div id="feeds-scroll" class="h-full overflow-y-auto" style="overscroll-behavior-y:contain">
+        <div id="feeds-list" class="space-y-2"></div>
+        <div id="feeds-empty" class="hidden flex flex-col items-center justify-center pt-16 text-on-surface-variant">
+          <span class="material-symbols-outlined text-4xl mb-3 opacity-30">rss_feed</span>
+          <p class="text-sm">No feeds yet</p>
+          <p class="text-xs mt-1 opacity-70">Tap "Add feed" to follow a newsletter's RSS</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Feed entries view (opened from Feeds; not a nav item) -->
+  <div id="feed-entries" class="tab-panel hidden flex-1 flex flex-col px-5 py-6 min-h-0">
+    <div class="flex items-center gap-2 mb-3">
+      <button id="feed-entries-back" class="text-on-surface-variant hover:text-on-surface p-1 -ml-1 rounded-lg hover:bg-surface-container-highest transition-colors cursor-pointer">
+        <span class="material-symbols-outlined">arrow_back</span>
+      </button>
+      <h2 id="feed-entries-title" class="text-base font-bold tracking-tight text-on-surface truncate flex-1">Feed</h2>
+    </div>
+    <label class="flex items-center justify-between bg-surface-container-low rounded-xl px-4 py-3 mb-3 cursor-pointer">
+      <span class="text-sm font-medium text-on-surface">Auto-add new articles</span>
+      <span class="relative inline-flex items-center">
+        <input id="feed-auto-add" type="checkbox" class="sr-only peer" />
+        <div class="w-9 h-5 bg-outline-variant/40 rounded-full peer peer-checked:bg-primary transition-colors after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:translate-x-full"></div>
+      </span>
+    </label>
+    <div id="feed-entries-scroll" class="flex-1 min-h-0 overflow-y-auto">
+      <div id="feed-entries-list" class="space-y-2"></div>
+    </div>
+  </div>
+
+  <!-- Add feed modal -->
+  <div id="feed-add-modal" class="fixed inset-0 z-50 hidden items-center justify-center bg-black/50 backdrop-blur-sm">
+    <div class="bg-surface-container-high rounded-2xl p-6 mx-4 max-w-sm w-full shadow-xl border border-outline-variant/20 space-y-4">
+      <p class="text-sm font-semibold text-on-surface">Add feed</p>
+      <input id="feed-add-url" type="url" placeholder="Site or feed URL" class="w-full bg-surface-container-highest border border-outline-variant/30 rounded-lg px-3 py-2 text-sm text-on-surface placeholder:text-on-surface-variant/50 focus:outline-none focus:ring-1 focus:ring-primary/50" />
+      <div class="flex justify-end gap-3">
+        <button id="feed-add-cancel" class="px-4 py-2 text-sm font-medium text-on-surface-variant rounded-lg hover:bg-surface-container-highest transition-colors cursor-pointer">Cancel</button>
+        <button id="feed-add-save" class="px-4 py-2 text-sm font-medium text-on-primary bg-primary rounded-lg hover:brightness-110 transition-colors cursor-pointer">Add</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Edit feed modal -->
+  <div id="feed-edit-modal" class="fixed inset-0 z-50 hidden items-center justify-center bg-black/50 backdrop-blur-sm">
+    <div class="bg-surface-container-high rounded-2xl p-6 mx-4 max-w-sm w-full shadow-xl border border-outline-variant/20 space-y-4">
+      <p class="text-sm font-semibold text-on-surface">Edit feed</p>
+      <input id="feed-edit-title" type="text" placeholder="Title" class="w-full bg-surface-container-highest border border-outline-variant/30 rounded-lg px-3 py-2 text-sm text-on-surface placeholder:text-on-surface-variant/50 focus:outline-none focus:ring-1 focus:ring-primary/50" />
+      <input id="feed-edit-url" type="url" inputmode="url" autocapitalize="off" autocomplete="off" placeholder="Feed URL" class="w-full bg-surface-container-highest border border-outline-variant/30 rounded-lg px-3 py-2 text-sm text-on-surface placeholder:text-on-surface-variant/50 focus:outline-none focus:ring-1 focus:ring-primary/50" />
+      <div class="flex justify-end gap-3">
+        <button id="feed-edit-cancel" class="px-4 py-2 text-sm font-medium text-on-surface-variant rounded-lg hover:bg-surface-container-highest transition-colors cursor-pointer">Cancel</button>
+        <button id="feed-edit-save" class="px-4 py-2 text-sm font-medium text-on-primary bg-primary rounded-lg hover:brightness-110 transition-colors cursor-pointer">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Reader display settings (font / size / paper), one global setting -->
+  <div id="reader-sheet" class="fixed inset-0 z-50 hidden">
+    <div id="reader-sheet-overlay" class="absolute inset-0 bg-black/50"></div>
+    <div class="sheet-anim absolute bottom-0 left-0 right-0 bg-surface-container-high rounded-t-2xl shadow-xl border-t border-outline-variant/20" style="padding-bottom: max(1.25rem, env(safe-area-inset-bottom));">
+      <div class="w-10 h-1 bg-outline-variant/40 rounded-full mx-auto mt-3 mb-4"></div>
+
+      <p class="text-sm font-bold text-on-surface px-5 mb-2">Font</p>
+      <div id="reader-fonts" class="flex gap-2 px-5 mb-5">
+        <button data-font="sans" class="reader-chip flex-1 min-h-11 rounded-xl text-sm font-semibold border border-outline-variant/30 bg-surface-container-highest text-on-surface-variant transition-colors cursor-pointer">Sans</button>
+        <button data-font="serif" style="font-family: Georgia, 'Times New Roman', serif" class="reader-chip flex-1 min-h-11 rounded-xl text-base font-semibold border border-outline-variant/30 bg-surface-container-highest text-on-surface-variant transition-colors cursor-pointer">Serif</button>
+        <button data-font="book" style="font-family: Charter, 'Bitstream Charter', Cambria, serif" class="reader-chip flex-1 min-h-11 rounded-xl text-base font-semibold border border-outline-variant/30 bg-surface-container-highest text-on-surface-variant transition-colors cursor-pointer">Book</button>
+      </div>
+
+      <p class="text-sm font-bold text-on-surface px-5 mb-2">Text size</p>
+      <div class="flex items-center gap-3 px-5 mb-5">
+        <span class="text-xs text-on-surface-variant">A</span>
+        <input id="reader-size-range" type="range" min="85" max="140" step="5" value="100" class="flex-1 accent-primary" />
+        <span class="text-lg text-on-surface-variant">A</span>
+        <span id="reader-size-label" class="text-xs font-mono text-on-surface-variant w-10 text-right tabular-nums">100%</span>
+      </div>
+
+      <p class="text-sm font-bold text-on-surface px-5 mb-2">Background</p>
+      <div id="reader-backgrounds" class="flex gap-2 px-5">
+        <button data-bg="" class="reader-bgchip flex-1 min-h-14 rounded-xl text-xs font-semibold border border-outline-variant/30 bg-surface text-on-surface transition-colors cursor-pointer">Default</button>
+        <button data-bg="white" class="reader-bgchip flex-1 min-h-14 rounded-xl text-xs font-semibold border border-outline-variant/30 bg-white text-neutral-800 transition-colors cursor-pointer">White</button>
+        <button data-bg="sepia" class="reader-bgchip flex-1 min-h-14 rounded-xl text-xs font-semibold border border-outline-variant/30 bg-[#f6ecd9] text-[#5c4c33] transition-colors cursor-pointer">Sepia</button>
+        <button data-bg="dark" class="reader-bgchip flex-1 min-h-14 rounded-xl text-xs font-semibold border border-outline-variant/30 bg-[#121212] text-[#c8c4bc] transition-colors cursor-pointer">Dark</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="debug" class="tab-panel hidden flex-1 overflow-y-auto px-5 py-6 flex flex-col">
+    <div class="flex items-center justify-between mb-4">
+      <h2 class="text-xl font-bold tracking-tight text-on-surface">Logs</h2>
+      <div class="flex gap-2">
+        <button id="copy-logs" class="text-xs font-semibold text-on-surface-variant hover:text-on-surface px-3 py-1.5 rounded-lg hover:bg-surface-container-highest transition-colors">Copy</button>
+        <button id="clear-logs" class="text-xs font-semibold text-on-surface-variant hover:text-error px-3 py-1.5 rounded-lg hover:bg-error/10 transition-colors">Clear</button>
+      </div>
+    </div>
+    <div id="log-output" class="flex-1 min-h-0 bg-surface-container-lowest rounded-xl border border-outline-variant/20 p-3 overflow-y-auto font-mono text-xs leading-relaxed"></div>
+  </div>
+
+  <nav id="bottom-nav" class="shrink-0 bg-surface-container-low border-t border-outline-variant/20 flex items-stretch justify-around px-1 pt-1" style="padding-bottom: max(0.25rem, env(safe-area-inset-bottom));"></nav>
+
+  <!-- Overflow ("More") sheet -->
+  <div id="nav-more-sheet" class="fixed inset-0 z-50 hidden">
+    <div id="nav-more-overlay" class="absolute inset-0 bg-black/50"></div>
+    <div class="sheet-anim absolute bottom-0 left-0 right-0 bg-surface-container-high rounded-t-2xl shadow-xl border-t border-outline-variant/20 max-h-[70vh] flex flex-col" style="padding-bottom: max(1.25rem, env(safe-area-inset-bottom));">
+      <div class="w-10 h-1 bg-outline-variant/40 rounded-full mx-auto mt-3 mb-4 shrink-0"></div>
+      <p class="text-sm font-bold text-on-surface px-5 mb-2 shrink-0">More</p>
+      <div id="nav-more-list" class="overflow-y-auto px-3 pb-2"></div>
+    </div>
+  </div>
+
+  <!-- Library row long-press action sheet -->
+  <div id="lib-action-sheet" class="fixed inset-0 z-50 hidden">
+    <div id="lib-action-overlay" class="absolute inset-0 bg-black/50"></div>
+    <div class="sheet-anim absolute bottom-0 left-0 right-0 bg-surface-container-high rounded-t-2xl shadow-xl border-t border-outline-variant/20 max-h-[70vh] flex flex-col" style="padding-bottom: max(1.25rem, env(safe-area-inset-bottom));">
+      <div class="w-10 h-1 bg-outline-variant/40 rounded-full mx-auto mt-3 mb-4 shrink-0"></div>
+      <p id="lib-action-title" class="text-sm font-bold text-on-surface px-5 mb-2 shrink-0 truncate">Item</p>
+      <div id="lib-action-list" class="overflow-y-auto px-3 pb-2"></div>
+    </div>
+  </div>
+
+  <!-- Shared tag editor (library): current tags, a free-text add, and every
+       tag already in use as one-tap chips (typing a tag twice is how tag sets
+       rot). Populated by openTagSheet(). -->
+  <div id="tag-sheet" class="fixed inset-0 z-50 hidden">
+    <div id="tag-sheet-overlay" class="absolute inset-0 bg-black/50"></div>
+    <div class="sheet-anim absolute bottom-0 left-0 right-0 bg-surface-container-high rounded-t-2xl shadow-xl border-t border-outline-variant/20 max-h-[75vh] flex flex-col" style="padding-bottom: max(1.25rem, env(safe-area-inset-bottom));">
+      <div class="w-10 h-1 bg-outline-variant/40 rounded-full mx-auto mt-3 mb-4 shrink-0"></div>
+      <div id="tag-sheet-body" class="overflow-y-auto px-5 pb-3"></div>
+    </div>
+  </div>
+
+  <!-- Confirm dialog (replaces window.confirm which doesn't work in WKWebView) -->
+
+  <div id="confirm-dialog" class="fixed inset-0 z-50 hidden items-center justify-center bg-black/50 backdrop-blur-sm">
+    <div class="bg-surface-container-high rounded-2xl p-6 mx-4 max-w-sm w-full shadow-xl border border-outline-variant/20">
+      <p id="confirm-msg" class="text-sm text-on-surface mb-5"></p>
+      <div class="flex justify-end gap-3">
+        <button id="confirm-cancel" class="px-4 py-2 text-sm font-medium text-on-surface-variant rounded-lg hover:bg-surface-container-highest transition-colors cursor-pointer">Cancel</button>
+        <button id="confirm-ok" class="px-4 py-2 text-sm font-medium text-on-primary bg-error rounded-lg hover:brightness-110 transition-colors cursor-pointer">Delete</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Text-input dialog (window.prompt is unavailable in the webview) -->
+  <div id="prompt-dialog" class="fixed inset-0 z-50 hidden items-center justify-center bg-black/50 backdrop-blur-sm">
+    <div class="bg-surface-container-high rounded-2xl p-6 mx-4 max-w-sm w-full shadow-xl border border-outline-variant/20">
+      <p id="prompt-msg" class="text-sm font-medium text-on-surface mb-3"></p>
+      <input id="prompt-input" type="text" spellcheck="false" autocomplete="off" class="w-full bg-surface-container-highest border border-outline-variant/30 rounded-lg px-3 py-2 text-sm text-on-surface placeholder:text-on-surface-variant/50 focus:outline-none focus:ring-1 focus:ring-primary/50 transition-colors" />
+      <!-- Past names, filtered as you type (see showPrompt's `suggestions`) -->
+      <div id="prompt-suggestions" hidden class="mt-2 max-h-40 overflow-y-auto flex flex-col gap-0.5"></div>
+      <div class="flex justify-end gap-3 mt-5">
+        <button id="prompt-cancel" class="px-4 py-2 text-sm font-medium text-on-surface-variant rounded-lg hover:bg-surface-container-highest transition-colors cursor-pointer">Cancel</button>
+        <button id="prompt-ok" class="px-4 py-2 text-sm font-medium text-on-primary bg-primary rounded-lg hover:brightness-110 transition-colors cursor-pointer">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Decorative background glow -->
+  <div class="fixed top-[-20%] right-[-10%] w-[30rem] h-[30rem] bg-primary/5 rounded-full blur-[120px] pointer-events-none -z-10"></div>
+  <div class="fixed bottom-[-20%] left-[-5%] w-[20rem] h-[20rem] bg-secondary/5 rounded-full blur-[100px] pointer-events-none -z-10"></div>
+
+</body>
+</html>

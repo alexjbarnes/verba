@@ -1,0 +1,100 @@
+package com.alexb151.verba
+
+import android.content.Intent
+import android.os.Bundle
+import android.webkit.WebView
+import androidx.activity.OnBackPressedCallback
+import androidx.activity.enableEdgeToEdge
+
+class MainActivity : TauriActivity() {
+  // Captured in setContentView() below, where Wry hands us the WebView
+  // instance. Used by the back-gesture callback to reach the page; null
+  // means there's nothing to route the press to.
+  private var webView: WebView? = null
+
+  override fun onCreate(savedInstanceState: Bundle?) {
+    val err = VerbaApp.nativeLoadError
+    if (err != null) {
+      super.onCreate(savedInstanceState)
+      val tv = android.widget.TextView(this)
+      tv.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 14f)
+      tv.setPadding(32, 100, 32, 32)
+      tv.text = "Native library failed to load:\n\n$err"
+      setContentView(tv)
+      // No webview on this path -- skip registering the back callback below
+      // so the system default (finish/background) handles the press.
+      return
+    }
+    enableEdgeToEdge()
+    super.onCreate(savedInstanceState)
+    // Cold start via a share: the native lib is loaded here, but the webview
+    // (and its `shared-text` listener) isn't ready yet, so the text is stashed
+    // in Rust and the frontend pulls it once it initializes.
+    handleSharedIntent(intent)
+
+    // Route back presses/gestures into in-app JS navigation (e.g. article
+    // view -> library) before falling back to backgrounding the app.
+    // TauriActivity sets handleBackNavigation = false, so Wry's own
+    // canGoBack()/goBack() callback (WryActivity.setWebView) never gets
+    // registered -- this is the only back handler on this activity.
+    //
+    // evaluateJavascript() is async and a back dispatch can't block waiting
+    // on it, so the callback consumes the press up front (enabled=true,
+    // never toggled) and decides moveTaskToBack() once the JS result comes
+    // back. Tradeoff: a predictive-back swipe preview couldn't show an
+    // "app closing" hint mid-gesture, since the outcome isn't known until
+    // after the gesture finishes. Moot for now -- enableOnBackInvokedCallback
+    // isn't set in AndroidManifest.xml, so predictive back isn't opted into
+    // and no preview is shown regardless.
+    onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+      override fun handleOnBackPressed() {
+        val wv = webView
+        if (wv == null) {
+          moveTaskToBack(true)
+          return
+        }
+        wv.evaluateJavascript("window.verbaHandleBack ? window.verbaHandleBack() : false") { result ->
+          // "true" means JS already navigated in-app. Anything else --
+          // "false", a torn-down page returning null, etc. -- backgrounds
+          // the app instead of letting the activity finish, so state isn't
+          // lost the way finish() would lose it.
+          if (result != "true") {
+            moveTaskToBack(true)
+          }
+        }
+      }
+    })
+  }
+
+  // singleTask launch mode: a share while the app is already running arrives
+  // here rather than as a fresh onCreate.
+  override fun onNewIntent(intent: Intent) {
+    super.onNewIntent(intent)
+    setIntent(intent)
+    handleSharedIntent(intent)
+  }
+
+  private fun handleSharedIntent(intent: Intent?) {
+    if (VerbaApp.nativeLoadError != null) return
+    if (intent?.action != Intent.ACTION_SEND) return
+    if (intent.type?.startsWith("text/") != true) return
+    // EXTRA_TEXT is a CharSequence by contract. Senders that share a styled
+    // selection hand over a Spanned, and getStringExtra() returns null for
+    // anything that isn't a String (Bundle.typeWarning), silently dropping
+    // the share.
+    val text = intent.getCharSequenceExtra(Intent.EXTRA_TEXT)?.toString() ?: return
+    if (text.isBlank()) return
+    try {
+      VerbaApp.nativeSharedText(text)
+    } catch (e: Throwable) {
+      android.util.Log.e("MainActivity", "nativeSharedText failed", e)
+    }
+  }
+
+  override fun setContentView(view: android.view.View?) {
+    if (view is WebView) {
+      webView = view
+    }
+    super.setContentView(view)
+  }
+}

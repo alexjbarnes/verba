@@ -1,0 +1,345 @@
+/* ── Self-hosted fonts ───────────────────────────────────────────────────
+   Vendored from Google Fonts into src/fonts/ rather than <link>ed from
+   fonts.googleapis.com. Same reason as the vendored Tailwind: a cold or
+   auto-launch before the network is up left the app in a system font with
+   icon names shown as literal words ("settings", "search"). Local woff2 can't
+   fail that way. font-display: swap keeps text visible while the file loads.
+
+   Inter is the UI face (Tailwind maps font-sans -> Inter); one variable file
+   per subset covers weights 400-700. Material Symbols provides the icon
+   glyphs — its .material-symbols-outlined rules (esp. the 'liga' feature that
+   turns "settings" into the gear glyph) came from Google's CSS and MUST be
+   replicated here, or every icon renders as its name. */
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url('/fonts/inter-latin.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url('/fonts/inter-latin-ext.woff2') format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: 'Material Symbols Outlined';
+  font-style: normal;
+  font-weight: 100 700;
+  font-display: swap;
+  src: url('/fonts/material-symbols-outlined.woff2') format('woff2');
+}
+.material-symbols-outlined {
+  font-family: 'Material Symbols Outlined';
+  font-weight: normal;
+  font-style: normal;
+  font-size: 24px;
+  line-height: 1;
+  letter-spacing: normal;
+  text-transform: none;
+  display: inline-block;
+  white-space: nowrap;
+  word-wrap: normal;
+  direction: ltr;
+  -webkit-font-feature-settings: 'liga';
+  font-feature-settings: 'liga';
+  -webkit-font-smoothing: antialiased;
+}
+
+/* The `hidden` ATTRIBUTE always wins. Tailwind display utilities (flex,
+   inline-flex, grid…) sit at the same specificity as the UA's [hidden] rule
+   and come later, so `<button hidden class="flex">` renders VISIBLE — which
+   silently broke the search-clear buttons and any element toggled via
+   `el.hidden = true`. Elements toggled by the `hidden` CLASS are unaffected. */
+[hidden] {
+  display: none !important;
+}
+
+/* Safe area insets for Android/iOS status bar */
+body {
+  padding-top: env(safe-area-inset-top);
+  padding-bottom: env(safe-area-inset-bottom);
+  padding-left: env(safe-area-inset-left);
+  padding-right: env(safe-area-inset-right);
+}
+
+/* Allow selecting/copying text content. The Android WebView disables
+   long-press selection by default, so enable it explicitly on text areas. */
+#log-output,
+#history-list,
+#tts-text,
+#reading-text,
+.selectable {
+  -webkit-user-select: text;
+  user-select: text;
+  -webkit-touch-callout: default;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgb(var(--c-outline-variant)); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: rgb(var(--c-outline)); }
+
+/* Remove default input styling */
+input[type="number"]::-webkit-inner-spin-button,
+input[type="number"]::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+select {
+  -webkit-appearance: none;
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23767575' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  padding-right: 28px;
+}
+
+/* Progress bar */
+.progress-bar {
+  height: 6px;
+  border-radius: 3px;
+  background: rgb(var(--c-surface-container-highest));
+  overflow: hidden;
+}
+.progress-bar-fill {
+  height: 100%;
+  border-radius: 3px;
+  background: rgb(var(--c-primary));
+  transition: width 0.3s ease;
+}
+
+/* Collapsible Settings groups: the header stays a scannable index, the body
+   folds away. Toggling `.collapsed` on the group hides the body and rotates
+   the chevron. */
+.settings-chevron {
+  transition: transform 0.2s ease;
+}
+.settings-group.collapsed .settings-group-body {
+  display: none;
+}
+.settings-group.collapsed .settings-chevron {
+  transform: rotate(-90deg);
+}
+@media (prefers-reduced-motion: reduce) {
+  .settings-chevron { transition: none; }
+}
+
+/* Pill switch track + thumb (Speak/Listen, Articles/Archive). The shadows are
+   per-theme variables (see index.html palettes): dark builds its recess from a
+   translucent black well + lip highlight since black inset shadows vanish on
+   near-black surfaces. */
+.pill-track {
+  background: var(--pill-track-bg);
+  box-shadow: var(--pill-track-shadow);
+}
+.pill-thumb {
+  background: var(--pill-thumb-bg);
+  box-shadow: var(--pill-thumb-shadow);
+}
+
+/* Mobile: disable drag region */
+@media (max-width: 640px) {
+  [data-tauri-drag-region] {
+    -webkit-app-region: none;
+  }
+}
+
+/* The reader keeps article newlines with pre-wrap, but a single long token (a
+   URL, a long identifier) has nothing to wrap at and pushes the width out,
+   giving the page a horizontal scrollbar. Let long tokens break so they wrap. */
+#reading-text {
+  overflow-wrap: break-word;
+  word-break: break-word;
+}
+
+/* Reading view word highlighting */
+#reading-text .rw-active {
+  background: rgb(var(--c-primary) / 0.28);
+  color: rgb(var(--c-on-surface));
+  border-radius: 4px;
+}
+
+/* Buffering spinner on the player play/pause button */
+@keyframes tts-spin { to { transform: rotate(360deg); } }
+.tts-spin { animation: tts-spin 0.9s linear infinite; }
+
+/* Words are tappable to jump playback there */
+#reading-text .rw {
+  cursor: pointer;
+  border-radius: 4px;
+}
+@media (hover: hover) {
+  #reading-text .rw:hover {
+    background: rgb(var(--c-primary) / 0.15);
+  }
+}
+
+/* ── Motion (v2 polish) ──
+   Entrance choreography: list cards rise in with a per-row stagger (--i set
+   inline by the renderers, capped so long lists don't crawl), sheets slide
+   up on unhide (display:none -> block restarts the animation, so plain
+   class-list toggling gets the motion for free), and the card progress
+   edges grow from the left on render. All of it collapses to nothing under
+   prefers-reduced-motion. */
+@keyframes rise {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: none; }
+}
+.stagger-in {
+  animation: rise 0.26s cubic-bezier(0.2, 0, 0, 1) both;
+  animation-delay: calc(min(var(--i, 0), 8) * 26ms);
+}
+@keyframes sheet-up {
+  from { opacity: 0.4; transform: translateY(24px); }
+  to { opacity: 1; transform: none; }
+}
+.sheet-anim { animation: sheet-up 0.22s cubic-bezier(0.2, 0, 0, 1); }
+@media (prefers-reduced-motion: reduce) {
+  .stagger-in, .sheet-anim { animation: none; }
+}
+
+/* ── Cover tiles (v2) ──
+   Deterministic artwork: a gradient pair picked from the title hash plus an
+   oversized monogram. Gives text-only lists visual texture without any real
+   cover art. Gradients live here (not per-element style attrs) so both
+   themes can tune them in one place. */
+.cover {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: rgb(255 255 255 / 0.82);
+  font-weight: 700;
+  overflow: hidden;
+  flex-shrink: 0;
+  text-transform: uppercase;
+}
+.cover-0 { background: linear-gradient(135deg, #4863ff, #9ba8ff); }
+.cover-1 { background: linear-gradient(135deg, #5a52c7, #9891fe); }
+.cover-2 { background: linear-gradient(135deg, #2849ee, #7c6fe8); }
+.cover-3 { background: linear-gradient(135deg, #6d3fd4, #b79bff); }
+.cover-4 { background: linear-gradient(135deg, #3652e1, #6fb3e8); }
+.cover-5 { background: linear-gradient(135deg, #8a3fb8, #f68dda); }
+.cover-6 { background: linear-gradient(135deg, #3b6fd4, #9ba8ff); }
+.cover-7 { background: linear-gradient(135deg, #4a45a8, #8999ff); }
+[data-theme="light"] .cover { color: rgb(255 255 255 / 0.92); }
+
+/* ── Raised nav button clearance ──
+   The Add button is a circular FAB that sits 16px proud of the bar
+   of the bar (56px circle, -1.25rem margin against the bar's 0.25rem top pad),
+   so they float over the bottom of whatever is scrolled beneath them. In those
+   modes the scrolling surface gets a taller bottom pad: the panels' usual
+   1.5rem plus the overhang plus a little air.
+
+   Padding has to land on the element that actually scrolls, exactly once.
+   Panels come in two shapes: `flex flex-col` ones delegate scrolling to a
+   child, the rest scroll themselves — so :not(.flex) picks the self-scrollers
+   without double-padding the others. #feeds-scroll is the one scroller sitting
+   a level deeper, under its pull-to-refresh wrapper. */
+body.has-nav-fab .tab-panel:not(.flex).overflow-y-auto,
+body.has-nav-fab .tab-panel > .overflow-y-auto,
+body.has-nav-fab #feeds-scroll {
+  padding-bottom: 3rem;
+}
+
+/* ── Seek bar touch handling ──
+   Both scrub bars drive their drags from pointer events. That needs
+   `touch-action: none`: without it the browser is free to claim a finger drag
+   as a page scroll and deliver `pointercancel` instead of `pointermove`, which
+   aborts the seek halfway through. Nothing else in the app sets touch-action,
+   so it has to be stated here.
+
+   The mini-player's track is 4px tall — fine to look at, far too small to hit
+   with a thumb, and the "open full player" handle sits directly above it, so a
+   near miss opens the sheet instead of seeking. The pseudo-element enlarges the
+   hit area to ~24px without moving anything visually. It reaches further down
+   than up, because up is where that handle lives and it still needs to be
+   tappable. */
+#tts-progress-track,
+#np-track {
+  touch-action: none;
+}
+
+#tts-progress-track::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: -6px;
+  bottom: -14px;
+}
+
+/* ── Reader paper themes ──
+   The reading panel recolours as a whole (header + text) via a data-bg
+   attribute; utility classes inside would win over inheritance, so the text
+   colour is forced with !important. Images are untouched. */
+#reading[data-bg] {
+  transition: background-color 0.2s;
+}
+#reading[data-bg="white"] { background-color: #ffffff; }
+#reading[data-bg="sepia"] { background-color: #f6ecd9; }
+#reading[data-bg="dark"] { background-color: #121212; }
+
+#reading[data-bg="white"] :is(#reading-text, #reading-text *:not(img)),
+#reading[data-bg="sepia"] :is(#reading-text, #reading-text *:not(img)) {
+  color: var(--reader-ink, #1c1c1e) !important;
+}
+#reading[data-bg="sepia"] {
+  --reader-ink: #46392a;
+}
+#reading[data-bg="dark"] { --reader-ink: #c8c4bc; }
+#reading[data-bg="dark"] :is(#reading-text, #reading-text *:not(img)) {
+  color: var(--reader-ink) !important;
+}
+
+/* Header chrome follows the paper too. */
+#reading[data-bg="white"] :is(#reading-title, #reading-back span, #reading-format span, #reading-menu span),
+#reading[data-bg="dark"] :is(#reading-title, #reading-back span, #reading-format span, #reading-menu span),
+#reading[data-bg="sepia"] :is(#reading-title, #reading-back span, #reading-format span, #reading-menu span) {
+  color: var(--reader-chrome) !important;
+}
+#reading[data-bg="white"] { --reader-chrome: #444746; }
+#reading[data-bg="sepia"] { --reader-chrome: #5c4c33; }
+#reading[data-bg="dark"] { --reader-chrome: #a8a49c; }
+
+/* Selected chips in the reader sheet. */
+.reader-chip[data-on="1"],
+.reader-bgchip[data-on="1"] {
+  border-color: rgb(var(--c-primary) / 0.6);
+  background: rgb(var(--c-primary) / 0.15);
+  color: rgb(var(--c-primary));
+}
+
+/* ── Reader scrollbar ──
+   The scroller cancels the panel's right padding so the bar hugs the screen
+   edge (text keeps its own padding). The thumb is transparent while idle and
+   fades in via scrollbar-color while `.scrolling` is set by main.js. */
+#reading-text {
+  margin-right: -1.25rem;
+  padding-right: 1.25rem;
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+  transition: scrollbar-color 0.4s;
+}
+#reading-text.scrolling {
+  scrollbar-color: var(--sb-thumb, rgb(var(--c-on-surface) / 0.3)) transparent;
+}
+/* Older WebViews ignore scrollbar-color; these webkit rules are the fallback
+   that actually makes the thumb vanish when idle. */
+#reading-text::-webkit-scrollbar { width: 3px; background: transparent; }
+#reading-text::-webkit-scrollbar-thumb {
+  background: transparent;
+  border-radius: 3px;
+}
+#reading-text.scrolling::-webkit-scrollbar-thumb {
+  background: var(--sb-thumb, rgb(var(--c-on-surface) / 0.3));
+}
+#reading[data-bg="white"] #reading-text { --sb-thumb: rgb(0 0 0 / 0.3); }
+#reading[data-bg="sepia"] #reading-text { --sb-thumb: rgb(70 57 42 / 0.35); }
+#reading[data-bg="dark"] #reading-text { --sb-thumb: rgb(255 255 255 / 0.28); }

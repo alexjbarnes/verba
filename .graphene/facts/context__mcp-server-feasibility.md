@@ -1,0 +1,10 @@
+---
+category: context
+subject: mcp-server-feasibility
+---
+
+Assessed 2026-10-04 (user asked whether Verba could expose an MCP server to another app or PWA, then asked about Android App Functions). Android has no MCP binding: an app hosts a normal MCP server. Practical shape is Streamable HTTP (single POST endpoint, optional SSE reply) on 127.0.0.1, since stdio needs the client to launch the process. Spec also permits custom transports and suggests reusing stdio newline-delimited framing over TCP/Unix sockets for native-to-native. Verba fits: Rust backend + official Rust SDK (Tier 1) hosting tools like library_list/library_get/save_url. Constraints: loopback is shared across apps so it needs a bearer token; the server dies with the process unless a foreground service is added; PWA clients need CORS plus Chrome private-network preflight headers.
+
+App Functions (the native alternative, researched same day): platform API android.app.appfunctions + Jetpack androidx.appfunctions (1.0.0-alpha10), Android 16 / API 36, experimental preview. App extends AppFunctionService, annotates suspend methods @AppFunction, param/result classes @AppFunctionSerializable, KDoc is the agent-facing description; KSP generates the concrete service plus an XML schema in assets; manifest declares it with android:permission=BIND_APP_FUNCTION_SERVICE, exported=true, action android.app.appfunctions.AppFunctionService and an app_metadata property. Callers need android.permission.EXECUTE_APP_FUNCTIONS and discover/call via AppFunctionManager; functions run in the app process on the UI thread by default, so use suspend + background dispatchers; results are typed, failures signalled via predefined exceptions. Maturity gates real use: Gemini end-to-end was private preview with trusted testers as of May 2026, limited apps in the pipeline, Early Access Program; testable via adb shell cmd app_function list-app-functions / execute-app-function.
+
+DECISION (user, 2026-10-04): App Functions ruled out because a PWA cannot be a caller (Android-IPC only, caller permission required). If the client is to be a PWA, the loopback HTTP route is the only option. Nothing built either way.
