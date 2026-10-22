@@ -46,6 +46,20 @@ assert.equal(saved[3].body, 'Some notes with https://example.com/x inside them')
 assert.equal(saved[3].url, null);
 assert.equal(opened.length, 1); // still not opened
 
+// Longer text that cites links (a newsletter ending in a sources list) is the
+// share itself, so it is saved as text even though its first link fetches.
+fetchFails = false;
+const roundup = 'Tech roundup\n\n' + 'Meta wrote up its agent orchestrator. '.repeat(10) +
+  '\n\n## Sources\n\n- [Orchestrator](https://example.com/a)\n- [Retries](https://example.com/b)';
+await context.importSharedText(roundup);
+assert.equal(saved[4].body, roundup);
+assert.equal(saved[4].url, null);
+
+// A headline beside the link is still a link share.
+await context.importSharedText('Some headline | Example News\nhttps://example.com/news');
+assert.equal(saved[5].body, 'Article text');
+assert.equal(saved[5].url, 'https://example.com/news');
+
 // Headings survive extraction as markdown-style `##` prefixes and render as
 // demoted heading elements; word counts and search strip the prefixes.
 const text = v => ({ nodeType: 3, nodeValue: v });

@@ -402,8 +402,8 @@ function fmtPubDate(s) {
   return d.toLocaleDateString(undefined, opts);
 }
 
-// Handle text shared to the app from elsewhere. If it contains a URL, fetch the
-// page (in Rust, to dodge CORS) and run Readability to pull the article; plain
+// Handle text shared to the app from elsewhere. If it is a link, fetch the
+// page (in Rust, to dodge CORS) and run Readability to pull the article; other
 // text is saved as-is. Either way it lands in the library without opening the
 // reader, unless requested by the Add-from-URL modal.
 
@@ -420,13 +420,25 @@ async function fetchSharedArticle(url) {
   }
 }
 
+// The URL to fetch for a share, or null when the share is text. Apps sharing a
+// link send the URL alone or beside a headline; anything longer is the content
+// itself (say, a newsletter ending in a sources list) and must not be swapped
+// for the page its first link points to.
+const SHARE_CAPTION_MAX = 300;
+function sharedLink(raw) {
+  const url = (raw.match(/https?:\/\/[^\s]+/) || [])[0];
+  if (!url) return null;
+  const caption = raw.replace(/https?:\/\/[^\s]+/g, ' ').replace(/\s+/g, ' ').trim();
+  return caption.length <= SHARE_CAPTION_MAX ? url : null;
+}
+
 let importingShared = false;
 // `tags` come from the Add-from-URL modal; the Android share path passes none.
 async function importSharedText(text, tags = [], openAfterImport = false) {
   if (importingShared) return; // ignore a duplicate trigger mid-import
   const raw = (text || '').trim();
   if (!raw) return;
-  let url = (raw.match(/https?:\/\/[^\s]+/) || [])[0];
+  let url = sharedLink(raw);
   importingShared = true;
   try {
     let title = null;
