@@ -66,7 +66,7 @@ const text = v => ({ nodeType: 3, nodeValue: v });
 const el2 = (tag, kids) => ({ nodeType: 1, tagName: tag, childNodes: kids, getAttribute: () => null });
 const doc = { body: null, createTextNode: text, querySelectorAll: () => [] };
 class DOMParserStub { parseFromString() { return doc; } }
-const extractCtx = vm.createContext({ DOMParser: DOMParserStub });
+const extractCtx = vm.createContext({ DOMParser: DOMParserStub, URL, normArticleUrl: u => u });
 doc.body = el2('#body', [
   el2('P', [text('population is increasing.')]),
   el2('H2', [text('Government reaction')]),
@@ -87,6 +87,21 @@ doc.body = el2('#body', [
 assert.equal(
   extractCtx.bodyWithImages('<p>x</p>', 'https://x/'),
   'I have a lot of mixed feelings, about this.\n\nline one\n  indented');
+
+// A quote keeps a `> ` on every line, with a bare `>` between its paragraphs
+// so it stays one quote. A space just inside a link still separates it from
+// the next word.
+const link = { getAttribute: n => (n === 'href' ? 'https://x/p' : null), textContent: 'Parkinson’s ' };
+const para = el2('P', [text('story of '), link, text('is one.')]);
+link.replaceWith = node => { para.childNodes[1] = node; };
+doc.querySelectorAll = sel => (sel === 'a' ? [link] : []);
+doc.body = el2('#body', [para, el2('BLOCKQUOTE', [
+  text('\n  '), el2('P', [text('First.')]), text('\n  '), el2('P', [text('Second.')]), text('\n'),
+])]);
+assert.equal(
+  extractCtx.bodyWithImages('<p>x</p>', 'https://x/'),
+  'story of [Parkinson’s](https://x/p) is one.\n\n> First.\n>\n> Second.');
+doc.querySelectorAll = () => [];
 
 const el = { innerHTML: '', scrollTop: 0 };
 const renderCtx = vm.createContext({
@@ -114,6 +129,15 @@ assert.match(el.innerHTML, /<\/h3>Government reaction\? Body text\./);
 assert.doesNotMatch(el.innerHTML, /<\/h[1-6]>\s/);
 assert.ok(el.innerHTML.includes('Body text.\n\nNext paragraph.'));
 
+// Quote lines render as one blockquote without their prefixes; a line of
+// symbols spaced out with &nbsp; runs is a centred, tightened section break.
+const dinkus = ' ❄' + ' '.repeat(16) + '❄' + ' '.repeat(16) + '❄';
+renderCtx.renderReading(`Intro\n\n> First.\n>\n> Second [x](https://e.com/q)\n\n${dinkus}\n\nAfter.`);
+assert.match(el.innerHTML,
+  /^Intro\n\n<blockquote [^>]*>First\.\n\nSecond <a data-link="https:\/\/e\.com\/q"[^>]*>x<\/a><\/blockquote>\n\n/, el.innerHTML);
+assert.match(el.innerHTML, /\n\n<span class="inline-block w-full text-center"[^>]*>❄ ❄ ❄<\/span>\n\nAfter\./, el.innerHTML);
+assert.ok(!el.innerHTML.includes('&gt;'), el.innerHTML);
+
 // A linked image (<a><img></a>) must unwrap to a bare image marker, not get
 // wrapped in link brackets (render would leave stray brackets around it).
 const linkCtx = vm.createContext({});
@@ -125,5 +149,8 @@ vm.runInContext(source.slice(source.indexOf('const IMG_MARKER'), source.indexOf(
 assert.equal(
   stripCtx.stripImageMarkers('## Head\n\nBody ![img](https://x/y.jpg)\n\n### Sub [link](https://x/y)'),
   'Head\n\nBody \n\nSub link');
+assert.equal(
+  stripCtx.stripImageMarkers('> Quote [a](https://x/a)\n>\n> > Nested\n\nBody'),
+  'Quote a\n\nNested\n\nBody');
 
 console.log('Share import checks passed');

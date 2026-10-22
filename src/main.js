@@ -206,13 +206,13 @@ function extractArticle(html, baseUrl) {
 // lines, so a plain-text body still carries them. The reader renders the
 // markers back into <img> elements; search and word counts strip them via
 // stripImageMarkers. Headings do the same with markdown-style `##` prefixes,
-// links with `[text](url)`.
+// quotes with `> `, links with `[text](url)`.
 const IMG_MARKER = /!\[img\]\((https?:\/\/[^\s)]+)\)/g;
 const LINK_MARKER = /\[([^\]\n]*)\]\((https?:\/\/[^\s)]+)\)/g;
 
 function stripImageMarkers(text) {
   return text.replace(IMG_MARKER, '').replace(LINK_MARKER, '$1')
-    .replace(/^#{1,6} /gm, '');
+    .replace(/^(?:> ?)+/gm, '').replace(/^#{1,6} /gm, '');
 }
 
 function countImageMarkers(text) {
@@ -302,8 +302,13 @@ function bodyWithImages(contentHtml, baseUrl) {
     // ![img] marker at this point; wrapping it in a link marker too would
     // leave orphan brackets once the reader pulls the image out. Unwrap.
     if (/!\[img\]\(/.test(a.textContent)) { a.replaceWith(...a.childNodes); return; }
-    const label = (a.textContent || '').replace(/\s+/g, ' ').trim();
-    a.replaceWith(holder.createTextNode(`[${label || href}](${markerUrl(href)})`));
+    const text = a.textContent || '';
+    const label = text.replace(/\s+/g, ' ').trim();
+    // A space just inside the link still separates it from the next word
+    // ("Parkinson’s </a>is one"), so it moves outside the marker.
+    const lead = /^\s/.test(text) ? ' ' : '';
+    const trail = /\s$/.test(text) ? ' ' : '';
+    a.replaceWith(holder.createTextNode(`${lead}[${label || href}](${markerUrl(href)})${trail}`));
   });
   holder.querySelectorAll('picture:empty, source').forEach(n => n.remove());
 
@@ -353,6 +358,16 @@ function bodyWithImages(contentHtml, baseUrl) {
         out.push(`\n\n${'#'.repeat(+tag[1])} `);
         walk(child, inPre);
         out.push('\n\n');
+      } else if (tag === 'BLOCKQUOTE') {
+        // Every line of a quote carries a markdown-style `> ` (a bare `>` on
+        // the blank lines between its paragraphs, so it stays one quote) and
+        // the reader sets it apart. A quote nested in a quote nests prefixes.
+        out.push('\n\n');
+        const start = out.length;
+        walk(child, inPre);
+        const quote = tidyBody(out.splice(start).join(''));
+        if (quote) out.push(quote.split('\n').map(l => (l ? '> ' + l : '>')).join('\n'));
+        out.push('\n\n');
       } else if (BLOCK_TAGS.has(tag)) {
         out.push('\n\n');
         walk(child, inPre);
@@ -363,7 +378,13 @@ function bodyWithImages(contentHtml, baseUrl) {
     }
   };
   walk(holder.body);
-  return out.join('')
+  return tidyBody(out.join(''));
+}
+
+// Final cleanup of walked text: the whole body, and each quote before its
+// lines get their `> ` prefix.
+function tidyBody(text) {
+  return text
     // Lines holding only zero-width characters (Webflow's empty paragraphs)
     // would otherwise survive as blank space.
     .replace(/^[ \t\u200B-\u200D\uFEFF]+$/gm, '')
@@ -782,20 +803,33 @@ function showPanel(id) {
 function renderReading(text) {
   const el = document.getElementById('reading-text');
   // Body is plain text carrying markers where structure sat: `![img](url)`
-  // images, `[text](url)` links, markdown-style `## ` headings. Escape the
-  // text runs; each marker becomes its element (lazy full-width image,
-  // clickable link, demoted heading — one size, sections never dwarf the
-  // article title). Newlines around headings are swallowed there: the
-  // container is whitespace-pre-wrap, so left-behind blank lines would stack
-  // on the heading's margins and open a visible gap.
+  // images, `[text](url)` links, markdown-style `## ` headings and `> `
+  // quotes. Escape the text runs; each marker becomes its element (lazy
+  // full-width image, clickable link, demoted heading — one size, sections
+  // never dwarf the article title). Newlines around headings are swallowed
+  // there: the container is whitespace-pre-wrap, so left-behind blank lines
+  // would stack on the heading's margins and open a visible gap. Quotes and
+  // section breaks are full-width inline-blocks instead, so the blank lines
+  // around them stay ordinary paragraph gaps.
   let html = '';
   let cursor = 0;
   const emitText = (chunk) => {
     html += escapeHtml(chunk)
+      // A run of `>` lines (escaped by now) is one quote; nested quotes
+      // flatten into it.
+      .replace(/^&gt;.*(?:\n&gt;.*)*/gm, (run) => {
+        const quote = run.replace(/^(?:&gt; ?)+/gm, '').replace(/^\n+|\n+$/g, '');
+        return quote ? `<blockquote class="inline-block w-full align-top italic pl-4" style="border-left:2px solid;border-left-color:color-mix(in srgb,currentColor 35%,transparent)">${quote}</blockquote>` : '';
+      })
       .replace(/\n*(#{1,6}) ([^\n]+)(?:\n+|$)/g, (_, hashes, title) => {
         const level = Math.min(6, hashes.length + 1);
         return `<h${level} class="text-primary/90 font-bold tracking-tight my-3" style="font-size:1.1em">${title}</h${level}>`;
       })
+      // A line of nothing but symbols is a section break ("* * *", "❄ ❄ ❄").
+      // Sites space them out with runs of &nbsp; that wrap onto a second line
+      // on a phone, so tighten and centre it.
+      .replace(/^[^\p{L}\p{N}\n]*[^\p{L}\p{N}\s][^\p{L}\p{N}\n]*$/gmu, (line) =>
+        `<span class="inline-block w-full text-center" style="word-spacing:0.5em">${line.replace(/\s+/g, ' ').trim()}</span>`)
       .replace(LINK_MARKER, (m, label, url) =>
         // label and url came out of the already-escaped chunk; escaping again
         // would double-encode (& -> &amp; -> &amp;amp;).
