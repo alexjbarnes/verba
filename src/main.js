@@ -958,14 +958,14 @@ document.getElementById('reading-menu').addEventListener('click', () => {
   if (readingItem) openLibActionSheet(readingItem);
 });
 
-// End-of-article actions rendered inside #reading-text, plus saved links:
-// opened in the system browser via the opener plugin (a raw href would try to
-// navigate the app webview itself).
+// End-of-article actions rendered inside #reading-text, plus tapped links:
+// a raw href would try to navigate the app webview itself, so links carry
+// data-link and open the link-action sheet (system browser vs add to Verba).
 document.getElementById('reading-text').addEventListener('click', async (e) => {
   const link = e.target.closest('[data-link]');
   if (link) {
     e.preventDefault();
-    invoke('plugin:opener|open_url', { url: link.dataset.link }).catch(err => showToast(err));
+    openLinkActionSheet(link.dataset.link);
     return;
   }
   const btn = e.target.closest('[data-reading-act]');
@@ -973,6 +973,51 @@ document.getElementById('reading-text').addEventListener('click', async (e) => {
   if (btn.dataset.readingAct === 'tags') openLibraryTagsSheet(readingItem.id);
   else if (btn.dataset.readingAct === 'archive') setLibraryArchived(readingItem.id, true);
   else if (btn.dataset.readingAct === 'delete') deleteLibraryItem(readingItem.id);
+});
+
+// ── Link action sheet (reader links) ──
+//
+// Tapping a highlighted URL in the reader opens this choice instead of going
+// straight to the browser: the two intents users actually have are "read this
+// later in Verba" and "just open it here". Add reuses importSharedText, the
+// same fetch + Readability + library_add path the Add-from-URL modal and the
+// share intent take; if the fetch fails there it saves the text as-is.
+
+const linkActionSheet = document.getElementById('link-action-sheet');
+const linkActionOverlay = document.getElementById('link-action-overlay');
+const linkActionList = document.getElementById('link-action-list');
+const linkActionUrlEl = document.getElementById('link-action-url');
+const LINK_ACTIONS = [
+  { action: 'open', icon: 'open_in_browser', label: 'Open in browser' },
+  { action: 'add', icon: 'link', label: 'Add to Verba' },
+];
+let linkActionUrlValue = '';
+
+function openLinkActionSheet(url) {
+  linkActionUrlValue = url;
+  document.getElementById('link-action-title').textContent = 'Link';
+  linkActionUrlEl.textContent = url;
+  document.getElementById('link-action-list').innerHTML = LINK_ACTIONS.map(a =>
+    `<button class="more-item w-full flex items-center gap-3 px-4 py-3 rounded-xl text-left cursor-pointer hover:bg-surface-container-highest text-on-surface" data-action="${a.action}">
+      <span class="material-symbols-outlined text-lg text-on-surface-variant">${a.icon}</span>
+      <span class="text-sm">${a.label}</span>
+    </button>`).join('');
+  linkActionSheet.classList.remove('hidden');
+}
+function closeLinkActionSheet() { linkActionSheet.classList.add('hidden'); }
+document.getElementById('link-action-overlay').addEventListener('click', closeLinkActionSheet);
+document.getElementById('link-action-list').addEventListener('click', async (e) => {
+  const btn = e.target.closest('.more-item');
+  if (!btn) return;
+  const action = btn.dataset.action;
+  closeLinkActionSheet();
+  const url = linkActionUrlValue;
+  if (action === 'open') {
+    invoke('plugin:opener|open_url', { url }).catch(err => showToast(err));
+  } else {
+    // Add saves in the background; the reader stays on the piece being read.
+    importSharedText(url, [], false);
+  }
 });
 
 // Selected Library tab ('articles' | 'archive'). The fetched items (and feed

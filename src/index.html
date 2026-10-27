@@ -528,6 +528,18 @@
     </div>
   </div>
 
+  <!-- Link actions (reader): a tapped highlighted URL asks whether to open
+       in the system browser or add the article to the library. -->
+  <div id="link-action-sheet" class="fixed inset-0 z-50 hidden">
+    <div id="link-action-overlay" class="absolute inset-0 bg-black/50"></div>
+    <div class="sheet-anim absolute bottom-0 left-0 right-0 bg-surface-container-high rounded-t-2xl shadow-xl border-t border-outline-variant/20 max-h-[70vh] flex flex-col" style="padding-bottom: max(1.25rem, env(safe-area-inset-bottom));">
+      <div class="w-10 h-1 bg-outline-variant/40 rounded-full mx-auto mt-3 mb-4 shrink-0"></div>
+      <p id="link-action-title" class="text-sm font-bold text-on-surface px-5 mb-2 shrink-0 truncate">Link</p>
+      <div id="link-action-url" class="px-5 mb-4 shrink-0 text-xs text-on-surface-variant break-all"></div>
+      <div id="link-action-list" class="overflow-y-auto px-3 pb-2"></div>
+    </div>
+  </div>
+
   <!-- Confirm dialog (replaces window.confirm which doesn't work in WKWebView) -->
 
   <div id="confirm-dialog" class="fixed inset-0 z-50 hidden items-center justify-center bg-black/50 backdrop-blur-sm">

@@ -153,4 +153,48 @@ assert.equal(
   stripCtx.stripImageMarkers('> Quote [a](https://x/a)\n>\n> > Nested\n\nBody'),
   'Quote a\n\nNested\n\nBody');
 
+// Tapping a reader link opens the link-action sheet (open in browser vs add
+// to Verba) instead of invoking the opener straight away; "Add" reuses the
+// shared import path.
+assert.ok(source.includes('openLinkActionSheet(link.dataset.link);'));
+assert.ok(source.includes('importSharedText(url, [], false);'));
+assert.ok(!source.includes("{ url: link.dataset.link }"));
+
+// The choice sheet: opening it holds the tapped URL and renders both actions;
+// picking one routes to the opener or to the shared import.
+const linkEls = {};
+const linkHandlers = {};
+const invoked = [];
+const imported = [];
+const linkActionCtx = vm.createContext({
+  document: { getElementById: id => linkEls[id] },
+  invoke: async (cmd, args) => { invoked.push([cmd, args]); return null; },
+  showToast: () => {},
+  importSharedText: async (text, tags, open) => { imported.push([text, tags, open]); },
+});
+for (const id of ['link-action-sheet', 'link-action-overlay', 'link-action-list', 'link-action-url', 'link-action-title']) {
+  linkEls[id] = { classList: { remove() {}, add() {} }, innerHTML: '', textContent: '', addEventListener: (t, h) => { linkHandlers[`${id}:${t}`] = h; } };
+}
+const linkSheetStart = source.indexOf("const linkActionSheet = document.getElementById('link-action-sheet');");
+const linkSheetEnd = source.indexOf('// Selected Library tab', linkSheetStart);
+vm.runInContext(source.slice(linkSheetStart, linkSheetEnd), linkActionCtx);
+assert.equal(typeof linkActionCtx.openLinkActionSheet, 'function');
+linkActionCtx.openLinkActionSheet('https://example.com/article');
+assert.ok(linkEls['link-action-list'].innerHTML.includes('Add to Verba'));
+assert.ok(linkEls['link-action-list'].innerHTML.includes('Open in browser'));
+assert.equal(linkEls['link-action-url'].textContent, 'https://example.com/article');
+
+const tap = action => linkHandlers['link-action-list:click']({
+  target: { closest: sel => sel === '.more-item' ? { dataset: { action } } : null },
+});
+await tap('add');
+assert.equal(imported.length, 1);
+assert.equal(imported[0][0], 'https://example.com/article');
+assert.equal(imported[0][1].length, 0);
+assert.equal(imported[0][2], false);
+await tap('open');
+assert.equal(invoked.length, 1);
+assert.equal(invoked[0][0], 'plugin:opener|open_url');
+assert.equal(invoked[0][1].url, 'https://example.com/article');
+
 console.log('Share import checks passed');
